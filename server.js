@@ -7,8 +7,27 @@ const app = express();
 const port = process.env.PORT || 5000;
 
 // อนุญาตให้หน้าเว็บจากโดเมนของคุณเรียกใช้ API ได้
+// กำหนด URL ที่อนุญาตให้เข้าถึง API ได้ (ลบช่องว่างส่วนเกินออก และปรับเป็นตัวเล็กเพื่อความชัวร์)
+const allowedOrigins = [
+  'https://salapi.company', 
+  'https://api.salapi.company',
+  'http://localhost:5173',
+  'http://localhost:5174'
+];
+
 app.use(cors({
-    origin: process.env.CORS_ORIGIN
+  origin: function (origin, callback) {
+    // อนุญาตให้ request ที่ไม่มี origin (เช่น Postman, การเรียกจาก Server-to-Server) ผ่านได้
+    if (!origin) return callback(null, true);
+    
+    // เช็คว่า origin ที่เรียกมา อยู่ใน List ที่เราอนุญาตหรือไม่
+    if (allowedOrigins.indexOf(origin) === -1) {
+      var msg = 'CORS Policy: ไม่อนุญาตให้โดเมนนี้เข้าถึง API';
+      return callback(new Error(msg), false);
+    }
+    return callback(null, true);
+  },
+  credentials: true // อนุญาตให้ส่ง Cookie หรือ Header ยืนยันตัวตนได้
 }));
 app.use(express.json());
 
