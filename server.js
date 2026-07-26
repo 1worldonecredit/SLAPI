@@ -113,6 +113,64 @@ app.get('/api/check-username/:username', async (req, res) => {
 });
 
 // ==========================================
+// API: สมัครสมาชิก (Register)
+// ==========================================
+app.post('/api/register', async (req, res) => {
+  const { username, password, referrer, country } = req.body;
+  
+  try {
+    const pool = await sql.connect(dbConfig);
+    
+    // 1. เช็กซ้ำอีกรอบเพื่อความชัวร์ว่าชื่อยังไม่มีคนใช้
+    const checkUser = await pool.request()
+      .input('username', sql.VarChar, username)
+      .query('SELECT username FROM Users WHERE username = @username');
+      
+    if (checkUser.recordset.length > 0) {
+      return res.status(400).json({ success: false, message: 'ชื่อผู้ใช้นี้มีคนใช้แล้ว' });
+    }
+
+    // 2. กำหนดค่าเริ่มต้นสำหรับสมาชิกใหม่
+    const currency_code = country === 'Laos' ? 'LAK' : 'THB';
+    const role_id = 4;  // สมมติให้ 4 คือ Role ของ User ทั่วไป
+    const level_id = 1; // 1 คือลูกค้าระดับเริ่มต้น (ลูกค้าใหม่)
+    
+    // 3. บันทึกข้อมูลลงตาราง Users 
+    const insertResult = await pool.request()
+      .input('username', sql.VarChar, username)
+      .input('password', sql.VarChar, password) 
+      .input('referrer', sql.VarChar, referrer || null)
+      .input('country', sql.VarChar, country)
+      .input('currency_code', sql.VarChar, currency_code)
+      .input('role_id', sql.Int, role_id)
+      .input('level_id', sql.Int, level_id)
+      .query(`
+        INSERT INTO Users (username, password_hash, referrer_username, country, currency_code, role_id, level_id, is_active, created_at, wallet_balance, total_orders)
+        OUTPUT INSERTED.user_id
+        VALUES (@username, @password, @referrer, @country, @currency_code, @role_id, @level_id, 1, GETDATE(), 0, 0)
+      `);
+      
+    // ดึง user_id ที่เพิ่งถูกสร้างขึ้นมา
+    const newUserId = insertResult.recordset[0].user_id;
+
+    // 4. สร้างกระเป๋าเงิน (Wallets) และข้อมูลชื่อพื้นฐานให้ User ใหม่ด้วย
+    await pool.request()
+      .input('user_id', sql.Int, newUserId)
+      .query(`
+        INSERT INTO UserName_Lastname (user_id, firstname, lastname) VALUES (@user_id, 'ผู้ใช้', 'ใหม่');
+        INSERT INTO Wallets (user_id, balance, points) VALUES (@user_id, 0, 0);
+      `);
+
+    res.json({ success: true, message: 'สมัครสมาชิกสำเร็จ' });
+
+  } catch (err) {
+    console.error('Register API Error:', err);
+    res.status(500).json({ success: false, message: 'ระบบขัดข้อง ไม่สามารถบันทึกข้อมูลได้' });
+  }
+});
+
+
+// ==========================================
 // 1. API สำหรับ Login (อัปเดตดึงข้อมูลครบถ้วน)
 // ==========================================
 app.post('/api/login', async (req, res) => {
