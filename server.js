@@ -60,7 +60,7 @@ app.get('/api/status', (req, res) => {
 
 
 // ==========================================
-// 1. API สำหรับ Login
+// 1. API สำหรับ Login (อัปเดตดึงข้อมูลครบถ้วน)
 // ==========================================
 app.post('/api/login', async (req, res) => {
   // รับข้อมูล username และ password ที่ Frontend ส่งมา
@@ -70,12 +70,13 @@ app.post('/api/login', async (req, res) => {
     // เชื่อมต่อฐานข้อมูล
     const pool = await sql.connect(dbConfig);
     
-    // ดึงข้อมูล User พร้อมกับ Role, Level และ ชื่อ-นามสกุล
+    // 🌟 ดึงข้อมูล User พร้อมกับ Role, Level, ชื่อ-นามสกุล, ประเทศ และ สกุลเงิน
     const userResult = await pool.request()
       .input('username', sql.VarChar, username)
       .query(`
         SELECT 
           u.user_id, u.username, u.password_hash, u.wallet_balance, u.total_orders, u.is_active,
+          u.country, u.currency_code,  -- 🌟 เพิ่ม 2 คอลัมน์นี้
           un.firstname, un.lastname,
           r.role_id, r.role_name,
           cl.level_id, cl.level_name
@@ -103,43 +104,38 @@ app.post('/api/login', async (req, res) => {
     // ==========================================
     let validPassword = false;
 
-    // เนื่องจากในฐานข้อมูลทดสอบของคุณ ช่อง password_hash บันทึกเป็นคำว่า "hashed_1234"
-    // เราเลยใช้การเทียบข้อความตรงๆ ไปก่อนครับ
     if (password === user.password_hash) {
       validPassword = true;
     } 
     
-    /* 
-      หมายเหตุ: อนาคตถ้าใช้รหัสผ่านที่เข้ารหัสด้วย bcrypt ให้ลบ if ด้านบนออกแล้วใช้โค้ดนี้แทน:
-      const bcrypt = require('bcrypt');
-      validPassword = await bcrypt.compare(password, user.password_hash);
-    */
-
     // ถ้ารหัสผ่านไม่ตรง
     if (!validPassword) {
       return res.status(401).json({ message: 'ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง' });
     }
 
-    // ถ้าผ่านหมด ส่งข้อมูลกลับไปให้ Frontend (ซ่อนรหัสผ่านไว้ ไม่ส่งกลับไป)
+    // 🌟 ส่งข้อมูลกลับไปให้ Frontend แบบจัดเต็ม (ชื่อ key ต้องตรงกับที่ Dashboard ใช้)
     res.json({
+      success: true, // 🌟 เพิ่ม success: true เผื่อให้ Frontend เช็กง่ายขึ้น
       message: 'เข้าสู่ระบบสำเร็จ',
       user: {
-        user_id: user.user_id,
+        id: user.user_id, // Frontend บางจุดใช้ id
+        user_id: user.user_id, // Frontend บางจุดใช้ user_id
         username: user.username,
         firstname: user.firstname || 'ผู้ใช้',
-        lastname: user.lastname || 'ทั่วไป',
-        role: user.role_name,
-        level: user.level_name,
+        lastname: user.lastname || '',
+        country: user.country || 'Thailand',           // 🌟 ส่งประเทศกลับไป
+        currency_code: user.currency_code || 'THB',    // 🌟 ส่งสกุลเงินกลับไป
+        role_id: user.role_id,
+        role_name: user.role_name || 'User',           // 🌟 ส่ง Role กลับไป
+        level_id: user.level_id,
+        level_name: user.level_name || 'ลูกค้าใหม่',       // 🌟 ส่ง Level กลับไป
         wallet: user.wallet_balance || 0.00,
-        point: 0 // ถ้ามีตาราง point ค่อยมาดึงใส่ทีหลัง
+        point: 0 
       }
     });
 
-} catch (err) {
-    // ยังคงให้ console.error พิมพ์ Error แบบเต็มเก็บไว้ใน Logs ของ Railway เพื่อให้เราเข้ามาดูได้
+  } catch (err) {
     console.error('Login API Error:', err);
-    
-    // ส่งข้อความแบบทั่วไปกลับไปที่หน้าเว็บ เพื่อไม่ให้ข้อมูล Database รั่วไหล
     res.status(500).json({ message: 'ระบบขัดข้อง ไม่สามารถเชื่อมต่อฐานข้อมูลได้ในขณะนี้' });
   }
 });
