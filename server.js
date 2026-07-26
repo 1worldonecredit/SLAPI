@@ -135,9 +135,54 @@ app.post('/api/login', async (req, res) => {
       }
     });
 
-  } catch (err) {
+} catch (err) {
+    // ยังคงให้ console.error พิมพ์ Error แบบเต็มเก็บไว้ใน Logs ของ Railway เพื่อให้เราเข้ามาดูได้
     console.error('Login API Error:', err);
-    res.status(500).json({ message: 'ระบบขัดข้อง ไม่สามารถเชื่อมต่อฐานข้อมูลได้' });
+    
+    // ส่งข้อความแบบทั่วไปกลับไปที่หน้าเว็บ เพื่อไม่ให้ข้อมูล Database รั่วไหล
+    res.status(500).json({ message: 'ระบบขัดข้อง ไม่สามารถเชื่อมต่อฐานข้อมูลได้ในขณะนี้' });
+  }
+});
+
+// ==========================================
+// API สำหรับ Register (อัปเดตรองรับประเทศและสกุลเงิน)
+// ==========================================
+app.post('/api/register', async (req, res) => {
+  // 🌟 รับค่า country เพิ่มเข้ามาจาก Frontend
+  const { username, password, referrer, country } = req.body;
+
+  try {
+    const pool = await sql.connect(dbConfig);
+    
+    // ตรวจสอบว่า Username ซ้ำไหม (โค้ดเดิมของคุณ)
+    // ... 
+
+    // 🌟 กำหนดสกุลเงินตามประเทศที่เลือก
+    let currencyCode = 'THB'; // ค่าเริ่มต้น
+    let selectedCountry = country || 'Thailand';
+
+    if (selectedCountry.toLowerCase() === 'laos') {
+      currencyCode = 'LAK';
+    }
+
+    // 🌟 บันทึกลงฐานข้อมูล (เพิ่ม country และ currency_code เข้าไปในคำสั่ง INSERT)
+    await pool.request()
+      .input('username', sql.VarChar, username)
+      .input('password_hash', sql.VarChar, password) // (แนะนำ: อนาคตควรแฮชรหัสผ่าน)
+      .input('referrer_username', sql.VarChar, referrer || null)
+      .input('country', sql.NVarChar, selectedCountry)
+      .input('currency_code', sql.NVarChar, currencyCode)
+      .query(`
+        INSERT INTO Users (username, password_hash, referrer_username, role_id, level_id, is_active, country, currency_code)
+        VALUES (@username, @password_hash, @referrer_username, 4, 1, 1, @country, @currency_code)
+      `);
+      // หมายเหตุ: role_id 4 = User ทั่วไป, level_id 1 = ระดับเริ่มต้น
+
+    res.status(201).json({ message: 'สมัครสมาชิกสำเร็จ' });
+
+  } catch (err) {
+    console.error('Register API Error:', err);
+    res.status(500).json({ message: 'ระบบขัดข้อง ไม่สามารถสมัครสมาชิกได้' });
   }
 });
 
