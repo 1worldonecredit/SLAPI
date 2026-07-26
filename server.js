@@ -60,6 +60,40 @@ app.get('/api/status', (req, res) => {
 
 
 // ==========================================
+// API: ตรวจสอบชื่อผู้แนะนำ (Check Referrer)
+// ==========================================
+app.get('/api/check-referrer/:username', async (req, res) => {
+  const username = req.params.username;
+
+  try {
+    const pool = await sql.connect(dbConfig);
+    
+    // ค้นหา username จากตาราง Users และดึงชื่อ-นามสกุลมาด้วย
+    const result = await pool.request()
+      .input('username', sql.VarChar, username)
+      .query(`
+        SELECT u.username, un.firstname, un.lastname
+        FROM Users u
+        LEFT JOIN UserName_Lastname un ON u.user_id = un.user_id
+        WHERE u.username = @username
+      `);
+
+    if (result.recordset.length > 0) {
+      const user = result.recordset[0];
+      const fullName = `${user.firstname || ''} ${user.lastname || ''}`.trim() || 'ผู้ใช้ทั่วไป';
+      
+      res.json({ exists: true, fullName: fullName });
+    } else {
+      res.json({ exists: false, message: 'ไม่พบผู้แนะนำ' });
+    }
+
+  } catch (err) {
+    console.error('Check Referrer API Error:', err);
+    res.status(500).json({ message: 'ระบบขัดข้อง' });
+  }
+});
+
+// ==========================================
 // 1. API สำหรับ Login (อัปเดตดึงข้อมูลครบถ้วน)
 // ==========================================
 app.post('/api/login', async (req, res) => {
