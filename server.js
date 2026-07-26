@@ -171,6 +171,102 @@ app.post('/api/register', async (req, res) => {
 
 
 // ==========================================
+// API 1: ดึงรายชื่อธนาคารทั้งหมด (จากตาราง Banks)
+// ==========================================
+app.get('/api/banks', async (req, res) => {
+  try {
+    const pool = await sql.connect(dbConfig);
+    const result = await pool.request().query('SELECT * FROM Banks WHERE is_active = 1');
+    res.json({ success: true, banks: result.recordset });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'ไม่สามารถดึงข้อมูลธนาคารได้' });
+  }
+});
+
+// ==========================================
+// API 2: ดึงบัญชีธนาคารของ User และเช็กข้อมูลชื่อ
+// ==========================================
+app.get('/api/user-profile-banks/:userId', async (req, res) => {
+  try {
+    const pool = await sql.connect(dbConfig);
+    const userId = req.params.userId;
+
+    // ดึงชื่อ นามสกุล
+    const nameResult = await pool.request()
+      .input('userId', sql.Int, userId)
+      .query('SELECT firstname, lastname FROM UserName_Lastname WHERE user_id = @userId');
+    
+    // ดึงบัญชีธนาคาร
+    const bankResult = await pool.request()
+      .input('userId', sql.Int, userId)
+      .query(`
+        SELECT ub.*, b.bank_name, b.logo_url 
+        FROM UserBanks ub 
+        JOIN Banks b ON ub.bank_id = b.bank_id 
+        WHERE ub.user_id = @userId
+      `);
+
+    res.json({ 
+      success: true, 
+      profile: nameResult.recordset[0] || null,
+      userBanks: bankResult.recordset 
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'ระบบขัดข้อง' });
+  }
+});
+
+// ==========================================
+// API 3: เพิ่มบัญชีธนาคาร พร้อมอัปเดตชื่อ-นามสกุล
+// ==========================================
+app.post('/api/add-user-bank', async (req, res) => {
+  const { userId, firstname, lastname, bankId, accountName, accountNumber, currencyCode } = req.body;
+  try {
+    const pool = await sql.connect(dbConfig);
+    
+    // 1. อัปเดตชื่อ-นามสกุลในระบบให้ตรงกับบัญชีธนาคาร
+    await pool.request()
+      .input('userId', sql.Int, userId)
+      .input('fname', sql.NVarChar, firstname)
+      .input('lname', sql.NVarChar, lastname)
+      .query('UPDATE UserName_Lastname SET firstname = @fname, lastname = @lname WHERE user_id = @userId');
+
+    // 2. บันทึกบัญชีธนาคาร
+    await pool.request()
+      .input('userId', sql.Int, userId)
+      .input('bankId', sql.Int, bankId)
+      .input('accountName', sql.NVarChar, accountName)
+      .input('accountNumber', sql.VarChar, accountNumber)
+      .input('currency', sql.VarChar, currencyCode)
+      .query(`
+        INSERT INTO UserBanks (user_id, bank_id, account_name, account_number, currency_code, is_primary)
+        VALUES (@userId, @bankId, @accountName, @accountNumber, @currency, 1)
+      `);
+
+    res.json({ success: true, message: 'เพิ่มบัญชีธนาคารสำเร็จ' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: 'ไม่สามารถเพิ่มบัญชีได้' });
+  }
+});
+
+// ==========================================
+// API 4: แจ้งฝากเงิน (จำลองการรับสลิปเป็น Base64 ไปก่อน)
+// ==========================================
+app.post('/api/deposit', async (req, res) => {
+  const { userId, userBankId, amount, slipBase64 } = req.body;
+  try {
+    // ในอนาคตคุณจะนำ slipBase64 ไปแปลงเป็นรูปแล้วเซฟลงโฟลเดอร์ หรืออัปโหลดขึ้น Cloud
+    // ตอนนี้ให้จำลองว่าสำเร็จและส่งข้อมูลกลับไปก่อน
+    console.log(`User ${userId} deposited ${amount} via bank ${userBankId}`);
+    
+    res.json({ success: true, message: 'แจ้งฝากเงินสำเร็จ รอผู้ดูแลระบบตรวจสอบ' });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'ทำรายการไม่สำเร็จ' });
+  }
+});
+
+// ==========================================
 // 1. API สำหรับ Login (อัปเดตดึงข้อมูลครบถ้วน)
 // ==========================================
 app.post('/api/login', async (req, res) => {
