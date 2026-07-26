@@ -186,6 +186,50 @@ app.post('/api/register', async (req, res) => {
   }
 });
 
+// ==========================================
+// API: ดึงข้อมูลหน้า Dashboard (Wallet & Transactions)
+// ==========================================
+app.get('/api/dashboard/:userId', async (req, res) => {
+  const userId = req.params.userId;
+  
+  try {
+    const pool = await sql.connect(dbConfig);
+    
+    // 1. ดึงข้อมูลกระเป๋าเงิน
+    const walletResult = await pool.request()
+      .input('user_id', sql.Int, userId)
+      .query('SELECT balance, points FROM Wallets WHERE user_id = @user_id');
+      
+    let wallet = walletResult.recordset[0];
+    
+    // ถ้าเพิ่งสมัครและยังไม่มีกระเป๋าเงิน ให้ส่งค่า 0 กลับไป
+    if (!wallet) {
+      wallet = { balance: 0.00, points: 0 };
+    }
+
+    // 2. ดึงรายการธุรกรรมล่าสุด 5 รายการ
+    const txResult = await pool.request()
+      .input('user_id', sql.Int, userId)
+      .query(`
+        SELECT TOP 5 transaction_id, transaction_type, title, amount, status, created_at 
+        FROM Transactions 
+        WHERE user_id = @user_id 
+        ORDER BY created_at DESC
+      `);
+      
+    const transactions = txResult.recordset;
+
+    res.json({
+      wallet: wallet,
+      recentTransactions: transactions
+    });
+
+  } catch (err) {
+    console.error('Dashboard API Error:', err);
+    res.status(500).json({ message: 'DB Error' });
+  }
+});
+
 app.listen(port, () => {
     console.log(`🚀 Server เปิดทำงานแล้วที่พอร์ต ${port}`);
 });
