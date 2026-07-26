@@ -60,36 +60,24 @@ app.get('/api/status', (req, res) => {
 
 
 // ==========================================
-// API: ตรวจสอบชื่อผู้แนะนำ (Check Referrer)
+// API: ตรวจสอบชื่อผู้ใช้ว่าว่างหรือไม่ (Check Username)
 // ==========================================
-app.get('/api/check-referrer/:username', async (req, res) => {
+app.get('/api/check-username/:username', async (req, res) => {
   const username = req.params.username;
-
   try {
     const pool = await sql.connect(dbConfig);
-    
-    // ค้นหา username จากตาราง Users และดึงชื่อ-นามสกุลมาด้วย
     const result = await pool.request()
       .input('username', sql.VarChar, username)
-      .query(`
-        SELECT u.username, un.firstname, un.lastname
-        FROM Users u
-        LEFT JOIN UserName_Lastname un ON u.user_id = un.user_id
-        WHERE u.username = @username
-      `);
+      .query('SELECT username FROM Users WHERE username = @username');
 
     if (result.recordset.length > 0) {
-      const user = result.recordset[0];
-      const fullName = `${user.firstname || ''} ${user.lastname || ''}`.trim() || 'ผู้ใช้ทั่วไป';
-      
-      res.json({ exists: true, fullName: fullName });
+      res.json({ available: false }); // มีคนใช้แล้ว
     } else {
-      res.json({ exists: false, message: 'ไม่พบผู้แนะนำ' });
+      res.json({ available: true });  // ว่าง ใช้ได้
     }
-
   } catch (err) {
-    console.error('Check Referrer API Error:', err);
-    res.status(500).json({ message: 'ระบบขัดข้อง' });
+    console.error('Check Username API Error:', err);
+    res.status(500).json({ error: 'Database error' });
   }
 });
 
