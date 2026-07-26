@@ -140,6 +140,40 @@ app.post('/api/login', async (req, res) => {
   }
 });
 
+
+// ==========================================
+// API: ดึงอัตราแลกเปลี่ยน (Exchange Rates)
+// ==========================================
+app.get('/api/exchange-rates', async (req, res) => {
+  try {
+    const pool = await sql.connect(dbConfig);
+    
+    // ดึงข้อมูลทั้งหมดจากตาราง ExchangeRates
+    const result = await pool.request()
+      .query('SELECT currency_pair, rate, last_updated FROM ExchangeRates');
+
+    // จัด Format ให้อ่านง่าย เช่น { "THB_LAK": 620.00, "USD_THB": 36.00 }
+    const rates = {};
+    let lastUpdated = null;
+    
+    result.recordset.forEach(row => {
+      rates[row.currency_pair] = row.rate;
+      if (!lastUpdated) lastUpdated = row.last_updated; // ดึงเวลาอัปเดตล่าสุดมาด้วย
+    });
+
+    res.json({ 
+      success: true, 
+      rates: rates,
+      last_updated: lastUpdated
+    });
+
+  } catch (err) {
+    console.error('Exchange Rate API Error:', err);
+    res.status(500).json({ success: false, message: 'ไม่สามารถดึงข้อมูลอัตราแลกเปลี่ยนได้' });
+  }
+});
+
+
 // ==========================================
 // API สำหรับ Register (อัปเดตรองรับประเทศและสกุลเงิน)
 // ==========================================
