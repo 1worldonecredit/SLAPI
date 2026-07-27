@@ -533,7 +533,7 @@ app.get('/api/admin/pending-deposits', async (req, res) => {
     const result = await pool.request().query(`
       SELECT 
         t.transaction_id, t.amount, t.slip_image, t.created_at, t.status,
-        u.firstname, u.lastname, u.username,
+        u.username,
         b.bank_name, b.account_number
       FROM Transactions t
       LEFT JOIN Users u ON t.user_id = u.user_id
