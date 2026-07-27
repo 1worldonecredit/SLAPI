@@ -524,6 +524,93 @@ app.post('/api/deposit', async (req, res) => {
   }
 });
 
+// ==========================================
+// API: (Admin) ดึงรายการฝากเงินที่รอตรวจสอบทั้งหมด
+// ==========================================
+app.get('/api/admin/pending-deposits', async (req, res) => {
+  try {
+    const pool = await poolPromise;
+    const result = await pool.request().query(`
+      SELECT 
+        t.transaction_id, t.amount, t.slip_image, t.created_at, t.status,
+        u.firstname, u.lastname, u.username,
+        b.bank_name, b.account_number
+      FROM Transactions t
+      LEFT JOIN Users u ON t.user_id = u.user_id
+      LEFT JOIN Banks b ON t.system_bank_id = b.bank_id
+      WHERE t.transaction_type = 'Deposit' AND t.status = 'Pending'
+      ORDER BY t.created_at ASC
+    `);
+    res.json({ success: true, transactions: result.recordset });
+  } catch (error) {
+    console.error('Fetch Pending Deposits Error:', error);
+    res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการดึงข้อมูล' });
+  }
+});
+
+// ==========================================
+// API: (Admin) จัดการอนุมัติ หรือ ปฏิเสธ รายการฝากเงิน
+// ==========================================
+app.post('/api/admin/manage-deposit', async (req, res) => {
+  const { transactionId, action } = req.body; // action ส่งมาเป็น 'approve' หรือ 'reject'
+
+  if (!transactionId || !action) {
+    return res.status(400).json({ success: false, message: 'ข้อมูลไม่ครบถ้วน' });
+  }
+
+  try {
+    const pool = await poolPromise;
+    
+    // เช็คก่อนว่ารายการนี้ยังมีอยู่และรอตรวจสอบจริงไหม
+    const txReq = await pool.request()
+      .input('tx_id', sql.Int, transactionId)
+      .query("SELECT * FROM Transactions WHERE transaction_id = @tx_id AND status = 'Pending'");
+
+    if (txReq.recordset.length === 0) {
+      return res.status(404).json({ success: false, message: 'ไม่พบรายการ หรือรายการนี้ถูกจัดการไปแล้ว' });
+    }
+
+    const tx = txReq.recordset[0];
+
+    if (action === 'approve') {
+      // 🌟 ถ้า "อนุมัติ" ต้องใช้ Transaction ล็อคการทำงาน 2 อย่าง (เปลี่ยนสถานะ + เติมเงิน)
+      const transaction = new sql.Transaction(pool);
+      await transaction.begin();
+
+      try {
+        // 1. เปลี่ยนสถานะเป็น Completed
+        await new sql.Request(transaction)
+          .input('tx_id', sql.Int, transactionId)
+          .query("UPDATE Transactions SET status = 'Completed', updated_at = GETDATE() WHERE transaction_id = @tx_id");
+
+        // 2. เติมเงินเข้ากระเป๋า
+        await new sql.Request(transaction)
+          .input('user_id', sql.Int, tx.user_id)
+          .input('amount', sql.Decimal(18,2), tx.amount)
+          .query("UPDATE Wallets SET balance = balance + @amount, updated_at = GETDATE() WHERE user_id = @user_id");
+
+        await transaction.commit();
+        res.json({ success: true, message: 'อนุมัติยอดเงินเข้ากระเป๋าลูกค้าสำเร็จ!' });
+      } catch (err) {
+        await transaction.rollback();
+        throw err;
+      }
+
+    } else if (action === 'reject') {
+      // 🌟 ถ้า "ปฏิเสธ" (สลิปปลอม/ยอดไม่เข้า) แค่เปลี่ยนสถานะเป็น Rejected
+      await pool.request()
+        .input('tx_id', sql.Int, transactionId)
+        .query("UPDATE Transactions SET status = 'Rejected', updated_at = GETDATE() WHERE transaction_id = @tx_id");
+      
+      res.json({ success: true, message: 'ปฏิเสธรายการสำเร็จ (ลูกค้าจะไม่ได้รับเงิน)' });
+    }
+
+  } catch (error) {
+    console.error('Manage Deposit Error:', error);
+    res.status(500).json({ success: false, message: 'ระบบเซิร์ฟเวอร์ขัดข้อง' });
+  }
+});
+
 app.listen(port, () => {
     console.log(`🚀 Server เปิดทำงานแล้วที่พอร์ต ${port}`);
 });
