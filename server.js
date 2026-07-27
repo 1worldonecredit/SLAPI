@@ -635,6 +635,53 @@ app.get('/api/admin/customer-banks', async (req, res) => {
   }
 });
 
+// ==========================================
+// API: (Admin) ดึงรายการบัญชีลูกค้าที่ "รอตรวจสอบ"
+// ==========================================
+app.get('/api/admin/pending-customer-banks', async (req, res) => {
+  try {
+    const pool = await poolPromise;
+    const result = await pool.request().query(`
+      SELECT 
+        ub.user_bank_id, ub.account_name, ub.account_number, ub.created_at, ub.currency_code, ub.status,
+        u.username,
+        b.bank_name
+      FROM UserBanks ub
+      LEFT JOIN Users u ON ub.user_id = u.user_id
+      LEFT JOIN Banks b ON ub.bank_id = b.bank_id
+      WHERE ub.status = 'Pending' OR ub.status IS NULL
+      ORDER BY ub.created_at ASC
+    `);
+    res.json({ success: true, banks: result.recordset });
+  } catch (error) {
+    console.error('Fetch Pending Banks Error:', error);
+    res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการดึงข้อมูลบัญชี' });
+  }
+});
+
+// ==========================================
+// API: (Admin) อนุมัติ หรือ ปฏิเสธ บัญชีลูกค้า
+// ==========================================
+app.post('/api/admin/verify-customer-bank', async (req, res) => {
+  const { userBankId, action } = req.body; // action คือ 'Approved' หรือ 'Rejected'
+
+  if (!userBankId || !action) {
+    return res.status(400).json({ success: false, message: 'ข้อมูลไม่ครบถ้วน' });
+  }
+
+  try {
+    const pool = await poolPromise;
+    await pool.request()
+      .input('id', sql.Int, userBankId)
+      .input('status', sql.VarChar, action)
+      .query("UPDATE UserBanks SET status = @status WHERE user_bank_id = @id");
+      
+    res.json({ success: true, message: `อัปเดตสถานะบัญชีเป็น ${action} เรียบร้อยแล้ว` });
+  } catch (error) {
+    console.error('Verify Bank Error:', error);
+    res.status(500).json({ success: false, message: 'ระบบเซิร์ฟเวอร์ขัดข้อง' });
+  }
+});
 
 app.listen(port, () => {
     console.log(`🚀 Server เปิดทำงานแล้วที่พอร์ต ${port}`);
