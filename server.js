@@ -29,7 +29,9 @@ app.use(cors({
   },
   credentials: true // อนุญาตให้ส่ง Cookie หรือ Header ยืนยันตัวตนได้
 }));
-app.use(express.json());
+// ขยายขีดจำกัดให้รองรับรูปภาพสลิปที่แปลงเป็น Base64 (ตั้งไว้ที่ 50MB)
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 // ตั้งค่าการเชื่อมต่อฐานข้อมูล
 const dbConfig = {
