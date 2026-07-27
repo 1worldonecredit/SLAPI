@@ -467,6 +467,61 @@ app.get('/api/dashboard/:userId', async (req, res) => {
   }
 });
 
+
+// ==========================================
+// API: แจ้งฝากเงิน (Deposit)
+// ==========================================
+app.post('/api/deposit', async (req, res) => {
+  const { userId, systemBankId, amount, slipBase64 } = req.body;
+
+  // ตรวจสอบว่าส่งข้อมูลมาครบหรือไม่
+  if (!userId || !systemBankId || !amount || !slipBase64) {
+    return res.status(400).json({ success: false, message: 'กรุณากรอกข้อมูลให้ครบถ้วนและแนบสลิป' });
+  }
+
+  try {
+    const pool = await poolPromise; // หรือใช้ตัวแปรการเชื่อมต่อ DB ที่คุณใช้อยู่
+
+    // 1. ดึงชื่อธนาคารระบบ เพื่อเอามาตั้งชื่อรายการให้สวยงาม (เช่น "แจ้งฝากเงินเข้า KBANK")
+    const bankReq = await pool.request()
+      .input('bank_id', sql.Int, systemBankId)
+      .query('SELECT bank_name, bank_code FROM Banks WHERE bank_id = @bank_id');
+      
+    let bankInfo = 'บัญชีระบบ';
+    if (bankReq.recordset.length > 0) {
+      bankInfo = bankReq.recordset[0].bank_code;
+    }
+
+    const title = `แจ้งฝากเงินเข้า ${bankInfo}`;
+
+    // 2. บันทึกข้อมูลลงตาราง Transactions พร้อมตั้งสถานะเป็น 'Pending' (รอตรวจสอบ)
+    // 💡 สังเกต: title และ slip_image ใช้ sql.NVarChar เพื่อรองรับภาษาไทยและข้อมูล Base64 ที่ยาวมาก
+    await pool.request()
+      .input('user_id', sql.Int, userId)
+      .input('title', sql.NVarChar, title)
+      .input('amount', sql.Decimal(18,2), amount)
+      .input('transaction_type', sql.VarChar, 'Deposit') // กำหนดประเภทเป็น Deposit
+      .input('status', sql.VarChar, 'Pending')           // 🌟 ตั้งสถานะเริ่มต้นเป็น Pending
+      .input('system_bank_id', sql.Int, systemBankId)
+      .input('slip_image', sql.NVarChar, slipBase64) 
+      .query(`
+        INSERT INTO Transactions 
+        (user_id, title, amount, transaction_type, status, system_bank_id, slip_image, created_at)
+        VALUES 
+        (@user_id, @title, @amount, @transaction_type, @status, @system_bank_id, @slip_image, GETDATE())
+      `);
+
+    res.json({ 
+      success: true, 
+      message: 'แจ้งฝากเงินสำเร็จ! ระบบกำลังตรวจสอบรายการของคุณ (รอ 1-3 นาที)' 
+    });
+
+  } catch (error) {
+    console.error('Deposit Error:', error);
+    res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการบันทึกข้อมูลที่เซิร์ฟเวอร์' });
+  }
+});
+
 app.listen(port, () => {
     console.log(`🚀 Server เปิดทำงานแล้วที่พอร์ต ${port}`);
 });
