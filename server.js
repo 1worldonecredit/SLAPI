@@ -611,6 +611,31 @@ app.post('/api/admin/manage-deposit', async (req, res) => {
   }
 });
 
+// ==========================================
+// API: (Admin) ดึงข้อมูลบัญชีธนาคารของลูกค้าทั้งหมด
+// ==========================================
+app.get('/api/admin/customer-banks', async (req, res) => {
+  try {
+    const pool = await poolPromise;
+    // ดึงข้อมูลบัญชี พร้อม Join เอาชื่อ Username และชื่อธนาคารมาแสดงด้วย
+    const result = await pool.request().query(`
+      SELECT 
+        ub.user_bank_id, ub.account_name, ub.account_number, ub.is_primary, ub.created_at, ub.currency_code,
+        u.username,
+        b.bank_name
+      FROM UserBanks ub
+      LEFT JOIN Users u ON ub.user_id = u.user_id
+      LEFT JOIN Banks b ON ub.bank_id = b.bank_id
+      ORDER BY ub.created_at DESC
+    `);
+    res.json({ success: true, banks: result.recordset });
+  } catch (error) {
+    console.error('Fetch Customer Banks Error:', error);
+    res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการดึงข้อมูลบัญชี' });
+  }
+});
+
+
 app.listen(port, () => {
     console.log(`🚀 Server เปิดทำงานแล้วที่พอร์ต ${port}`);
 });
