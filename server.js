@@ -637,34 +637,8 @@ app.post('/api/admin/verify-customer-bank', async (req, res) => {
     res.status(500).json({ success: false, message: 'ระบบเซิร์ฟเวอร์ขัดข้อง' });
   }
 });
-
 // ==========================================
-// API: (Admin) อนุมัติ หรือ ปฏิเสธ บัญชีลูกค้า
-// ==========================================
-app.post('/api/admin/verify-customer-bank', async (req, res) => {
-  const { userBankId, action } = req.body; // action คือ 'Approved' หรือ 'Rejected'
-
-  if (!userBankId || !action) {
-    return res.status(400).json({ success: false, message: 'ข้อมูลไม่ครบถ้วน' });
-  }
-
-  try {
-    const pool = await poolPromise;
-    await pool.request()
-      .input('id', sql.Int, userBankId)
-      .input('status', sql.VarChar, action)
-      .query("UPDATE UserBanks SET status = @status WHERE user_bank_id = @id");
-      
-    res.json({ success: true, message: `อัปเดตสถานะบัญชีเป็น ${action} เรียบร้อยแล้ว` });
-  } catch (error) {
-    console.error('Verify Bank Error:', error);
-    res.status(500).json({ success: false, message: 'ระบบเซิร์ฟเวอร์ขัดข้อง' });
-  }
-});
-
-
-// ==========================================
-// API 1: (Admin) ดึงรายการฝากเงินที่รอตรวจสอบทั้งหมด
+// API: (Admin) ดึงรายการฝากเงินที่รอตรวจสอบทั้งหมด
 // ==========================================
 app.get('/api/admin/pending-deposits', async (req, res) => {
   try {
@@ -688,7 +662,7 @@ app.get('/api/admin/pending-deposits', async (req, res) => {
 });
 
 // ==========================================
-// API 2: (Admin) จัดการอนุมัติ หรือ ปฏิเสธ รายการฝากเงิน
+// API: (Admin) จัดการอนุมัติ หรือ ปฏิเสธ รายการฝากเงิน
 // ==========================================
 app.post('/api/admin/manage-deposit', async (req, res) => {
   const { transactionId, action } = req.body; 
@@ -745,7 +719,7 @@ app.post('/api/admin/manage-deposit', async (req, res) => {
 });
 
 // ==========================================
-// API 3: (Admin) ดึงข้อมูลบัญชีธนาคารของลูกค้าทั้งหมด
+// API: (Admin) ดึงข้อมูลบัญชีธนาคารของลูกค้าทั้งหมด
 // ==========================================
 app.get('/api/admin/customer-banks', async (req, res) => {
   try {
@@ -769,7 +743,7 @@ app.get('/api/admin/customer-banks', async (req, res) => {
 });
 
 // ==========================================
-// API 4: (Admin) จัดการอนุมัติ หรือ ปฏิเสธ บัญชีธนาคารลูกค้า
+// API: (Admin) จัดการอนุมัติ หรือ ปฏิเสธ บัญชีธนาคารลูกค้า
 // ==========================================
 app.post('/api/admin/verify-customer-bank', async (req, res) => {
   const { userBankId, action } = req.body; 
