@@ -119,6 +119,56 @@ app.post('/api/menus', async (req, res) => {
     }
 });
 
+// 3. แก้ไขเมนู (PUT)
+app.put('/api/menus/:id', async (req, res) => {
+    const { id } = req.params;
+    const { title, path, icon, component, parentId, showNotification } = req.body;
+    
+    try {
+        const pool = await sql.connect(config);
+        await pool.request()
+            .input('id', sql.Int, id)
+            .input('title', sql.NVarChar, title)
+            .input('path', sql.VarChar, path || null)
+            .input('icon', sql.VarChar, icon || null)
+            .input('component', sql.VarChar, component || null)
+            .input('parent_id', sql.Int, parentId || null)
+            .input('show_notification', sql.Bit, showNotification === false ? 0 : 1)
+            .query(`
+                UPDATE System_Menus 
+                SET title = @title, path = @path, icon = @icon, component = @component, 
+                    parent_id = @parent_id, show_notification = @show_notification
+                WHERE menu_id = @id
+            `);
+            
+        res.json({ message: 'อัปเดตเมนูสำเร็จ' });
+    } catch (err) {
+        console.error('Error updating menu:', err);
+        res.status(500).send('Server error');
+    }
+});
+
+// 4. ลบเมนู (DELETE)
+app.delete('/api/menus/:id', async (req, res) => {
+    const { id } = req.params;
+    try {
+        const pool = await sql.connect(config);
+        // 🌟 ทริค: ต้องลบเมนูลูกที่ผูกอยู่กับเมนูนี้ทิ้งก่อน แล้วค่อยลบเมนูแม่ (ป้องกัน Error Foreign Key)
+        await pool.request()
+            .input('id', sql.Int, id)
+            .query(`
+                DELETE FROM System_Menus WHERE parent_id = @id;
+                DELETE FROM System_Menus WHERE menu_id = @id;
+            `);
+            
+        res.json({ message: 'ลบเมนูสำเร็จ' });
+    } catch (err) {
+        console.error('Error deleting menu:', err);
+        res.status(500).send('Server error');
+    }
+});
+
+
 // ==========================================
 // API 1: ตรวจสอบผู้แนะนำ (Check Referrer)
 // ==========================================
