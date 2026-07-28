@@ -11,6 +11,7 @@ const port = process.env.PORT || 5000;
 const allowedOrigins = [
   'https://salapi.company', 
   'https://api.salapi.company',
+  'https://epm.salapi.company',
   'http://localhost:5173',
   'http://localhost:5174'
 ];
