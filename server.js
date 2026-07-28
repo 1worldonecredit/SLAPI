@@ -62,6 +62,64 @@ app.get('/api/status', (req, res) => {
 
 
 // ==========================================
+// 🌟 API สำหรับระบบเมนูอัจฉริยะ (Dynamic Menu)
+// ==========================================
+
+// 1. ดึงข้อมูลเมนูทั้งหมด (GET) - ส่งไปให้ React วาดเมนูซ้ายมือ
+app.get('/api/menus', async (req, res) => {
+    try {
+        const pool = await sql.connect(config);
+        const result = await pool.request().query(`
+            SELECT 
+                menu_id AS id, 
+                title, 
+                path, 
+                icon, 
+                component, 
+                parent_id AS parentId, 
+                show_notification AS showNotification
+            FROM System_Menus
+            ORDER BY parent_id, sort_order, menu_id
+        `);
+        
+        res.json(result.recordset);
+    } catch (err) {
+        console.error('Error fetching menus:', err);
+        res.status(500).send('Server error');
+    }
+});
+
+// 2. เพิ่มเมนูใหม่ลง Database (POST)
+app.post('/api/menus', async (req, res) => {
+    const { title, path, icon, component, parentId, showNotification } = req.body;
+    
+    try {
+        const pool = await sql.connect(config);
+        const result = await pool.request()
+            .input('title', sql.NVarChar, title)
+            .input('path', sql.VarChar, path || null)
+            .input('icon', sql.VarChar, icon || null)
+            .input('component', sql.VarChar, component || null)
+            .input('parent_id', sql.Int, parentId || null)
+            .input('show_notification', sql.Bit, showNotification === false ? 0 : 1)
+            .query(`
+                INSERT INTO System_Menus (title, path, icon, component, parent_id, show_notification)
+                OUTPUT INSERTED.menu_id AS id
+                VALUES (@title, @path, @icon, @component, @parent_id, @show_notification)
+            `);
+            
+        // ส่ง ID ที่เพิ่งถูกสร้างกลับไปให้ React
+        res.status(201).json({ 
+            message: 'บันทึกเมนูสำเร็จ', 
+            id: result.recordset[0].id 
+        });
+    } catch (err) {
+        console.error('Error saving menu:', err);
+        res.status(500).send('Server error');
+    }
+});
+
+// ==========================================
 // API 1: ตรวจสอบผู้แนะนำ (Check Referrer)
 // ==========================================
 app.get('/api/check-referrer/:username', async (req, res) => {
