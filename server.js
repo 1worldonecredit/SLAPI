@@ -999,7 +999,7 @@ app.post('/api/deposit', async (req, res) => {
             .input('account_number', sql.VarChar, accountNumber)
             .input('amount', sql.Decimal(18, 2), amount)
             .input('currency_code', sql.VarChar, currencyCode || 'THB')
-            .input('slip_image', sql.NVarChar, slipBase64)
+            .input('slip_image', sql.NVarChar(sql.MAX), slipBase64)
             .input('status', sql.VarChar, 'Pending')
             .input('deposit_datetime', sql.DateTime, depositDatetime) // 🌟 บันทึกเวลาที่โอนจริงตามสลิป
             .query(`
