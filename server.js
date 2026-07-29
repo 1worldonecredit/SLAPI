@@ -992,12 +992,11 @@ app.post('/api/deposit-new', async (req, res) => {
                 (@user_id, @customer_name, @bank_name, @account_number, @amount, @currency_code, @slip_image, @status, @deposit_datetime, GETDATE())
             `);
 
-        // ข้อความจะเปลี่ยนไป เพื่อให้รู้ว่าเข้าโค้ดตัวใหม่แล้ว
         res.status(201).json({ success: true, message: 'บันทึกข้อมูลลงตารางสำเร็จ 100% ครับ!' });
         
     } catch (error) {
         console.error(error);
-        res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาด Database (เช็กการตั้งค่าใน Railway)' });
+        res.status(500).json({ success: false, message: 'ฐานข้อมูลขัดข้อง: ' + error.message });
     }
 });
 
