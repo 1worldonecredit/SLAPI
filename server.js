@@ -1006,6 +1006,37 @@ app.post('/api/deposit-submit', async (req, res) => {
 });
 
 // ==========================================
+// 🌟 1. API: ดึงข้อมูลสัตว์และตัวเลขทั้งหมด (GET)
+// ==========================================
+app.get('/api/admin/animal-numbers', async (req, res) => {
+    try {
+        // 🌟 ทริค: ลองเชื่อมต่อ DB ดูก่อน ถ้ามีการเชื่อมต่อค้างอยู่แล้วก็ให้ข้ามไปใช้งานได้เลย ไม่ต้อง Error
+        try { 
+            await sql.connect(dbConfig); 
+        } catch (err) { 
+            /* ปล่อยผ่านกรณีที่มัน Connected อยู่แล้ว */ 
+        }
+
+        const request = new sql.Request();
+        const result = await request.query(`
+            SELECT * FROM Master_Animal_Numbers 
+            ORDER BY created_at DESC
+        `);
+        
+        // ส่งข้อมูล Array กลับไปให้หน้าเว็บ
+        res.status(200).json(result.recordset);
+
+    } catch (error) {
+        console.error('Error fetching animal numbers:', error);
+        res.status(500).json({ 
+            success: false, 
+            message: 'เกิดข้อผิดพลาดในการดึงข้อมูลจาก Database', 
+            error: error.message 
+        });
+    }
+});
+
+// ==========================================
 // 🌟 API: เพิ่มข้อมูลสัตว์และตัวเลขใหม่ (POST)
 // ==========================================
 app.post('/api/admin/animal-numbers', async (req, res) => {
