@@ -966,7 +966,54 @@ app.put('/api/admin/user-banks/:id/status', async (req, res) => {
     }
 });
 
+// ==========================================
+// API: สำหรับลูกค้าแจ้งฝากเงิน (บันทึกลงตาราง Transactions_Deposit)
+// ==========================================
+app.post('/api/deposit', async (req, res) => {
+    const { 
+        userId, 
+        customerName, 
+        bankName, 
+        accountNumber, 
+        currencyCode, 
+        amount, 
+        slipBase64 
+    } = req.body;
 
+    try {
+        const pool = await sql.connect(dbConfig); // อย่าลืมใช้ dbConfig ที่ตั้งค่าไว้นะครับ
+        
+        // บันทึกข้อมูลลง Database
+        await pool.request()
+            .input('user_id', sql.Int, userId)
+            .input('customer_name', sql.NVarChar, customerName)
+            .input('bank_name', sql.NVarChar, bankName)
+            .input('account_number', sql.VarChar, accountNumber)
+            .input('amount', sql.Decimal(18, 2), amount)
+            .input('currency_code', sql.VarChar, currencyCode || 'THB')
+            .input('slip_image', sql.NVarChar, slipBase64) // 🌟 บันทึกภาพสลิปที่แปลงเป็น Base64
+            .input('status', sql.VarChar, 'Pending')       // สถานะเริ่มต้นคือรอตรวจสอบ
+            .query(`
+                INSERT INTO Transactions_Deposit (
+                    user_id, customer_name, bank_name, account_number, amount, currency_code, slip_image, status, created_at
+                ) VALUES (
+                    @user_id, @customer_name, @bank_name, @account_number, @amount, @currency_code, @slip_image, @status, GETDATE()
+                )
+            `);
+
+        res.status(201).json({ 
+            success: true, 
+            message: 'ส่งคำขอฝากเงินสำเร็จ กรุณารอเจ้าหน้าที่ตรวจสอบ' 
+        });
+        
+    } catch (error) {
+        console.error('Error saving deposit request:', error);
+        res.status(500).json({ 
+            success: false, 
+            message: 'เกิดข้อผิดพลาดในการบันทึกข้อมูลฝากเงิน' 
+        });
+    }
+});
 
 app.listen(port, () => {
     console.log(`🚀 Server เปิดทำงานแล้วที่พอร์ต ${port}`);
