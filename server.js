@@ -966,31 +966,34 @@ app.put('/api/admin/user-banks/:id/status', async (req, res) => {
     }
 });
 
-// ==========================================
-// API: สำหรับลูกค้าแจ้งฝากเงิน (เข้าตาราง Transactions ของจริง)
-// ==========================================
 app.post('/api/deposit', async (req, res) => {
-    const { userId, amount, slipBase64, depositDate, depositTime, currencyCode } = req.body;
+    // รับข้อมูลทุกอย่างที่ลูกค้ากรอกมาจากหน้าเว็บ
+    const { userId, customerName, bankName, accountNumber, currencyCode, amount, depositDate, depositTime, slipBase64 } = req.body;
 
     try {
         const pool = await sql.connect(dbConfig);
+        const depositDatetime = `${depositDate} ${depositTime}`; // รวมวันที่และเวลา
         
-        // เอาวันที่และเวลาที่ลูกค้ากรอก มาต่อท้ายชื่อรายการ จะได้ดูง่ายๆ ครับ
-        const titleText = `แจ้งฝากเงิน ${currencyCode} (${depositDate} เวลา ${depositTime})`;
-
+        // บันทึกลงตาราง Transactions_Deposit ที่ถูกต้อง
         await pool.request()
             .input('user_id', sql.Int, userId)
-            .input('transaction_type', sql.VarChar, 'Deposit')
-            .input('title', sql.NVarChar, titleText)
+            .input('customer_name', sql.NVarChar, customerName)
+            .input('bank_name', sql.NVarChar, bankName)
+            .input('account_number', sql.VarChar, accountNumber)
             .input('amount', sql.Decimal(18, 2), amount)
-            .input('status', sql.VarChar, 'Pending')
+            .input('currency_code', sql.VarChar, currencyCode)
             .input('slip_image', sql.NVarChar(sql.MAX), slipBase64)
+            .input('status', sql.VarChar, 'Pending')
+            .input('deposit_datetime', sql.DateTime, depositDatetime)
             .query(`
-                INSERT INTO Transactions (user_id, transaction_type, title, amount, status, slip_image, created_at)
-                VALUES (@user_id, @transaction_type, @title, @amount, @status, @slip_image, GETDATE())
+                INSERT INTO Transactions_Deposit 
+                (user_id, customer_name, bank_name, account_number, amount, currency_code, slip_image, status, deposit_datetime, created_at)
+                VALUES 
+                (@user_id, @customer_name, @bank_name, @account_number, @amount, @currency_code, @slip_image, @status, @deposit_datetime, GETDATE())
             `);
 
-        res.status(201).json({ success: true, message: 'ส่งคำขอฝากเงินสำเร็จ รอตรวจสอบ' });
+        // ตอบกลับเมื่อบันทึกสำเร็จ
+        res.status(201).json({ success: true, message: 'แจ้งฝากเงินสำเร็จ รอผู้ดูแลระบบตรวจสอบ' });
         
     } catch (error) {
         console.error(error);
