@@ -967,31 +967,18 @@ app.put('/api/admin/user-banks/:id/status', async (req, res) => {
 });
 
 // ==========================================
-// API: สำหรับลูกค้าแจ้งฝากเงิน (บันทึกลงตาราง Transactions_Deposit)
-// ==========================================
-// ==========================================
 // API: สำหรับลูกค้าแจ้งฝากเงิน
 // ==========================================
 app.post('/api/deposit', async (req, res) => {
     const { 
-        userId, 
-        customerName, 
-        bankName, 
-        accountNumber, 
-        currencyCode, 
-        amount, 
-        depositDate,   // 🌟 วันที่โอน
-        depositTime,   // 🌟 เวลาที่โอน (รวมวินาที)
-        slipBase64 
+        userId, customerName, bankName, accountNumber, currencyCode, 
+        amount, depositDate, depositTime, slipBase64 
     } = req.body;
 
     try {
         const pool = await sql.connect(dbConfig);
-        
-        // นำวันที่และเวลามาต่อกันเพื่อเป็น DATETIME
         const depositDatetime = `${depositDate} ${depositTime}`;
-
-        // บันทึกข้อมูลลง Database
+        
         await pool.request()
             .input('user_id', sql.Int, userId)
             .input('customer_name', sql.NVarChar, customerName)
@@ -999,9 +986,9 @@ app.post('/api/deposit', async (req, res) => {
             .input('account_number', sql.VarChar, accountNumber)
             .input('amount', sql.Decimal(18, 2), amount)
             .input('currency_code', sql.VarChar, currencyCode || 'THB')
-            .input('slip_image', sql.NVarChar(sql.MAX), slipBase64)
+            .input('slip_image', sql.NVarChar(sql.MAX), slipBase64) 
             .input('status', sql.VarChar, 'Pending')
-            .input('deposit_datetime', sql.DateTime, depositDatetime) // 🌟 บันทึกเวลาที่โอนจริงตามสลิป
+            .input('deposit_datetime', sql.DateTime, depositDatetime)
             .query(`
                 INSERT INTO Transactions_Deposit (
                     user_id, customer_name, bank_name, account_number, amount, currency_code, slip_image, status, deposit_datetime, created_at
@@ -1010,17 +997,10 @@ app.post('/api/deposit', async (req, res) => {
                 )
             `);
 
-        res.status(201).json({ 
-            success: true, 
-            message: 'ส่งคำขอฝากเงินสำเร็จ กรุณารอเจ้าหน้าที่ตรวจสอบ' 
-        });
+        res.status(201).json({ success: true, message: 'ส่งคำขอฝากเงินสำเร็จ กรุณารอเจ้าหน้าที่ตรวจสอบ' });
         
     } catch (error) {
-        console.error('Error saving deposit request:', error);
-        res.status(500).json({ 
-            success: false, 
-            message: 'เกิดข้อผิดพลาดในการบันทึกข้อมูลฝากเงิน' 
-        });
+        res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการบันทึกข้อมูล' });
     }
 });
 
