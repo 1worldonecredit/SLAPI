@@ -965,16 +965,16 @@ app.put('/api/admin/user-banks/:id/status', async (req, res) => {
         res.status(500).json({ success: false, message: 'Server error' });
     }
 });
-
-app.post('/api/deposit', async (req, res) => {
-    // รับข้อมูลทุกอย่างที่ลูกค้ากรอกมาจากหน้าเว็บ
+// ==========================================
+// API ท่อใหม่: สำหรับลูกค้าแจ้งฝากเงิน 
+// ==========================================
+app.post('/api/deposit-new', async (req, res) => {
     const { userId, customerName, bankName, accountNumber, currencyCode, amount, depositDate, depositTime, slipBase64 } = req.body;
 
     try {
         const pool = await sql.connect(dbConfig);
-        const depositDatetime = `${depositDate} ${depositTime}`; // รวมวันที่และเวลา
+        const depositDatetime = `${depositDate} ${depositTime}`;
         
-        // บันทึกลงตาราง Transactions_Deposit ที่ถูกต้อง
         await pool.request()
             .input('user_id', sql.Int, userId)
             .input('customer_name', sql.NVarChar, customerName)
@@ -992,12 +992,12 @@ app.post('/api/deposit', async (req, res) => {
                 (@user_id, @customer_name, @bank_name, @account_number, @amount, @currency_code, @slip_image, @status, @deposit_datetime, GETDATE())
             `);
 
-        // ตอบกลับเมื่อบันทึกสำเร็จ
-        res.status(201).json({ success: true, message: 'แจ้งฝากเงินสำเร็จ รอผู้ดูแลระบบตรวจสอบ' });
+        // ข้อความจะเปลี่ยนไป เพื่อให้รู้ว่าเข้าโค้ดตัวใหม่แล้ว
+        res.status(201).json({ success: true, message: 'บันทึกข้อมูลลงตารางสำเร็จ 100% ครับ!' });
         
     } catch (error) {
         console.error(error);
-        res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการบันทึกข้อมูล' });
+        res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาด Database (เช็กการตั้งค่าใน Railway)' });
     }
 });
 
