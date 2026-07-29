@@ -967,39 +967,33 @@ app.put('/api/admin/user-banks/:id/status', async (req, res) => {
 });
 
 // ==========================================
-// API: สำหรับลูกค้าแจ้งฝากเงิน
+// API: สำหรับลูกค้าแจ้งฝากเงิน (เข้าตาราง Transactions ของจริง)
 // ==========================================
 app.post('/api/deposit', async (req, res) => {
-    const { 
-        userId, customerName, bankName, accountNumber, currencyCode, 
-        amount, depositDate, depositTime, slipBase64 
-    } = req.body;
+    const { userId, amount, slipBase64, depositDate, depositTime, currencyCode } = req.body;
 
     try {
         const pool = await sql.connect(dbConfig);
-        const depositDatetime = `${depositDate} ${depositTime}`;
         
+        // เอาวันที่และเวลาที่ลูกค้ากรอก มาต่อท้ายชื่อรายการ จะได้ดูง่ายๆ ครับ
+        const titleText = `แจ้งฝากเงิน ${currencyCode} (${depositDate} เวลา ${depositTime})`;
+
         await pool.request()
             .input('user_id', sql.Int, userId)
-            .input('customer_name', sql.NVarChar, customerName)
-            .input('bank_name', sql.NVarChar, bankName)
-            .input('account_number', sql.VarChar, accountNumber)
+            .input('transaction_type', sql.VarChar, 'Deposit')
+            .input('title', sql.NVarChar, titleText)
             .input('amount', sql.Decimal(18, 2), amount)
-            .input('currency_code', sql.VarChar, currencyCode || 'THB')
-            .input('slip_image', sql.NVarChar(sql.MAX), slipBase64) 
             .input('status', sql.VarChar, 'Pending')
-            .input('deposit_datetime', sql.DateTime, depositDatetime)
+            .input('slip_image', sql.NVarChar(sql.MAX), slipBase64)
             .query(`
-                INSERT INTO Transactions_Deposit (
-                    user_id, customer_name, bank_name, account_number, amount, currency_code, slip_image, status, deposit_datetime, created_at
-                ) VALUES (
-                    @user_id, @customer_name, @bank_name, @account_number, @amount, @currency_code, @slip_image, @status, @deposit_datetime, GETDATE()
-                )
+                INSERT INTO Transactions (user_id, transaction_type, title, amount, status, slip_image, created_at)
+                VALUES (@user_id, @transaction_type, @title, @amount, @status, @slip_image, GETDATE())
             `);
 
-        res.status(201).json({ success: true, message: 'ส่งคำขอฝากเงินสำเร็จ กรุณารอเจ้าหน้าที่ตรวจสอบ' });
+        res.status(201).json({ success: true, message: 'ส่งคำขอฝากเงินสำเร็จ รอตรวจสอบ' });
         
     } catch (error) {
+        console.error(error);
         res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการบันทึกข้อมูล' });
     }
 });
