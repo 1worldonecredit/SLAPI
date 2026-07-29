@@ -65,11 +65,11 @@ app.get('/api/status', (req, res) => {
 // ==========================================
 // 🌟 API สำหรับระบบเมนูอัจฉริยะ (Dynamic Menu)
 // ==========================================
-
 // 1. ดึงข้อมูลเมนูทั้งหมด (GET) - ส่งไปให้ React วาดเมนูซ้ายมือ
 app.get('/api/menus', async (req, res) => {
     try {
-        const pool = await sql.connect(config);
+        // 🌟 แก้ไขเป็น dbConfig ให้ตรงกับหน้า Login
+        const pool = await sql.connect(dbConfig); 
         const result = await pool.request().query(`
             SELECT 
                 menu_id AS id, 
@@ -95,7 +95,8 @@ app.post('/api/menus', async (req, res) => {
     const { title, path, icon, component, parentId, showNotification } = req.body;
     
     try {
-        const pool = await sql.connect(config);
+        // 🌟 แก้ไขเป็น dbConfig
+        const pool = await sql.connect(dbConfig); 
         const result = await pool.request()
             .input('title', sql.NVarChar, title)
             .input('path', sql.VarChar, path || null)
@@ -109,7 +110,6 @@ app.post('/api/menus', async (req, res) => {
                 VALUES (@title, @path, @icon, @component, @parent_id, @show_notification)
             `);
             
-        // ส่ง ID ที่เพิ่งถูกสร้างกลับไปให้ React
         res.status(201).json({ 
             message: 'บันทึกเมนูสำเร็จ', 
             id: result.recordset[0].id 
@@ -126,7 +126,8 @@ app.put('/api/menus/:id', async (req, res) => {
     const { title, path, icon, component, parentId, showNotification } = req.body;
     
     try {
-        const pool = await sql.connect(config);
+        // 🌟 แก้ไขเป็น dbConfig
+        const pool = await sql.connect(dbConfig); 
         await pool.request()
             .input('id', sql.Int, id)
             .input('title', sql.NVarChar, title)
@@ -153,8 +154,8 @@ app.put('/api/menus/:id', async (req, res) => {
 app.delete('/api/menus/:id', async (req, res) => {
     const { id } = req.params;
     try {
-        const pool = await sql.connect(config);
-        // 🌟 ทริค: ต้องลบเมนูลูกที่ผูกอยู่กับเมนูนี้ทิ้งก่อน แล้วค่อยลบเมนูแม่ (ป้องกัน Error Foreign Key)
+        // 🌟 แก้ไขเป็น dbConfig
+        const pool = await sql.connect(dbConfig); 
         await pool.request()
             .input('id', sql.Int, id)
             .query(`
@@ -168,7 +169,6 @@ app.delete('/api/menus/:id', async (req, res) => {
         res.status(500).send('Server error');
     }
 });
-
 
 // ==========================================
 // API 1: ตรวจสอบผู้แนะนำ (Check Referrer)
