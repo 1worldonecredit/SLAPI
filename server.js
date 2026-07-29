@@ -899,6 +899,75 @@ app.post('/api/admin/verify-customer-bank', async (req, res) => {
     res.status(500).json({ success: false, message: 'ระบบเซิร์ฟเวอร์ขัดข้อง' });
   }
 });
+
+// ==========================================
+// 1. API ดึงรายการคำขอเพิ่มบัญชีธนาคารทั้งหมด
+// ==========================================
+app.get('/api/admin/user-banks', async (req, res) => {
+    try {
+        const pool = await sql.connect(dbConfig);
+        // ดึงข้อมูลธนาคาร พร้อม Join หาชื่อลูกค้า (UserName_Lastname)
+        const result = await pool.request().query(`
+            SELECT 
+                ub.user_bank_id, ub.user_id, ub.bank_id, ub.account_name, ub.account_number, 
+                ub.is_primary, ub.created_at, ub.currency_code, ub.status,
+                un.firstname, un.lastname
+            FROM UserBanks ub
+            LEFT JOIN UserName_Lastname un ON ub.user_id = un.user_id
+            ORDER BY ub.created_at DESC
+        `);
+        res.json({ success: true, data: result.recordset });
+    } catch (err) {
+        console.error('Error fetching user banks:', err);
+        res.status(500).json({ success: false, message: 'Server error' });
+    }
+});
+
+// ==========================================
+// 2. API อัปเดตสถานะ (อนุมัติ/ไม่อนุมัติ) + แจ้งเตือน + เก็บชื่อคนทำ
+// ==========================================
+app.put('/api/admin/user-banks/:id/status', async (req, res) => {
+    const { id } = req.params;
+    const { status, user_id, admin_name, reject_reason } = req.body; 
+    // status คาดหวังเป็น: 'Approved' (ผ่าน) หรือ 'Rejected' (ไม่ผ่าน)
+
+    try {
+        const pool = await sql.connect(dbConfig);
+        
+        // 🌟 1. อัปเดตสถานะในตาราง UserBanks
+        // (หมายเหตุ: หากคุณต้องการเก็บชื่อคนตรวจลง DB แนะนำให้เพิ่มคอลัมน์ reviewed_by ในตาราง UserBanks ก่อนนะครับ)
+        await pool.request()
+            .input('id', sql.Int, id)
+            .input('status', sql.VarChar, status)
+            // .input('reviewed_by', sql.NVarChar, admin_name) // เปิดใช้บรรทัดนี้ถ้าเพิ่มคอลัมน์แล้ว
+            .query(`
+                UPDATE UserBanks 
+                SET status = @status 
+                WHERE user_bank_id = @id
+            `);
+
+        // 🌟 2. ส่ง Notification แจ้งลูกค้า
+        const notifMessage = status === 'Approved' 
+            ? `บัญชีธนาคาร ${reject_reason || ''} ของคุณได้รับการอนุมัติเรียบร้อยแล้ว` 
+            : `คำขอเพิ่มบัญชีถูกปฏิเสธ: ${reject_reason || 'ข้อมูลไม่ถูกต้อง'}`;
+            
+        await pool.request()
+            .input('user_id', sql.Int, user_id)
+            .input('message', sql.NVarChar, notifMessage)
+            .query(`
+                INSERT INTO Notifications (user_id, message, is_read, created_at)
+                VALUES (@user_id, @message, 0, GETDATE())
+            `);
+
+        res.json({ success: true, message: 'บันทึกข้อมูลและส่งแจ้งเตือนสำเร็จ' });
+    } catch (err) {
+        console.error('Error updating bank status:', err);
+        res.status(500).json({ success: false, message: 'Server error' });
+    }
+});
+
+
+
 app.listen(port, () => {
     console.log(`🚀 Server เปิดทำงานแล้วที่พอร์ต ${port}`);
 });
