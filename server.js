@@ -969,6 +969,9 @@ app.put('/api/admin/user-banks/:id/status', async (req, res) => {
 // ==========================================
 // API: สำหรับลูกค้าแจ้งฝากเงิน (บันทึกลงตาราง Transactions_Deposit)
 // ==========================================
+// ==========================================
+// API: สำหรับลูกค้าแจ้งฝากเงิน
+// ==========================================
 app.post('/api/deposit', async (req, res) => {
     const { 
         userId, 
@@ -977,12 +980,17 @@ app.post('/api/deposit', async (req, res) => {
         accountNumber, 
         currencyCode, 
         amount, 
+        depositDate,   // 🌟 วันที่โอน
+        depositTime,   // 🌟 เวลาที่โอน (รวมวินาที)
         slipBase64 
     } = req.body;
 
     try {
-        const pool = await sql.connect(dbConfig); // อย่าลืมใช้ dbConfig ที่ตั้งค่าไว้นะครับ
+        const pool = await sql.connect(dbConfig);
         
+        // นำวันที่และเวลามาต่อกันเพื่อเป็น DATETIME
+        const depositDatetime = `${depositDate} ${depositTime}`;
+
         // บันทึกข้อมูลลง Database
         await pool.request()
             .input('user_id', sql.Int, userId)
@@ -991,13 +999,14 @@ app.post('/api/deposit', async (req, res) => {
             .input('account_number', sql.VarChar, accountNumber)
             .input('amount', sql.Decimal(18, 2), amount)
             .input('currency_code', sql.VarChar, currencyCode || 'THB')
-            .input('slip_image', sql.NVarChar, slipBase64) // 🌟 บันทึกภาพสลิปที่แปลงเป็น Base64
-            .input('status', sql.VarChar, 'Pending')       // สถานะเริ่มต้นคือรอตรวจสอบ
+            .input('slip_image', sql.NVarChar, slipBase64)
+            .input('status', sql.VarChar, 'Pending')
+            .input('deposit_datetime', sql.DateTime, depositDatetime) // 🌟 บันทึกเวลาที่โอนจริงตามสลิป
             .query(`
                 INSERT INTO Transactions_Deposit (
-                    user_id, customer_name, bank_name, account_number, amount, currency_code, slip_image, status, created_at
+                    user_id, customer_name, bank_name, account_number, amount, currency_code, slip_image, status, deposit_datetime, created_at
                 ) VALUES (
-                    @user_id, @customer_name, @bank_name, @account_number, @amount, @currency_code, @slip_image, @status, GETDATE()
+                    @user_id, @customer_name, @bank_name, @account_number, @amount, @currency_code, @slip_image, @status, @deposit_datetime, GETDATE()
                 )
             `);
 
