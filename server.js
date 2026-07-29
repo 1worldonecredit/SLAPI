@@ -1006,33 +1006,12 @@ app.post('/api/deposit-submit', async (req, res) => {
 });
 
 // ==========================================
-// 🌟 1. API: ดึงข้อมูลสัตว์และตัวเลขทั้งหมด (GET)
-// ==========================================
-app.get('/api/admin/animal-numbers', async (req, res) => {
-    try {
-        // 🌟 แก้ไข: ใช้ sql.connect(dbConfig) ให้ตรงกับไฟล์ของพี่
-        const pool = await sql.connect(dbConfig); 
-        
-        const result = await pool.request().query(`
-            SELECT * FROM Master_Animal_Numbers 
-            ORDER BY created_at DESC
-        `);
-        
-        res.json(result.recordset);
-    } catch (error) {
-        console.error('Error fetching animal numbers:', error);
-        res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการดึงข้อมูล Database' });
-    }
-});
-
-// ==========================================
-// 🌟 2. API: เพิ่มข้อมูลสัตว์และตัวเลขใหม่ (POST)
+// 🌟 API: เพิ่มข้อมูลสัตว์และตัวเลขใหม่ (POST)
 // ==========================================
 app.post('/api/admin/animal-numbers', async (req, res) => {
-    const { animal_name_th, image_url, lottery_type, num1, num2, num3, is_active } = req.body;
+    const { animal_name_th, image_url, lottery_type, num1, num2, num3, is_active, action_by } = req.body;
 
     try {
-        // 🌟 แก้ไข: ใช้ sql.connect(dbConfig) ให้ตรงกับไฟล์ของพี่
         const pool = await sql.connect(dbConfig); 
 
         const checkQuery = await pool.request()
@@ -1046,17 +1025,14 @@ app.post('/api/admin/animal-numbers', async (req, res) => {
         const duplicates = newNumbers.filter(n => existingNumbers.includes(n));
         
         if (duplicates.length > 0) {
-            return res.status(400).json({ 
-                success: false, 
-                message: `เลข ${duplicates.join(', ')} ถูกใช้ไปแล้วในโหมด ${lottery_type} ตัว` 
-            });
+            return res.status(400).json({ success: false, message: `เลข ${duplicates.join(', ')} ถูกใช้ไปแล้วในโหมด ${lottery_type} ตัว` });
         }
 
         const insertQuery = `
             INSERT INTO Master_Animal_Numbers 
-            (animal_name_th, image_url, lottery_type, num1, num2, num3, is_active)
+            (animal_name_th, image_url, lottery_type, num1, num2, num3, is_active, created_by)
             VALUES 
-            (@animalName, @imageUrl, @lotteryType, @num1, @num2, @num3, @isActive)
+            (@animalName, @imageUrl, @lotteryType, @num1, @num2, @num3, @isActive, @actionBy)
         `;
 
         await pool.request()
@@ -1067,17 +1043,71 @@ app.post('/api/admin/animal-numbers', async (req, res) => {
             .input('num2', sql.VarChar, num2)
             .input('num3', sql.VarChar, num3)
             .input('isActive', sql.Bit, is_active ? 1 : 0)
+            .input('actionBy', sql.NVarChar, action_by || 'Unknown') // 🌟 เก็บชื่อคนทำ
             .query(insertQuery);
 
         res.status(201).json({ success: true, message: 'บันทึกข้อมูลสัตว์และตัวเลขสำเร็จ' });
-
     } catch (error) {
         console.error('SQL Server Error Details:', error);
-        res.status(500).json({ 
-            success: false, 
-            message: 'เกิดข้อผิดพลาดในการ INSERT Database', 
-            error: error.message 
-        });
+        res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการ INSERT Database', error: error.message });
+    }
+});
+
+// ==========================================
+// 🌟 API: แก้ไขข้อมูลสัตว์และตัวเลข (PUT) - มาใหม่!
+// ==========================================
+app.put('/api/admin/animal-numbers/:id', async (req, res) => {
+    const { id } = req.params;
+    const { animal_name_th, image_url, lottery_type, num1, num2, num3, is_active, action_by } = req.body;
+
+    try {
+        const pool = await sql.connect(dbConfig); 
+
+        // 🌟 ดักเลขซ้ำ (แต่ต้องยกเว้น ID ของตัวเองที่กำลังแก้อยู่)
+        const checkQuery = await pool.request()
+            .input('lotteryType', sql.VarChar, lottery_type)
+            .input('currentId', sql.Int, id)
+            .query(`SELECT num1, num2, num3 FROM Master_Animal_Numbers WHERE lottery_type = @lotteryType AND animal_id != @currentId`);
+        
+        const existingNumbers = checkQuery.recordset.flatMap(row => [row.num1, row.num2, row.num3]);
+        const newNumbers = [num1, num2];
+        if (num3 !== '-') newNumbers.push(num3);
+
+        const duplicates = newNumbers.filter(n => existingNumbers.includes(n));
+        
+        if (duplicates.length > 0) {
+            return res.status(400).json({ success: false, message: `เลข ${duplicates.join(', ')} ถูกใช้ไปแล้วในโหมด ${lottery_type} ตัว` });
+        }
+
+        const updateQuery = `
+            UPDATE Master_Animal_Numbers 
+            SET animal_name_th = @animalName,
+                image_url = @imageUrl,
+                lottery_type = @lotteryType,
+                num1 = @num1,
+                num2 = @num2,
+                num3 = @num3,
+                is_active = @isActive,
+                updated_by = @actionBy
+            WHERE animal_id = @id
+        `;
+
+        await pool.request()
+            .input('id', sql.Int, id)
+            .input('animalName', sql.NVarChar, animal_name_th)
+            .input('imageUrl', sql.VarChar(sql.MAX), image_url) 
+            .input('lotteryType', sql.VarChar, lottery_type)
+            .input('num1', sql.VarChar, num1)
+            .input('num2', sql.VarChar, num2)
+            .input('num3', sql.VarChar, num3)
+            .input('isActive', sql.Bit, is_active ? 1 : 0)
+            .input('actionBy', sql.NVarChar, action_by || 'Unknown') // 🌟 เก็บชื่อคนแก้ไข
+            .query(updateQuery);
+
+        res.status(200).json({ success: true, message: 'แก้ไขข้อมูลสำเร็จ' });
+    } catch (error) {
+        console.error('SQL Server Error Details:', error);
+        res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการ UPDATE Database', error: error.message });
     }
 });
 
