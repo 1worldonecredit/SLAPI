@@ -965,10 +965,12 @@ app.put('/api/admin/user-banks/:id/status', async (req, res) => {
         res.status(500).json({ success: false, message: 'Server error' });
     }
 });
+
+
 // ==========================================
-// API ท่อใหม่: สำหรับลูกค้าแจ้งฝากเงิน 
+// API ล่าสุด: สำหรับลูกค้าแจ้งฝากเงิน
 // ==========================================
-app.post('/api/deposit-new', async (req, res) => {
+app.post('/api/deposit-submit', async (req, res) => {
     const { userId, customerName, bankName, accountNumber, currencyCode, amount, depositDate, depositTime, slipBase64 } = req.body;
 
     try {
@@ -986,17 +988,20 @@ app.post('/api/deposit-new', async (req, res) => {
             .input('status', sql.VarChar, 'Pending')
             .input('deposit_datetime', sql.DateTime, depositDatetime)
             .query(`
-                INSERT INTO Transactions_Deposit 
-                (user_id, customer_name, bank_name, account_number, amount, currency_code, slip_image, status, deposit_datetime, created_at)
-                VALUES 
-                (@user_id, @customer_name, @bank_name, @account_number, @amount, @currency_code, @slip_image, @status, @deposit_datetime, GETDATE())
+                INSERT INTO Transactions_Deposit (
+                    user_id, customer_name, bank_name, account_number, amount, 
+                    currency_code, slip_image, status, deposit_datetime, created_at
+                ) VALUES (
+                    @user_id, @customer_name, @bank_name, @account_number, @amount, 
+                    @currency_code, @slip_image, @status, @deposit_datetime, GETDATE()
+                )
             `);
 
-        res.status(201).json({ success: true, message: 'บันทึกข้อมูลลงตารางสำเร็จ 100% ครับ!' });
+        res.status(201).json({ success: true, message: '🎉 แจ้งฝากเงินสำเร็จ (API ใหม่ทำงานสมบูรณ์)' });
         
     } catch (error) {
-        console.error(error);
-        res.status(500).json({ success: false, message: 'ฐานข้อมูลขัดข้อง: ' + error.message });
+        console.error("Deposit API Error:", error);
+        res.status(500).json({ success: false, message: 'Database Error: ' + error.message });
     }
 });
 
