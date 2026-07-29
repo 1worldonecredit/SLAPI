@@ -1006,15 +1006,18 @@ app.post('/api/deposit-submit', async (req, res) => {
 });
 
 // ==========================================
-// 🌟 API: ดึงข้อมูลสัตว์และตัวเลขทั้งหมด (GET)
+// 🌟 1. API: ดึงข้อมูลสัตว์และตัวเลขทั้งหมด (GET)
 // ==========================================
 app.get('/api/admin/animal-numbers', async (req, res) => {
     try {
-        const pool = await poolPromise; 
+        // 🌟 แก้ไข: ใช้ sql.connect(dbConfig) ให้ตรงกับไฟล์ของพี่
+        const pool = await sql.connect(dbConfig); 
+        
         const result = await pool.request().query(`
             SELECT * FROM Master_Animal_Numbers 
             ORDER BY created_at DESC
         `);
+        
         res.json(result.recordset);
     } catch (error) {
         console.error('Error fetching animal numbers:', error);
@@ -1023,15 +1026,15 @@ app.get('/api/admin/animal-numbers', async (req, res) => {
 });
 
 // ==========================================
-// 🌟 API: เพิ่มข้อมูลสัตว์และตัวเลขใหม่ (POST)
+// 🌟 2. API: เพิ่มข้อมูลสัตว์และตัวเลขใหม่ (POST)
 // ==========================================
 app.post('/api/admin/animal-numbers', async (req, res) => {
     const { animal_name_th, image_url, lottery_type, num1, num2, num3, is_active } = req.body;
 
     try {
-        const pool = await poolPromise; 
+        // 🌟 แก้ไข: ใช้ sql.connect(dbConfig) ให้ตรงกับไฟล์ของพี่
+        const pool = await sql.connect(dbConfig); 
 
-        // 1. เช็กเลขซ้ำจาก Database
         const checkQuery = await pool.request()
             .input('lotteryType', sql.VarChar, lottery_type)
             .query(`SELECT num1, num2, num3 FROM Master_Animal_Numbers WHERE lottery_type = @lotteryType`);
@@ -1049,7 +1052,6 @@ app.post('/api/admin/animal-numbers', async (req, res) => {
             });
         }
 
-        // 2. INSERT ลงฐานข้อมูล
         const insertQuery = `
             INSERT INTO Master_Animal_Numbers 
             (animal_name_th, image_url, lottery_type, num1, num2, num3, is_active)
@@ -1059,7 +1061,7 @@ app.post('/api/admin/animal-numbers', async (req, res) => {
 
         await pool.request()
             .input('animalName', sql.NVarChar, animal_name_th)
-            .input('imageUrl', sql.NVarChar(sql.MAX), image_url) // 🌟 กลับมาใช้ NVarChar เพื่อให้ตรงตารางเป๊ะๆ
+            .input('imageUrl', sql.VarChar(sql.MAX), image_url) 
             .input('lotteryType', sql.VarChar, lottery_type)
             .input('num1', sql.VarChar, num1)
             .input('num2', sql.VarChar, num2)
@@ -1071,7 +1073,6 @@ app.post('/api/admin/animal-numbers', async (req, res) => {
 
     } catch (error) {
         console.error('SQL Server Error Details:', error);
-        // 🌟 ส่ง error.message ตัวเต็มของ SQL กลับไปให้หน้าเว็บโชว์
         res.status(500).json({ 
             success: false, 
             message: 'เกิดข้อผิดพลาดในการ INSERT Database', 
@@ -1079,7 +1080,6 @@ app.post('/api/admin/animal-numbers', async (req, res) => {
         });
     }
 });
-
 
 
 app.listen(port, () => {
