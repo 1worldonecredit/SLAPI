@@ -1258,6 +1258,21 @@ app.get('/api/lottery/history/:userId', async (req, res) => {
     }
 });
 
+
+// ==========================================
+// 🌟 API: ดึงอัตราจ่ายเงินรางวัลหวย
+// ==========================================
+app.get('/api/lottery/prize-rates', async (req, res) => {
+    try {
+        const pool = await sql.connect(dbConfig);
+        const result = await pool.request().query('SELECT * FROM Lottery_Prize_Rates ORDER BY CAST(lottery_type AS INT) ASC');
+        res.status(200).json({ success: true, data: result.recordset });
+    } catch (error) {
+        console.error('Error fetching prize rates:', error);
+        res.status(500).json({ success: false, message: 'ไม่สามารถดึงข้อมูลอัตราจ่ายได้' });
+    }
+});
+
 app.listen(port, () => {
     console.log(`🚀 Server เปิดทำงานแล้วที่พอร์ต ${port}`);
 });
