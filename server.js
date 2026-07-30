@@ -1219,6 +1219,45 @@ app.post('/api/lottery/buy', async (req, res) => {
 });
 
 
+// ==========================================
+// 🌟 API: ดึงประวัติการซื้อหวยของ User (GET)
+// ==========================================
+app.get('/api/lottery/history/:userId', async (req, res) => {
+    const userId = req.params.userId;
+    try {
+        const pool = await sql.connect(dbConfig);
+        
+        // 1. ดึงหัวบิลทั้งหมดของ User นี้ เรียงจากใหม่ไปเก่า
+        const orderRes = await pool.request()
+            .input('userId', sql.Int, userId)
+            .query(`
+                SELECT order_id, total_amount, currency_code, status, created_at
+                FROM Lottery_Orders
+                WHERE user_id = @userId
+                ORDER BY created_at DESC
+            `);
+            
+        const orders = orderRes.recordset;
+
+        // 2. ดึงรายละเอียดเลขหวยแต่ละตัว มาผูกกับหัวบิล
+        for (let order of orders) {
+            const itemRes = await pool.request()
+                .input('orderId', sql.Int, order.order_id)
+                .query(`
+                    SELECT item_id, lottery_type, selected_number, price, status
+                    FROM Lottery_Order_Items
+                    WHERE order_id = @orderId
+                `);
+            order.items = itemRes.recordset;
+        }
+
+        res.status(200).json({ success: true, data: orders });
+    } catch (error) {
+        console.error('Error fetching lottery history:', error);
+        res.status(500).json({ success: false, message: 'ไม่สามารถดึงข้อมูลประวัติได้' });
+    }
+});
+
 app.listen(port, () => {
     console.log(`🚀 Server เปิดทำงานแล้วที่พอร์ต ${port}`);
 });
