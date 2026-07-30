@@ -1284,6 +1284,28 @@ app.get('/api/lottery/prize-rates', async (req, res) => {
     }
 });
 
+
+// ==========================================
+// 🌟 API: ดึงประวัติการเงินทั้งหมดของลูกค้า (Statement)
+// ==========================================
+app.get('/api/transactions/:userId', async (req, res) => {
+    try {
+        const pool = await sql.connect(dbConfig);
+        const result = await pool.request()
+            .input('userId', sql.Int, req.params.userId)
+            .query(`
+                SELECT * FROM Transactions 
+                WHERE user_id = @userId 
+                ORDER BY created_at DESC
+            `);
+            
+        res.status(200).json({ success: true, data: result.recordset });
+    } catch (error) {
+        console.error('Error fetching transactions history:', error);
+        res.status(500).json({ success: false, message: 'ไม่สามารถดึงข้อมูลประวัติการเงินได้' });
+    }
+});
+
 app.listen(port, () => {
     console.log(`🚀 Server เปิดทำงานแล้วที่พอร์ต ${port}`);
 });
