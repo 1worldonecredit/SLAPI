@@ -1142,6 +1142,78 @@ app.put('/api/admin/animal-numbers/:id', async (req, res) => {
     }
 });
 
+// ==========================================
+// 🌟 API: ชำระเงินซื้อหวย (หัก Wallet + ออกบิล)
+// ==========================================
+app.post('/api/lottery/buy', async (req, res) => {
+    const { user_id, cart, total_price, currency } = req.body;
+    
+    // เริ่มระบบ SQL Transaction (ถ้ามีอะไรพัง มันจะ Rollback คืนเงินให้อัตโนมัติ)
+    const pool = await sql.connect(dbConfig);
+    const transaction = new sql.Transaction(pool);
+
+    try {
+        await transaction.begin();
+        const request = new sql.Request(transaction);
+
+        // 1. เช็คยอดเงินในกระเป๋า (ต้องมีตาราง Users และคอลัมน์ balance)
+        const userRes = await request
+            .input('userId', sql.Int, user_id)
+            .query('SELECT balance FROM Users WHERE id = @userId'); // เปลี่ยน id เป็นชื่อคอลัมน์ PK ของพี่ถ้าใช้ชื่ออื่น
+
+        if (userRes.recordset.length === 0) throw new Error('ไม่พบข้อมูลผู้ใช้');
+        const balance = userRes.recordset[0].balance;
+
+        if (balance < total_price) {
+            throw new Error('ยอดเงินในกระเป๋าไม่เพียงพอ กรุณาเติมเงิน');
+        }
+
+        // 2. หักเงินใน Wallet
+        await request
+            .input('totalPrice', sql.Decimal(18,2), total_price)
+            .query('UPDATE Users SET balance = balance - @totalPrice WHERE id = @userId');
+
+        // 3. บันทึกประวัติการเงิน (Transaction)
+        await request
+            .input('title', sql.NVarChar, 'ซื้อหวยเวียดนาม')
+            .input('amount', sql.Decimal(18,2), -total_price) // ค่าติดลบ เพราะจ่ายเงินออก
+            .query(`INSERT INTO Transactions (user_id, title, amount, type, created_at)
+                    VALUES (@userId, @title, @amount, 'BUY_LOTTERY', GETDATE())`);
+
+        // 4. สร้างหัวบิลหวย (Lottery_Orders)
+        const orderRes = await request
+            .input('currency', sql.VarChar, currency)
+            .query(`INSERT INTO Lottery_Orders (user_id, total_amount, currency, status, created_at)
+                    OUTPUT INSERTED.order_id
+                    VALUES (@userId, @totalPrice, @currency, N'รอผลตรวจ', GETDATE())`);
+
+        const orderId = orderRes.recordset[0].order_id;
+
+        // 5. บันทึกเลขหวยลงบิลทีละตัว (Lottery_Order_Items)
+        for (const item of cart) {
+            const itemReq = new sql.Request(transaction);
+            await itemReq
+                .input('orderId', sql.Int, orderId)
+                .input('lotteryNumber', sql.VarChar, item.number)
+                .input('lotteryType', sql.VarChar, item.type)
+                .input('price', sql.Decimal(18,2), item.price)
+                .query(`INSERT INTO Lottery_Order_Items (order_id, lottery_number, lottery_type, price, status)
+                        VALUES (@orderId, @lotteryNumber, @lotteryType, @price, N'รอผลตรวจ')`);
+        }
+
+        // หากทุกอย่างผ่านฉลุย -> กดยืนยัน (Commit)
+        await transaction.commit();
+        res.status(200).json({ success: true, message: 'ชำระเงินสำเร็จ', order_id: orderId });
+
+    } catch (error) {
+        // หากมีอะไรพัง -> ยกเลิกทั้งหมด คืนเงินกลับที่เดิม (Rollback)
+        await transaction.rollback();
+        console.error('Payment Error:', error);
+        res.status(400).json({ success: false, message: error.message || 'เกิดข้อผิดพลาดในการชำระเงิน' });
+    }
+});
+
+
 
 app.listen(port, () => {
     console.log(`🚀 Server เปิดทำงานแล้วที่พอร์ต ${port}`);
