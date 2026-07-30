@@ -1142,12 +1142,8 @@ app.put('/api/admin/animal-numbers/:id', async (req, res) => {
     }
 });
 
-// ==========================================
-// 🌟 API: ชำระเงินซื้อหวย (หัก Wallet + ออกบิล)
-// ==========================================
 app.post('/api/lottery/buy', async (req, res) => {
     const { user_id, cart, total_price, currency } = req.body;
-    
     const pool = await sql.connect(dbConfig);
     const transaction = new sql.Transaction(pool);
 
@@ -1155,46 +1151,53 @@ app.post('/api/lottery/buy', async (req, res) => {
         await transaction.begin();
         const request = new sql.Request(transaction);
 
-        // 1. เช็คยอดเงินในกระเป๋า
+        // 1. ดึงอัตราแลกเปลี่ยนมาเป็น "ตัวกลาง"
+        let exchangeRate = 1;
+        if (currency === 'LAK') {
+            const rateRes = await request.query("SELECT rate FROM ExchangeRates WHERE currency_pair = 'THB_LAK'");
+            if (rateRes.recordset.length > 0) {
+                exchangeRate = rateRes.recordset[0].rate;
+            }
+        }
+
+        // 2. เข้าสมการแปลงยอดซื้อให้เป็น THB เพื่อใช้เป็นฐาน
+        const baseTHBAmount = total_price / exchangeRate;
+
+        // 3. คำนวณยอดที่จะหักเงิน (แปลงกลับเป็นสกุลเงินกระเป๋าลูกค้า)
+        const deductAmount = baseTHBAmount * exchangeRate; 
+
+        // 4. เช็คยอดเงินและหักเงินในกระเป๋า (หักตามยอด deductAmount)
         const userRes = await request
             .input('userId', sql.Int, user_id)
             .query('SELECT wallet_balance FROM Users WHERE user_id = @userId'); 
 
         if (userRes.recordset.length === 0) throw new Error('ไม่พบข้อมูลผู้ใช้ในระบบ');
-        const wallet_balance = userRes.recordset[0].wallet_balance;
-
-        if (wallet_balance < total_price) {
-            throw new Error('ยอดเงินในกระเป๋าไม่เพียงพอ กรุณาเติมเงิน');
+        if (userRes.recordset[0].wallet_balance < deductAmount) { 
+            throw new Error('ยอดเงินในกระเป๋าไม่เพียงพอ');
         }
 
-        // 2. หักเงินใน Wallet
-        request.input('totalPrice', sql.Decimal(18,2), total_price);
+        request.input('deductAmount', sql.Decimal(18,2), deductAmount);
         await request.query(`
-            UPDATE Users SET wallet_balance = wallet_balance - @totalPrice WHERE user_id = @userId;
-            UPDATE Wallets SET balance = balance - @totalPrice WHERE user_id = @userId;
+            UPDATE Users SET wallet_balance = wallet_balance - @deductAmount WHERE user_id = @userId;
+            UPDATE Wallets SET balance = balance - @deductAmount WHERE user_id = @userId;
         `);
 
-        // 3. บันทึกประวัติการเงิน
+        // 5. บันทึกประวัติและสร้างบิล (โค้ดส่วนนี้เหมือนเดิมครับ)
         await request
             .input('title', sql.NVarChar, 'ซื้อหวยเวียดนาม')
-            .input('amount', sql.Decimal(18,2), -total_price) 
-            .query(`
-                INSERT INTO Transactions (user_id, transaction_type, title, amount, status, created_at)
-                VALUES (@userId, 'Buy Lottery', @title, @amount, 'Completed', GETDATE())
-            `);
+            .input('amount', sql.Decimal(18,2), -deductAmount) 
+            .query(`INSERT INTO Transactions (user_id, transaction_type, title, amount, status, created_at)
+                    VALUES (@userId, 'Buy Lottery', @title, @amount, 'Completed', GETDATE())`);
 
-        // 4. สร้างหัวบิลหวย (ใช้คอลัมน์ currency_code)
         const orderRes = await request
             .input('currency', sql.VarChar, currency)
-            .query(`
-                INSERT INTO Lottery_Orders (user_id, total_amount, currency_code, status, created_at)
-                OUTPUT INSERTED.order_id
-                VALUES (@userId, @totalPrice, @currency, N'รอผลตรวจ', GETDATE())
-            `);
+            .input('totalPrice', sql.Decimal(18,2), deductAmount)
+            .query(`INSERT INTO Lottery_Orders (user_id, total_amount, currency_code, status, created_at)
+                    OUTPUT INSERTED.order_id
+                    VALUES (@userId, @totalPrice, @currency, N'รอผลตรวจ', GETDATE())`);
 
         const orderId = orderRes.recordset[0].order_id;
 
-        // 5. บันทึกเลขหวยลงบิลทีละตัว (ใช้คอลัมน์ selected_number)
         for (const item of cart) {
             const itemReq = new sql.Request(transaction);
             await itemReq
@@ -1202,10 +1205,8 @@ app.post('/api/lottery/buy', async (req, res) => {
                 .input('lotteryNumber', sql.VarChar, item.number)
                 .input('lotteryType', sql.VarChar, item.type)
                 .input('price', sql.Decimal(18,2), item.price)
-                .query(`
-                    INSERT INTO Lottery_Order_Items (order_id, lottery_type, selected_number, price, status)
-                    VALUES (@orderId, @lotteryType, @lotteryNumber, @price, N'รอผลตรวจ')
-                `);
+                .query(`INSERT INTO Lottery_Order_Items (order_id, lottery_type, selected_number, price, status)
+                        VALUES (@orderId, @lotteryType, @lotteryNumber, @price, N'รอผลตรวจ')`);
         }
 
         await transaction.commit();
@@ -1213,8 +1214,18 @@ app.post('/api/lottery/buy', async (req, res) => {
 
     } catch (error) {
         await transaction.rollback();
-        console.error('Payment Error:', error);
         res.status(400).json({ success: false, message: error.message || 'เกิดข้อผิดพลาดในการชำระเงิน' });
+    }
+});
+
+// API สำหรับดึงเรทรางวัลไปแสดงที่หน้าสลิป
+app.get('/api/lottery/prize-rates', async (req, res) => {
+    try {
+        const pool = await sql.connect(dbConfig);
+        const result = await pool.request().query('SELECT * FROM Lottery_Prize_Rates ORDER BY CAST(lottery_type AS INT) ASC');
+        res.status(200).json({ success: true, data: result.recordset });
+    } catch (error) {
+        res.status(500).json({ success: false, message: 'ไม่สามารถดึงข้อมูลอัตราจ่ายได้' });
     }
 });
 
