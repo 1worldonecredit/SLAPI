@@ -1148,17 +1148,14 @@ app.put('/api/admin/animal-numbers/:id', async (req, res) => {
 app.post('/api/lottery/buy', async (req, res) => {
     const { user_id, cart, total_price, currency } = req.body;
     
-    // เริ่มระบบ SQL Transaction (ถ้ามีอะไรพัง มันจะ Rollback คืนเงินให้อัตโนมัติ)
     const pool = await sql.connect(dbConfig);
     const transaction = new sql.Transaction(pool);
 
     try {
         await transaction.begin();
-        
-        // เราต้องใส่ transaction ลงไปในทุก request เพื่อให้มันอยู่ในกระบวนการเดียวกัน
         const request = new sql.Request(transaction);
 
-        // 🌟 1. เช็คยอดเงินในกระเป๋า (แก้ชื่อเป็นคอลัมน์ wallet_balance และ user_id ให้ตรงกับ DB ของพี่)
+        // 1. เช็คยอดเงินในกระเป๋า
         const userRes = await request
             .input('userId', sql.Int, user_id)
             .query('SELECT wallet_balance FROM Users WHERE user_id = @userId'); 
@@ -1170,37 +1167,35 @@ app.post('/api/lottery/buy', async (req, res) => {
             throw new Error('ยอดเงินในกระเป๋าไม่เพียงพอ กรุณาเติมเงิน');
         }
 
-        // 🌟 2. หักเงินใน Wallet (อัปเดตให้ 2 ตารางพร้อมกันเลย ทั้ง Users และ Wallets)
+        // 2. หักเงินใน Wallet
         request.input('totalPrice', sql.Decimal(18,2), total_price);
-        
         await request.query(`
             UPDATE Users SET wallet_balance = wallet_balance - @totalPrice WHERE user_id = @userId;
             UPDATE Wallets SET balance = balance - @totalPrice WHERE user_id = @userId;
         `);
 
-        // 🌟 3. บันทึกประวัติการเงิน (แก้คอลัมน์เป็น transaction_type และเพิ่ม status ตาม DB ของพี่)
+        // 3. บันทึกประวัติการเงิน
         await request
             .input('title', sql.NVarChar, 'ซื้อหวยเวียดนาม')
-            .input('amount', sql.Decimal(18,2), -total_price) // ค่าติดลบ เพราะจ่ายเงินออก
+            .input('amount', sql.Decimal(18,2), -total_price) 
             .query(`
                 INSERT INTO Transactions (user_id, transaction_type, title, amount, status, created_at)
                 VALUES (@userId, 'Buy Lottery', @title, @amount, 'Completed', GETDATE())
             `);
 
-        // 🌟 4. สร้างหัวบิลหวย (Lottery_Orders)
+        // 4. สร้างหัวบิลหวย (ใช้คอลัมน์ currency_code)
         const orderRes = await request
             .input('currency', sql.VarChar, currency)
             .query(`
-                INSERT INTO Lottery_Orders (user_id, total_amount, currency, status, created_at)
+                INSERT INTO Lottery_Orders (user_id, total_amount, currency_code, status, created_at)
                 OUTPUT INSERTED.order_id
                 VALUES (@userId, @totalPrice, @currency, N'รอผลตรวจ', GETDATE())
             `);
 
         const orderId = orderRes.recordset[0].order_id;
 
-        // 🌟 5. บันทึกเลขหวยลงบิลทีละตัว (Lottery_Order_Items)
+        // 5. บันทึกเลขหวยลงบิลทีละตัว (ใช้คอลัมน์ selected_number)
         for (const item of cart) {
-            // ต้องสร้าง request ใหม่สำหรับวนลูป แต่ยังคงใช้ transaction ตัวเดิม
             const itemReq = new sql.Request(transaction);
             await itemReq
                 .input('orderId', sql.Int, orderId)
@@ -1208,23 +1203,20 @@ app.post('/api/lottery/buy', async (req, res) => {
                 .input('lotteryType', sql.VarChar, item.type)
                 .input('price', sql.Decimal(18,2), item.price)
                 .query(`
-                    INSERT INTO Lottery_Order_Items (order_id, lottery_number, lottery_type, price, status)
-                    VALUES (@orderId, @lotteryNumber, @lotteryType, @price, N'รอผลตรวจ')
+                    INSERT INTO Lottery_Order_Items (order_id, lottery_type, selected_number, price, status)
+                    VALUES (@orderId, @lotteryType, @lotteryNumber, @price, N'รอผลตรวจ')
                 `);
         }
 
-        // 🌟 6. หากทุกอย่างผ่านฉลุยแบบไร้ข้อผิดพลาด -> กดยืนยัน (Commit)
         await transaction.commit();
         res.status(200).json({ success: true, message: 'ชำระเงินสำเร็จ', order_id: orderId });
 
     } catch (error) {
-        // 🚨 หากมี Error เกิดขึ้นกลางทาง -> ยกเลิกทั้งหมด คืนเงินกลับที่เดิม (Rollback)
         await transaction.rollback();
         console.error('Payment Error:', error);
         res.status(400).json({ success: false, message: error.message || 'เกิดข้อผิดพลาดในการชำระเงิน' });
     }
 });
-
 
 
 app.listen(port, () => {
