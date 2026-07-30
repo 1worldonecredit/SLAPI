@@ -331,7 +331,7 @@ app.get('/api/user-profile-banks/:userId', async (req, res) => {
 // API 3: เพิ่มบัญชีธนาคาร พร้อมอัปเดตชื่อ-นามสกุล
 // ==========================================
 app.post('/api/add-user-bank', async (req, res) => {
-  const { userId, firstname, lastname, bankId, accountName, accountNumber, currencyCode } = req.body;
+  const { userId, firstname, lastname, bankId, accountName, accountNumber, currencyCode, passbookBase64 } = req.body;
   try {
     const pool = await sql.connect(dbConfig);
     
@@ -342,19 +342,22 @@ app.post('/api/add-user-bank', async (req, res) => {
       .input('lname', sql.NVarChar, lastname)
       .query('UPDATE UserName_Lastname SET firstname = @fname, lastname = @lname WHERE user_id = @userId');
 
-    // 2. บันทึกบัญชีธนาคาร
+    // 2. บันทึกบัญชีธนาคาร พร้อมรูปสมุดบัญชี และตั้งสถานะเป็น Pending (รอตรวจสอบ)
     await pool.request()
       .input('userId', sql.Int, userId)
       .input('bankId', sql.Int, bankId)
       .input('accountName', sql.NVarChar, accountName)
       .input('accountNumber', sql.VarChar, accountNumber)
       .input('currency', sql.VarChar, currencyCode)
+      .input('passbook', sql.VarChar(sql.MAX), passbookBase64)
       .query(`
-        INSERT INTO UserBanks (user_id, bank_id, account_name, account_number, currency_code, is_primary)
-        VALUES (@userId, @bankId, @accountName, @accountNumber, @currency, 1)
+        INSERT INTO UserBanks 
+        (user_id, bank_id, account_name, account_number, currency_code, is_primary, passbook_image, status, created_at)
+        VALUES 
+        (@userId, @bankId, @accountName, @accountNumber, @currency, 1, @passbook, 'Pending', GETDATE())
       `);
 
-    res.json({ success: true, message: 'เพิ่มบัญชีธนาคารสำเร็จ' });
+    res.json({ success: true, message: 'เพิ่มบัญชีธนาคารสำเร็จ กรุณารอแอดมินตรวจสอบ' });
   } catch (err) {
     console.error(err);
     res.status(500).json({ success: false, message: 'ไม่สามารถเพิ่มบัญชีได้' });
