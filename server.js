@@ -1397,6 +1397,36 @@ app.post('/api/deposit-submit', async (req, res) => {
   }
 });
 
+// ==========================================
+// API: ดึงรายการแจ้งฝากเงิน (สำหรับ Admin)
+// GET /api/admin/deposit-requests
+// ==========================================
+app.get('/api/admin/deposit-requests', async (req, res) => {
+  try {
+    const pool = await sql.connect(dbConfig);
+    
+    // ดึงเฉพาะรายการที่ status = 'Pending' และเรียงจากใหม่ไปเก่า
+    const query = `
+      SELECT 
+        deposit_id, user_id, customer_name, bank_name, account_number, 
+        amount, currency_code, slip_image, status, deposit_datetime, created_at
+      FROM Transactions_Deposit
+      WHERE status = 'Pending'
+      ORDER BY created_at ASC
+    `;
+    
+    const result = await pool.request().query(query);
+
+    res.json({
+      success: true,
+      requests: result.recordset
+    });
+
+  } catch (error) {
+    console.error('Error fetching deposit requests:', error);
+    res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการดึงข้อมูล' });
+  }
+});
 
 app.listen(port, () => {
     console.log(`🚀 Server เปิดทำงานแล้วที่พอร์ต ${port}`);
