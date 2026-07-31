@@ -1397,16 +1397,10 @@ app.post('/api/deposit-submit', async (req, res) => {
   }
 });
 
-
-// ==========================================
-// API: ดึงรายการแจ้งฝากเงิน + สรุปยอดรายเดือน (สำหรับ Admin)
-// GET /api/admin/deposit-requests
-// ==========================================
+// 1. API: ดึงรายการแจ้งฝากเงิน + สรุปยอดรายเดือน
 app.get('/api/admin/deposit-requests', async (req, res) => {
   try {
     const pool = await sql.connect(dbConfig);
-    
-    // 1. ดึงรายการฝากเงิน: (สถานะ Pending ทั้งหมด) OR (สถานะอื่นๆ เฉพาะวันนี้)
     const queryList = `
       SELECT 
         deposit_id, user_id, customer_name, bank_name, account_number, 
@@ -1418,7 +1412,6 @@ app.get('/api/admin/deposit-requests', async (req, res) => {
     `;
     const resultList = await pool.request().query(queryList);
 
-    // 2. ดึงสรุปยอดฝากของ "เดือนปัจจุบัน" (เฉพาะรายการที่ Approved แล้ว)
     const querySummary = `
       SELECT currency_code, SUM(amount) as total_amount
       FROM Transactions_Deposit
@@ -1429,21 +1422,69 @@ app.get('/api/admin/deposit-requests', async (req, res) => {
     `;
     const resultSummary = await pool.request().query(querySummary);
     
-    // จัดรูปแบบยอดสรุปให้เป็น Object เช่น { THB: 15000, LAK: 500000 }
     const monthlySummary = {};
     resultSummary.recordset.forEach(row => {
       monthlySummary[row.currency_code] = row.total_amount;
     });
 
-    res.json({
-      success: true,
-      requests: resultList.recordset,
-      summary: monthlySummary
-    });
-
+    res.json({ success: true, requests: resultList.recordset, summary: monthlySummary });
   } catch (error) {
     console.error('Error fetching deposit requests:', error);
     res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการดึงข้อมูล' });
+  }
+});
+
+// 2. API: อนุมัติการฝากเงิน (Approve)
+app.post('/api/admin/deposit-approve', async (req, res) => {
+  try {
+    const { depositId, userId, amount } = req.body;
+    const pool = await sql.connect(dbConfig);
+
+    // อัปเดตสถานะในตาราง Transactions_Deposit
+    await pool.request()
+      .input('depositId', sql.Int, depositId)
+      .query(`
+        UPDATE Transactions_Deposit 
+        SET status = 'Approved', reviewed_by = 'Admin'
+        WHERE deposit_id = @depositId
+      `);
+
+    // อัปเดตยอดเงินในกระเป๋าของ User 
+    await pool.request()
+      .input('userId', sql.Int, userId)
+      .input('amount', sql.Decimal(18,2), amount)
+      .query(`
+        UPDATE Users 
+        SET wallet_balance = ISNULL(wallet_balance, 0) + @amount 
+        WHERE user_id = @userId
+      `);
+
+    res.json({ success: true, message: 'อนุมัติและเติมเงินสำเร็จ' });
+  } catch (error) {
+    console.error('Error approving deposit:', error);
+    res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการอนุมัติ' });
+  }
+});
+
+// 3. API: ปฏิเสธ/ส่งกลับแก้ไขการฝากเงิน (Reject)
+app.post('/api/admin/deposit-reject', async (req, res) => {
+  try {
+    const { depositId, reason } = req.body;
+    const pool = await sql.connect(dbConfig);
+
+    await pool.request()
+      .input('depositId', sql.Int, depositId)
+      .input('reason', sql.NVarChar(255), reason)
+      .query(`
+        UPDATE Transactions_Deposit 
+        SET status = 'Rejected', reject_reason = @reason, reviewed_by = 'Admin'
+        WHERE deposit_id = @depositId
+      `);
+
+    res.json({ success: true, message: 'ส่งกลับให้ลูกค้าแก้ไขแล้ว' });
+  } catch (error) {
+    console.error('Error rejecting deposit:', error);
+    res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการปฏิเสธรายการ' });
   }
 });
 
