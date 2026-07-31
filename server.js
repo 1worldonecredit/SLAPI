@@ -1545,47 +1545,60 @@ app.post('/api/admin/key-statement', async (req, res) => {
   try {
     const { bankId, bankName, accountNumber, amount, transferDate, transferTime, adminName } = req.body;
     
-    // 🌟 เพิ่ม 2 บรรทัดนี้: ตัดคำว่า AM/ PM ออก และแปลงให้คลีนที่สุด
-    const cleanTime = transferTime.replace(/( AM| PM)/i, '').trim(); 
-    const cleanAmount = Math.round(parseFloat(amount) * 100) / 100; // ป้องกันทศนิยมเพี้ยน
+    // 1. คลีนตัวเลขเวลา (ป้องกันกรณีเบราว์เซอร์ส่งแบบแปลกๆ มา)
+    let cleanTime = transferTime.trim();
+    if (cleanTime.toLowerCase().includes('am') || cleanTime.toLowerCase().includes('pm')) {
+      const [time, modifier] = cleanTime.split(' ');
+      let [hours, minutes, seconds] = time.split(':');
+      if (hours === '12') hours = '00';
+      if (modifier.toUpperCase() === 'PM') hours = parseInt(hours, 10) + 12;
+      cleanTime = `${hours}:${minutes}:${seconds || '00'}`;
+    }
+    
+    // ถ้าเวลามาเป็น 11:11 ไม่มีวินาที ให้เติม :00 เข้าไป
+    if (cleanTime.length === 5) {
+      cleanTime = cleanTime + ':00';
+    }
+
+    const cleanAmount = Math.round(parseFloat(amount) * 100) / 100;
 
     const pool = await sql.connect(dbConfig);
 
+    // 🌟 2. เปลี่ยน sql.Date และ sql.Time เป็น sql.VarChar ทั้งหมด
+    // แล้วใช้ CAST(...) ในฝั่ง SQL เพื่อให้ SQL จัดการเอง (ปลอดภัยที่สุด)
     const insertStmt = await pool.request()
       .input('bankId', sql.Int, bankId)
       .input('bankName', sql.NVarChar, bankName)
       .input('accountNumber', sql.VarChar, accountNumber)
       .input('amount', sql.Decimal(18,2), cleanAmount)
-      .input('transferDate', sql.Date, transferDate)
-      .input('transferTime', sql.Time, cleanTime) // 🌟 ใช้ cleanTime ที่เคลียร์แล้ว
+      .input('transferDate', sql.VarChar, transferDate) 
+      .input('transferTime', sql.VarChar, cleanTime)    
       .input('recordedBy', sql.NVarChar, adminName)
       .query(`
         INSERT INTO Bank_Statements (bank_id, bank_name, account_number, amount, transfer_date, transfer_time, recorded_by, is_reconciled)
         OUTPUT INSERTED.statement_id
-        VALUES (@bankId, @bankName, @accountNumber, @amount, @transferDate, @transferTime, @recordedBy, 0)
+        VALUES (@bankId, @bankName, @accountNumber, @amount, CAST(@transferDate AS DATE), CAST(@transferTime AS TIME(0)), @recordedBy, 0)
       `);
       
     const statementId = insertStmt.recordset[0].statement_id;
 
-    // 🌟 2. ค้นหาคำขอฝากเงิน: ปรับ Logic ให้ ABS(amount - @amount) <= 0.01 
-    // เพื่อให้ยอดอย่าง 1999.99 จับคู่กับ 2000.00 ได้สำเร็จ!
     const findMatch = await pool.request()
-      .input('amount', sql.Decimal(18,2), amount)
+      .input('amount', sql.Decimal(18,2), cleanAmount)
       .input('accountNumber', sql.VarChar, accountNumber)
-      .input('transferDate', sql.Date, transferDate)
-      .input('transferTime', sql.Time, transferTime)
+      .input('transferDate', sql.VarChar, transferDate)
+      .input('transferTime', sql.VarChar, cleanTime)
       .query(`
         SELECT TOP 1 deposit_id, user_id 
         FROM Transactions_Deposit
         WHERE status = 'Pending' 
           AND account_number = @accountNumber
           AND ABS(amount - @amount) <= 0.01 
-          AND CAST(deposit_datetime AS DATE) = @transferDate
-          AND CAST(deposit_datetime AS TIME(0)) = @transferTime
+          AND CAST(deposit_datetime AS DATE) = CAST(@transferDate AS DATE)
+          AND CAST(deposit_datetime AS TIME(0)) = CAST(@transferTime AS TIME(0))
       `);
 
     if (findMatch.recordset.length > 0) {
-      // (ส่วนโค้ดอนุมัติที่เหลือ ปล่อยไว้เหมือนเดิมครับ)
+      // เจอคู่!
       const match = findMatch.recordset[0];
       
       await pool.request()
@@ -1594,7 +1607,7 @@ app.post('/api/admin/key-statement', async (req, res) => {
         
       await pool.request()
         .input('userId', sql.Int, match.user_id)
-        .input('amount', sql.Decimal(18,2), amount)
+        .input('amount', sql.Decimal(18,2), cleanAmount)
         .query("UPDATE Users SET wallet_balance = ISNULL(wallet_balance, 0) + @amount WHERE user_id = @userId");
 
       await pool.request()
@@ -1608,10 +1621,12 @@ app.post('/api/admin/key-statement', async (req, res) => {
     res.json({ success: true, message: 'บันทึกยอดเงินสำเร็จ (ยังไม่พบคำขอที่ตรงกัน รอระบบตรวจสอบภายหลัง)', autoMatched: false });
 
   } catch (error) {
-    console.error('Error in key-statement:', error);
-    res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดของเซิร์ฟเวอร์' });
+    console.error('❌ Error in key-statement:', error);
+    // 🌟 ดึง Error Message ตรงๆ มาโชว์หน้าเว็บ จะได้รู้ทันทีว่าพังที่จุดไหน
+    res.status(500).json({ success: false, message: 'ระบบขัดข้อง: ' + error.message });
   }
 });
+
 
 // ==========================================
 // API: ดึงรายงานสรุปและประวัติการคีย์ยอด
