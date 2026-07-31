@@ -1273,29 +1273,26 @@ app.get('/api/transactions/:userId', async (req, res) => {
 });
 
 // ==========================================
-// API 1: ลูกค้าแจ้งฝากเงิน (อัปเดต: ใช้ Username บันทึกแทนชื่อจริง)
+// API 1: ลูกค้าแจ้งฝากเงิน (บันทึกเป็น Pending เสมอ ต้องรอคนตรวจสลิป)
 // ==========================================
 app.post('/api/deposit-submit', async (req, res) => {
   try {
     const { userId, bankName, accountNumber, currencyCode, amount, depositDate, depositTime, slipBase64 } = req.body;
-    
     const cleanAmount = Math.round(parseFloat(amount) * 100) / 100; 
     const depositDatetime = `${depositDate} ${depositTime}`;
-    
     const pool = await sql.connect(dbConfig); 
 
-    // 🌟 1. ดึง Username จากตาราง Users มาใช้แทนชื่อจริง
+    // ดึง Username
     const userResult = await pool.request()
       .input('searchUserId', sql.Int, userId)
       .query(`SELECT username FROM Users WHERE user_id = @searchUserId`);
-      
     let customerName = 'ไม่ระบุชื่อ'; 
     if (userResult.recordset.length > 0) {
-      customerName = userResult.recordset[0].username; // ใช้ Username เลย
+      customerName = userResult.recordset[0].username;
     }
 
-    // 2. บันทึกคำขอฝากเงินของลูกค้าลงตาราง
-    const insertResult = await pool.request()
+    // บันทึกคำขอฝากเงิน (สถานะจะเป็น Pending ตลอดไปจนกว่าแอดมินจะกดอนุมัติ)
+    await pool.request()
       .input('userId', sql.Int, userId)
       .input('customerName', sql.NVarChar(100), customerName)
       .input('bankName', sql.NVarChar(100), bankName || '')
@@ -1306,48 +1303,13 @@ app.post('/api/deposit-submit', async (req, res) => {
       .input('depositDatetime', sql.DateTime, depositDatetime) 
       .query(`
         INSERT INTO Transactions_Deposit (user_id, customer_name, bank_name, account_number, amount, currency_code, slip_image, status, deposit_datetime, created_at)
-        OUTPUT INSERTED.deposit_id
         VALUES (@userId, @customerName, @bankName, @accountNumber, @amount, @currencyCode, @slipImage, 'Pending', @depositDatetime, GETDATE())
       `);
 
-    const newDepositId = insertResult.recordset[0].deposit_id;
-
-    // 3. ตรวจสอบว่าแอดมินคีย์ยอดนี้รอไว้แล้วหรือยัง? (Auto-Reconcile)
-    const findAdminStatement = await pool.request()
-      .input('amount', sql.Decimal(18,2), cleanAmount)
-      .input('accountNumber', sql.VarChar, accountNumber)
-      .input('transferDate', sql.VarChar, depositDate)
-      .input('transferTime', sql.VarChar, depositTime)
-      .query(`
-        SELECT TOP 1 statement_id FROM Bank_Statements
-        WHERE is_reconciled = 0
-          AND account_number = @accountNumber
-          AND ABS(amount - @amount) <= 0.01
-          AND CAST(transfer_date AS DATE) = CAST(@transferDate AS DATE)
-          AND CAST(transfer_time AS TIME(0)) = CAST(@transferTime AS TIME(0))
-      `);
-
-    if (findAdminStatement.recordset.length > 0) {
-      // 🌟 เจอคู่! ดำเนินการอนุมัติและเติมเงินทันที
-      const stmtId = findAdminStatement.recordset[0].statement_id;
-
-      await pool.request().input('depositId', sql.Int, newDepositId)
-        .query("UPDATE Transactions_Deposit SET status = 'Approved', reviewed_by = 'Auto-Reconciled' WHERE deposit_id = @depositId");
-
-      await pool.request().input('userId', sql.Int, userId).input('amount', sql.Decimal(18,2), cleanAmount)
-        .query("UPDATE Wallets SET balance = ISNULL(balance, 0) + @amount, last_updated = GETDATE() WHERE user_id = @userId");
-
-      await pool.request().input('userId', sql.Int, userId).input('amount', sql.Decimal(18,2), cleanAmount).input('title', sql.NVarChar(255), 'ฝากเงิน (อัตโนมัติ)')
-        .query("INSERT INTO Transactions (user_id, transaction_type, title, amount, status, created_at) VALUES (@userId, 'Deposit', @title, @amount, 'Completed', GETDATE())");
-
-      await pool.request().input('stmtId', sql.Int, stmtId).input('depositId', sql.Int, newDepositId)
-        .query("UPDATE Bank_Statements SET is_reconciled = 1, reconciled_with_deposit_id = @depositId WHERE statement_id = @stmtId");
-    }
-
-    res.json({ success: true, message: 'ส่งคำขอฝากเงินสำเร็จ!' });
+    // 🌟 เอาโค้ดเช็กเติมเงินอัตโนมัติออกทั้งหมด เพื่อบังคับให้แอดมินตรวจมือ
+    res.json({ success: true, message: 'ส่งคำขอฝากเงินสำเร็จ! รอแอดมินตรวจสอบสลิป' });
   } catch (error) {
     console.error('Error in deposit-submit:', error);
-    // 🌟 เปลี่ยนให้ส่ง Error แบบละเอียดกลับไป จะได้รู้ว่าพังที่จุดไหน
     res.status(500).json({ success: false, message: 'เซิร์ฟเวอร์ขัดข้อง: ' + error.message });
   }
 });
@@ -1558,7 +1520,7 @@ app.post('/api/deposit-submit', async (req, res) => {
 });
 
 // ==========================================
-// API 2: แอดมินคีย์ยอด (ค้นหาว่าลูกค้าแจ้งไว้ หรืออนุมัติด้วยมือไปแล้วหรือยัง)
+// API 2: แอดมินคีย์ยอดโอนเข้า (แค่บันทึกประวัติไว้ จะไม่เติมเงินให้ใครอัตโนมัติ)
 // ==========================================
 app.post('/api/admin/key-statement', async (req, res) => {
   try {
@@ -1575,6 +1537,7 @@ app.post('/api/admin/key-statement', async (req, res) => {
     const cleanAmount = Math.round(parseFloat(amount) * 100) / 100;
     const pool = await sql.connect(dbConfig);
 
+    // บันทึกยอดที่แอดมินคีย์
     const insertStmt = await pool.request()
       .input('bankId', sql.Int, bankId).input('bankName', sql.NVarChar, bankName).input('accountNumber', sql.VarChar, accountNumber)
       .input('amount', sql.Decimal(18,2), cleanAmount).input('transferDate', sql.VarChar, transferDate).input('transferTime', sql.VarChar, cleanTime).input('recordedBy', sql.NVarChar, adminName)
@@ -1585,14 +1548,13 @@ app.post('/api/admin/key-statement', async (req, res) => {
       `);
     const statementId = insertStmt.recordset[0].statement_id;
 
-    // 🌟 2.1 ค้นหาคำขอของลูกค้า (หาทั้ง Pending และ Approved ที่ยังไม่โดนผูก)
+    // ค้นหาว่ามียอดตรงกันไหม ถ้ามีแค่เชื่อม ID ไว้หากัน "แต่ไม่เปลี่ยนสถานะ และ ไม่เติมเงิน"
     const findMatch = await pool.request()
       .input('amount', sql.Decimal(18,2), cleanAmount).input('accountNumber', sql.VarChar, accountNumber).input('transferDate', sql.VarChar, transferDate).input('transferTime', sql.VarChar, cleanTime)
       .query(`
-        SELECT TOP 1 d.deposit_id, d.user_id, d.status
+        SELECT TOP 1 d.deposit_id
         FROM Transactions_Deposit d
-        LEFT JOIN Bank_Statements b ON d.deposit_id = b.reconciled_with_deposit_id
-        WHERE (d.status = 'Pending' OR (d.status = 'Approved' AND b.statement_id IS NULL))
+        WHERE d.status = 'Pending'
           AND d.account_number = @accountNumber AND ABS(d.amount - @amount) <= 0.01
           AND CAST(d.deposit_datetime AS DATE) = CAST(@transferDate AS DATE)
           AND CAST(d.deposit_datetime AS TIME(0)) = CAST(@transferTime AS TIME(0))
@@ -1601,19 +1563,14 @@ app.post('/api/admin/key-statement', async (req, res) => {
 
     if (findMatch.recordset.length > 0) {
       const match = findMatch.recordset[0];
-      if (match.status === 'Pending') {
-        await pool.request().input('depositId', sql.Int, match.deposit_id).query("UPDATE Transactions_Deposit SET status = 'Approved', reviewed_by = 'Auto-Reconciled' WHERE deposit_id = @depositId");
-        await pool.request().input('userId', sql.Int, match.user_id).input('amount', sql.Decimal(18,2), cleanAmount).query("UPDATE Wallets SET balance = ISNULL(balance, 0) + @amount, last_updated = GETDATE() WHERE user_id = @userId");
-        await pool.request().input('userId', sql.Int, match.user_id).input('amount', sql.Decimal(18,2), cleanAmount).input('title', sql.NVarChar(255), 'ฝากเงิน (อัตโนมัติ)')
-          .query("INSERT INTO Transactions (user_id, transaction_type, title, amount, status, created_at) VALUES (@userId, 'Deposit', @title, @amount, 'Completed', GETDATE())");
-      }
+      // 🌟 ผูกบิลเฉยๆ แต่สถานะฝากเงินยังเป็น Pending เหมือนเดิม บังคับให้แอดมินไปกดตรวจสลิป
       await pool.request().input('stmtId', sql.Int, statementId).input('depositId', sql.Int, match.deposit_id)
         .query("UPDATE Bank_Statements SET is_reconciled = 1, reconciled_with_deposit_id = @depositId WHERE statement_id = @stmtId");
 
-      const successMsg = match.status === 'Pending' ? 'คีย์ยอดและกระทบยอดสำเร็จ! อนุมัติเงินเข้ากระเป๋าลูกค้าแล้ว' : 'ผูกรายการสำเร็จ! (รายการนี้ถูกอนุมัติด้วยมือไปก่อนหน้านี้แล้ว)';
-      return res.json({ success: true, message: successMsg, autoMatched: true });
+      return res.json({ success: true, message: 'บันทึกยอดเงินสำเร็จ! (กรุณาไปที่หน้า "คำขอฝากเงิน" เพื่อตรวจสลิปและกดยืนยัน)' });
     }
-    res.json({ success: true, message: 'บันทึกยอดเงินสำเร็จ (ยังไม่พบคำขอที่ตรงกัน รอระบบตรวจสอบภายหลัง)', autoMatched: false });
+
+    res.json({ success: true, message: 'บันทึกยอดเงินสำเร็จ (ยังไม่พบคำขอฝากเงินล่วงหน้า)' });
   } catch (error) {
     console.error('Error:', error);
     res.status(500).json({ success: false, message: 'ระบบขัดข้อง: ' + error.message });
