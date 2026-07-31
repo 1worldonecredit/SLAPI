@@ -1425,11 +1425,13 @@ app.post('/api/deposit-submit', async (req, res) => {
 // ==========================================
 // API: ดึงรายการแจ้งฝากเงิน + สรุปยอดรายเดือน
 // ==========================================
+// ==========================================
+// API: ดึงรายการแจ้งฝากเงิน + สรุปยอดรายเดือน (สำหรับ Admin)
+// ==========================================
 app.get('/api/admin/deposit-requests', async (req, res) => {
   try {
     const pool = await sql.connect(dbConfig);
     
-    // 🌟 แก้ไข: ใช้ FORMAT() เพื่อแปลงวันที่เป็น String ป้องกันเบราว์เซอร์บวกเวลา +7
     const queryList = `
       SELECT 
         deposit_id, user_id, customer_name, bank_name, account_number, 
@@ -1444,14 +1446,15 @@ app.get('/api/admin/deposit-requests', async (req, res) => {
     `;
     const resultList = await pool.request().query(queryList);
 
-    // ... (ส่วน querySummary ด้านล่างปล่อยไว้เหมือนเดิมครับ) ...
+    // 🌟 แก้ไข: ดึงเฉพาะยอดที่ "กระทบยอดสำเร็จแล้ว" (มีรหัสอ้างอิงในตาราง Bank_Statements)
     const querySummary = `
-      SELECT currency_code, SUM(amount) as total_amount
-      FROM Transactions_Deposit
-      WHERE status = 'Approved'
-        AND MONTH(created_at) = MONTH(GETDATE())
-        AND YEAR(created_at) = YEAR(GETDATE())
-      GROUP BY currency_code
+      SELECT t.currency_code, ISNULL(SUM(t.amount), 0) as total_amount
+      FROM Transactions_Deposit t
+      INNER JOIN Bank_Statements b ON t.deposit_id = b.reconciled_with_deposit_id
+      WHERE t.status = 'Approved'
+        AND MONTH(t.created_at) = MONTH(GETDATE())
+        AND YEAR(t.created_at) = YEAR(GETDATE())
+      GROUP BY t.currency_code
     `;
     const resultSummary = await pool.request().query(querySummary);
     
@@ -1461,6 +1464,7 @@ app.get('/api/admin/deposit-requests', async (req, res) => {
     });
 
     res.json({ success: true, requests: resultList.recordset, summary: monthlySummary });
+
   } catch (error) {
     console.error('Error fetching deposit requests:', error);
     res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการดึงข้อมูล' });
