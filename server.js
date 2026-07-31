@@ -1544,16 +1544,20 @@ app.get('/api/admin/banks', async (req, res) => {
 app.post('/api/admin/key-statement', async (req, res) => {
   try {
     const { bankId, bankName, accountNumber, amount, transferDate, transferTime, adminName } = req.body;
+    
+    // 🌟 เพิ่ม 2 บรรทัดนี้: ตัดคำว่า AM/ PM ออก และแปลงให้คลีนที่สุด
+    const cleanTime = transferTime.replace(/( AM| PM)/i, '').trim(); 
+    const cleanAmount = Math.round(parseFloat(amount) * 100) / 100; // ป้องกันทศนิยมเพี้ยน
+
     const pool = await sql.connect(dbConfig);
 
-    // 1. บันทึก Bank_Statements (เหมือนเดิม)
     const insertStmt = await pool.request()
       .input('bankId', sql.Int, bankId)
       .input('bankName', sql.NVarChar, bankName)
       .input('accountNumber', sql.VarChar, accountNumber)
-      .input('amount', sql.Decimal(18,2), amount)
+      .input('amount', sql.Decimal(18,2), cleanAmount)
       .input('transferDate', sql.Date, transferDate)
-      .input('transferTime', sql.Time, transferTime)
+      .input('transferTime', sql.Time, cleanTime) // 🌟 ใช้ cleanTime ที่เคลียร์แล้ว
       .input('recordedBy', sql.NVarChar, adminName)
       .query(`
         INSERT INTO Bank_Statements (bank_id, bank_name, account_number, amount, transfer_date, transfer_time, recorded_by, is_reconciled)
