@@ -1397,29 +1397,48 @@ app.post('/api/deposit-submit', async (req, res) => {
   }
 });
 
+
 // ==========================================
-// API: ดึงรายการแจ้งฝากเงิน (สำหรับ Admin)
+// API: ดึงรายการแจ้งฝากเงิน + สรุปยอดรายเดือน (สำหรับ Admin)
 // GET /api/admin/deposit-requests
 // ==========================================
 app.get('/api/admin/deposit-requests', async (req, res) => {
   try {
     const pool = await sql.connect(dbConfig);
     
-    // ดึงเฉพาะรายการที่ status = 'Pending' และเรียงจากใหม่ไปเก่า
-    const query = `
+    // 1. ดึงรายการฝากเงิน: (สถานะ Pending ทั้งหมด) OR (สถานะอื่นๆ เฉพาะวันนี้)
+    const queryList = `
       SELECT 
         deposit_id, user_id, customer_name, bank_name, account_number, 
-        amount, currency_code, slip_image, status, deposit_datetime, created_at
+        amount, currency_code, slip_image, status, deposit_datetime, created_at, reject_reason
       FROM Transactions_Deposit
-      WHERE status = 'Pending'
-      ORDER BY created_at ASC
+      WHERE status = 'Pending' 
+         OR CAST(created_at AS DATE) = CAST(GETDATE() AS DATE)
+      ORDER BY created_at DESC
     `;
+    const resultList = await pool.request().query(queryList);
+
+    // 2. ดึงสรุปยอดฝากของ "เดือนปัจจุบัน" (เฉพาะรายการที่ Approved แล้ว)
+    const querySummary = `
+      SELECT currency_code, SUM(amount) as total_amount
+      FROM Transactions_Deposit
+      WHERE status = 'Approved'
+        AND MONTH(created_at) = MONTH(GETDATE())
+        AND YEAR(created_at) = YEAR(GETDATE())
+      GROUP BY currency_code
+    `;
+    const resultSummary = await pool.request().query(querySummary);
     
-    const result = await pool.request().query(query);
+    // จัดรูปแบบยอดสรุปให้เป็น Object เช่น { THB: 15000, LAK: 500000 }
+    const monthlySummary = {};
+    resultSummary.recordset.forEach(row => {
+      monthlySummary[row.currency_code] = row.total_amount;
+    });
 
     res.json({
       success: true,
-      requests: result.recordset
+      requests: resultList.recordset,
+      summary: monthlySummary
     });
 
   } catch (error) {
