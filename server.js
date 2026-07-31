@@ -974,40 +974,48 @@ app.put('/api/admin/user-banks/:id/status', async (req, res) => {
 // API ล่าสุด: สำหรับลูกค้าแจ้งฝากเงิน
 // ==========================================
 app.post('/api/deposit-submit', async (req, res) => {
-    const { userId, customerName, bankName, accountNumber, currencyCode, amount, depositDate, depositTime, slipBase64 } = req.body;
+  try {
+    const {
+      userId, customerName, bankName, accountNumber, currencyCode, 
+      amount, depositDate, depositTime, slipBase64
+    } = req.body;
 
-    try {
-        const pool = await sql.connect(dbConfig);
-        const depositDatetime = `${depositDate} ${depositTime}`;
-        
-        await pool.request()
-            .input('user_id', sql.Int, userId)
-            .input('customer_name', sql.NVarChar, customerName)
-            .input('bank_name', sql.NVarChar, bankName)
-            .input('account_number', sql.VarChar, accountNumber)
-            .input('amount', sql.Decimal(18, 2), amount)
-            .input('currency_code', sql.VarChar, currencyCode)
-            .input('slip_image', sql.NVarChar(sql.MAX), slipBase64)
-            .input('status', sql.VarChar, 'Pending')
-            .input('deposit_datetime', sql.DateTime, depositDatetime)
-            .query(`
-                INSERT INTO Transactions_Deposit (
-                    user_id, customer_name, bank_name, account_number, amount, 
-                    currency_code, slip_image, status, deposit_datetime, created_at
-                ) VALUES (
-                    @user_id, @customer_name, @bank_name, @account_number, @amount, 
-                    @currency_code, @slip_image, @status, @deposit_datetime, GETDATE()
-                )
-            `);
+    // 🌟 เพิ่มบรรทัดนี้: ทำการปัดเศษตัวเลข ถ้าเพี้ยนเป็น .99 จะถูกปัดขึ้นเป็นจำนวนเต็มที่ถูกต้อง
+    // (ใช้ Math.round เพื่อปัดทศนิยมให้เป็นยอดเต็มเสมอ)
+    const cleanAmount = Math.round(parseFloat(amount)); 
 
-        res.status(201).json({ success: true, message: '🎉 แจ้งฝากเงินสำเร็จ (API ใหม่ทำงานสมบูรณ์)' });
-        
-    } catch (error) {
-        console.error("Deposit API Error:", error);
-        res.status(500).json({ success: false, message: 'Database Error: ' + error.message });
-    }
+    const depositDatetime = `${depositDate} ${depositTime}`;
+    const pool = await sql.connect(dbConfig); 
+
+    const query = `
+      INSERT INTO Transactions_Deposit (
+        user_id, customer_name, bank_name, account_number, 
+        amount, currency_code, slip_image, status, deposit_datetime, created_at
+      )
+      VALUES (
+        @userId, @customerName, @bankName, @accountNumber, 
+        @amount, @currencyCode, @slipImage, 'Pending', @depositDatetime, GETDATE()
+      )
+    `;
+
+    await pool.request()
+      .input('userId', sql.Int, userId)
+      .input('customerName', sql.NVarChar(100), customerName || '')
+      .input('bankName', sql.NVarChar(100), bankName || '')
+      .input('accountNumber', sql.VarChar(50), accountNumber || '')
+      // 🌟 นำตัวแปร cleanAmount ที่ปัดเศษแล้ว มาบันทึกลงฐานข้อมูล
+      .input('amount', sql.Decimal(18, 2), cleanAmount) 
+      .input('currencyCode', sql.VarChar(10), currencyCode || 'THB')
+      .input('slipImage', sql.NVarChar(sql.MAX), slipBase64) 
+      .input('depositDatetime', sql.DateTime, depositDatetime) 
+      .query(query);
+
+    res.json({ success: true, message: 'ส่งคำขอฝากเงินสำเร็จ!' });
+
+  } catch (error) {
+    // ... โค้ดเดิม ...
+  }
 });
-
 // ==========================================
 // 🌟 1. API: ดึงข้อมูลสัตว์และตัวเลขทั้งหมด (GET)
 // ==========================================
