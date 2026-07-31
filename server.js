@@ -1741,6 +1741,39 @@ app.get('/api/admin/statement-report', async (req, res) => {
   }
 });
 
+// ==========================================
+// API: ดึงประวัติการฝากเงิน (สำหรับฝั่งลูกค้า)
+// GET /api/user/deposits/:userId
+// ==========================================
+app.get('/api/user/deposits/:userId', async (req, res) => {
+  try {
+    const userId = req.params.userId;
+    const pool = await sql.connect(dbConfig);
+    
+    // ดึงข้อมูลเรียงจากล่าสุดไปเก่าสุด
+    const query = `
+      SELECT 
+        deposit_id, amount, currency_code, status, 
+        reject_reason, 
+        FORMAT(deposit_datetime, 'yyyy-MM-dd HH:mm:ss') AS deposit_datetime,
+        FORMAT(created_at, 'yyyy-MM-dd HH:mm:ss') AS created_at
+      FROM Transactions_Deposit
+      WHERE user_id = @userId
+      ORDER BY created_at DESC
+    `;
+    
+    const result = await pool.request()
+      .input('userId', sql.Int, userId)
+      .query(query);
+
+    res.json({ success: true, history: result.recordset });
+
+  } catch (error) {
+    console.error('Error fetching user deposits:', error);
+    res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการดึงประวัติ' });
+  }
+});
+
 
 app.listen(port, () => {
     console.log(`🚀 Server เปิดทำงานแล้วที่พอร์ต ${port}`);
