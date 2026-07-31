@@ -1362,14 +1362,14 @@ app.get('/api/admin/deposit-requests', async (req, res) => {
 });
 
 // ==========================================
-// API ตัวที่ 2: อนุมัติการฝากเงิน (Approve แบบแมนนวลโดย Admin)
+// API 2: แอดมินกดตรวจสลิป (เมื่อสลิปผ่าน จะวิ่งไปเปลี่ยนสถานะบิลที่คีย์ไว้ให้เป็น "สำเร็จ")
 // ==========================================
 app.post('/api/admin/deposit-approve', async (req, res) => {
   try {
     const { depositId, userId, amount } = req.body;
     const pool = await sql.connect(dbConfig);
 
-    // 1. อัปเดตสถานะในตาราง Transactions_Deposit
+    // 1. อัปเดตสถานะสลิปเป็น Approved
     await pool.request()
       .input('depositId', sql.Int, depositId)
       .query(`
@@ -1378,7 +1378,7 @@ app.post('/api/admin/deposit-approve', async (req, res) => {
         WHERE deposit_id = @depositId
       `);
 
-    // 2. เติมเงินเข้าตาราง Wallets
+    // 2. เติมเงินให้ลูกค้า
     await pool.request()
       .input('userId', sql.Int, userId)
       .input('amount', sql.Decimal(18,2), amount)
@@ -1388,7 +1388,7 @@ app.post('/api/admin/deposit-approve', async (req, res) => {
         WHERE user_id = @userId
       `);
 
-    // 3. บันทึกประวัติในตาราง Transactions พร้อม title
+    // 3. บันทึก Transactions ฝั่งผู้เล่น
     await pool.request()
       .input('userId', sql.Int, userId)
       .input('amount', sql.Decimal(18,2), amount)
@@ -1398,13 +1398,31 @@ app.post('/api/admin/deposit-approve', async (req, res) => {
         VALUES (@userId, 'Deposit', @title, @amount, 'Completed', GETDATE())
       `);
 
-    res.json({ success: true, message: 'อนุมัติและเติมเงินสำเร็จ' });
+    // 🌟 4. ผูกบิลย้อนหลัง: ค้นหาว่าฝ่ายบัญชีคีย์ยอด "รอกระทบยอด" ทิ้งไว้ไหม? 
+    // ถ้าเจอ ให้จับคู่และเปลี่ยนสถานะบัญชีเป็น "สำเร็จ" (is_reconciled = 1)
+    await pool.request()
+      .input('depositId', sql.Int, depositId)
+      .query(`
+        UPDATE Bank_Statements 
+        SET is_reconciled = 1, reconciled_with_deposit_id = @depositId
+        WHERE statement_id = (
+            SELECT TOP 1 bs.statement_id 
+            FROM Bank_Statements bs
+            INNER JOIN Transactions_Deposit d ON d.deposit_id = @depositId
+            WHERE bs.is_reconciled = 0
+              AND bs.account_number = d.account_number 
+              AND ABS(bs.amount - d.amount) <= 0.01
+              AND CAST(bs.transfer_date AS DATE) = CAST(d.deposit_datetime AS DATE)
+              AND CAST(bs.transfer_time AS TIME(0)) = CAST(d.deposit_datetime AS TIME(0))
+        )
+      `);
+
+    res.json({ success: true, message: 'ตรวจสลิปผ่านและเติมเงินสำเร็จ!' });
   } catch (error) {
     console.error('Error approving deposit:', error);
-    res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการอนุมัติ' });
+    res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการอนุมัติสลิป' });
   }
 });
-
 
 // 3. API: ปฏิเสธ/ส่งกลับแก้ไขการฝากเงิน (Reject)
 app.post('/api/admin/deposit-reject', async (req, res) => {
@@ -1520,7 +1538,7 @@ app.post('/api/deposit-submit', async (req, res) => {
 });
 
 // ==========================================
-// API 2: แอดมินคีย์ยอดโอนเข้า (แค่บันทึกประวัติไว้ จะไม่เติมเงินให้ใครอัตโนมัติ)
+// API 1: แอดมินคีย์ยอดเงินรับ (เริ่มที่ "รอกระทบยอด" เสมอ)
 // ==========================================
 app.post('/api/admin/key-statement', async (req, res) => {
   try {
@@ -1537,7 +1555,7 @@ app.post('/api/admin/key-statement', async (req, res) => {
     const cleanAmount = Math.round(parseFloat(amount) * 100) / 100;
     const pool = await sql.connect(dbConfig);
 
-    // บันทึกยอดที่แอดมินคีย์
+    // 1. บันทึกยอดที่แอดมินคีย์ (ค่าเริ่มต้น is_reconciled = 0 คือ "รอกระทบยอด")
     const insertStmt = await pool.request()
       .input('bankId', sql.Int, bankId).input('bankName', sql.NVarChar, bankName).input('accountNumber', sql.VarChar, accountNumber)
       .input('amount', sql.Decimal(18,2), cleanAmount).input('transferDate', sql.VarChar, transferDate).input('transferTime', sql.VarChar, cleanTime).input('recordedBy', sql.NVarChar, adminName)
@@ -1548,29 +1566,31 @@ app.post('/api/admin/key-statement', async (req, res) => {
       `);
     const statementId = insertStmt.recordset[0].statement_id;
 
-    // ค้นหาว่ามียอดตรงกันไหม ถ้ามีแค่เชื่อม ID ไว้หากัน "แต่ไม่เปลี่ยนสถานะ และ ไม่เติมเงิน"
+    // 🌟 2. ค้นหาว่ามีสลิปที่แอดมินคนอื่นเคยกด "อนุมัติแล้ว" (Approved) ไว้ก่อนหน้านี้หรือไม่?
+    // (จะไม่จับคู่กับบิล Pending เด็ดขาด)
     const findMatch = await pool.request()
       .input('amount', sql.Decimal(18,2), cleanAmount).input('accountNumber', sql.VarChar, accountNumber).input('transferDate', sql.VarChar, transferDate).input('transferTime', sql.VarChar, cleanTime)
       .query(`
         SELECT TOP 1 d.deposit_id
         FROM Transactions_Deposit d
-        WHERE d.status = 'Pending'
+        WHERE d.status = 'Approved'
           AND d.account_number = @accountNumber AND ABS(d.amount - @amount) <= 0.01
           AND CAST(d.deposit_datetime AS DATE) = CAST(@transferDate AS DATE)
           AND CAST(d.deposit_datetime AS TIME(0)) = CAST(@transferTime AS TIME(0))
+          AND d.deposit_id NOT IN (SELECT reconciled_with_deposit_id FROM Bank_Statements WHERE is_reconciled = 1 AND reconciled_with_deposit_id IS NOT NULL)
         ORDER BY d.created_at DESC
       `);
 
     if (findMatch.recordset.length > 0) {
       const match = findMatch.recordset[0];
-      // 🌟 ผูกบิลเฉยๆ แต่สถานะฝากเงินยังเป็น Pending เหมือนเดิม บังคับให้แอดมินไปกดตรวจสลิป
+      // ถ้าเจอสลิปที่ตรวจผ่านแล้ว ค่อยเปลี่ยนเป็น "สำเร็จ" (is_reconciled = 1)
       await pool.request().input('stmtId', sql.Int, statementId).input('depositId', sql.Int, match.deposit_id)
         .query("UPDATE Bank_Statements SET is_reconciled = 1, reconciled_with_deposit_id = @depositId WHERE statement_id = @stmtId");
 
-      return res.json({ success: true, message: 'บันทึกยอดเงินสำเร็จ! (กรุณาไปที่หน้า "คำขอฝากเงิน" เพื่อตรวจสลิปและกดยืนยัน)' });
+      return res.json({ success: true, message: 'บันทึกและกระทบยอดสำเร็จ! (จับคู่กับสลิปที่คุณตรวจผ่านไว้แล้ว)' });
     }
 
-    res.json({ success: true, message: 'บันทึกยอดเงินสำเร็จ (ยังไม่พบคำขอฝากเงินล่วงหน้า)' });
+    res.json({ success: true, message: 'บันทึกยอดเงินสำเร็จ (สถานะ: รอกระทบยอดกับสลิป)' });
   } catch (error) {
     console.error('Error:', error);
     res.status(500).json({ success: false, message: 'ระบบขัดข้อง: ' + error.message });
