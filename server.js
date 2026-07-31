@@ -1488,6 +1488,254 @@ app.post('/api/admin/deposit-reject', async (req, res) => {
   }
 });
 
+// ==========================================
+// API: ดึงรายชื่อธนาคารสำหรับ Dropdown
+// ==========================================
+app.get('/api/admin/banks', async (req, res) => {
+  try {
+    const pool = await sql.connect(dbConfig);
+    const result = await pool.request().query("SELECT * FROM Banks WHERE is_active = 1");
+    res.json({ success: true, banks: result.recordset });
+  } catch (error) {
+    res.status(500).json({ success: false, message: 'ไม่สามารถดึงข้อมูลธนาคารได้' });
+  }
+});
+
+// ==========================================
+// API: คีย์ยอดเงินเข้า และ กระทบยอดอัตโนมัติ (Auto-Reconciliation)
+// ==========================================
+app.post('/api/admin/key-statement', async (req, res) => {
+  try {
+    const { bankId, bankName, accountNumber, amount, transferDate, transferTime, adminName } = req.body;
+    const pool = await sql.connect(dbConfig);
+
+    // 1. บันทึกข้อมูลที่แอดมินคีย์ลง Bank_Statements (เริ่มต้นสถานะยังไม่จับคู่)
+    const insertStmt = await pool.request()
+      .input('bankId', sql.Int, bankId)
+      .input('bankName', sql.NVarChar, bankName)
+      .input('accountNumber', sql.VarChar, accountNumber)
+      .input('amount', sql.Decimal(18,2), amount)
+      .input('transferDate', sql.Date, transferDate)
+      .input('transferTime', sql.Time, transferTime)
+      .input('recordedBy', sql.NVarChar, adminName)
+      .query(`
+        INSERT INTO Bank_Statements (bank_id, bank_name, account_number, amount, transfer_date, transfer_time, recorded_by, is_reconciled)
+        OUTPUT INSERTED.statement_id
+        VALUES (@bankId, @bankName, @accountNumber, @amount, @transferDate, @transferTime, @recordedBy, 0)
+      `);
+      
+    const statementId = insertStmt.recordset[0].statement_id;
+
+    // 2. ค้นหาคำขอฝากเงินของลูกค้าที่ "รอตรวจสอบ (Pending)" และข้อมูลตรงกันทุกประการ
+    const findMatch = await pool.request()
+      .input('amount', sql.Decimal(18,2), amount)
+      .input('accountNumber', sql.VarChar, accountNumber)
+      .input('transferDate', sql.Date, transferDate)
+      .input('transferTime', sql.Time, transferTime)
+      .query(`
+        SELECT TOP 1 deposit_id, user_id 
+        FROM Transactions_Deposit
+        WHERE status = 'Pending' 
+          AND account_number = @accountNumber
+          AND amount = @amount
+          AND CAST(deposit_datetime AS DATE) = @transferDate
+          AND CAST(deposit_datetime AS TIME(0)) = @transferTime
+      `);
+
+    if (findMatch.recordset.length > 0) {
+      // 🎉 เจอข้อมูลที่ตรงกัน! ดำเนินการอนุมัติอัตโนมัติ
+      const match = findMatch.recordset[0];
+      
+      // อัปเดตสถานะคำขอฝากเงิน
+      await pool.request()
+        .input('depositId', sql.Int, match.deposit_id)
+        .query("UPDATE Transactions_Deposit SET status = 'Approved', reviewed_by = 'Auto-Reconciled' WHERE deposit_id = @depositId");
+        
+      // เติมเงินเข้ากระเป๋าลูกค้า
+      await pool.request()
+        .input('userId', sql.Int, match.user_id)
+        .input('amount', sql.Decimal(18,2), amount)
+        .query("UPDATE Users SET wallet_balance = ISNULL(wallet_balance, 0) + @amount WHERE user_id = @userId");
+
+      // อัปเดตตาราง Bank_Statements ว่าจับคู่แล้ว
+      await pool.request()
+        .input('stmtId', sql.Int, statementId)
+        .input('depositId', sql.Int, match.deposit_id)
+        .query("UPDATE Bank_Statements SET is_reconciled = 1, reconciled_with_deposit_id = @depositId WHERE statement_id = @stmtId");
+
+      return res.json({ success: true, message: 'คีย์ยอดและกระทบยอดสำเร็จ! อนุมัติเงินเข้ากระเป๋าลูกค้าแล้ว', autoMatched: true });
+    }
+
+    // กรณีไม่เจอคู่
+    res.json({ success: true, message: 'บันทึกยอดเงินสำเร็จ (ยังไม่พบคำขอที่ตรงกัน รอระบบตรวจสอบภายหลัง)', autoMatched: false });
+
+  } catch (error) {
+    console.error('Error in key-statement:', error);
+    res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดของเซิร์ฟเวอร์' });
+  }
+});
+
+// ==========================================
+// API: ดึงรายงานสรุปและประวัติการคีย์ยอด
+// ==========================================
+app.get('/api/admin/statement-report', async (req, res) => {
+  try {
+    const { startDate, endDate } = req.query;
+    const pool = await sql.connect(dbConfig);
+    
+    // ดึงประวัติที่กรองตามช่วงวันที่
+    let query = "SELECT * FROM Bank_Statements WHERE 1=1";
+    if (startDate && endDate) {
+      query += ` AND transfer_date >= '${startDate}' AND transfer_date <= '${endDate}'`;
+    }
+    query += " ORDER BY created_at DESC";
+    
+    const records = await pool.request().query(query);
+
+    // คำนวณสรุปยอดวันนี้ และเดือนนี้
+    const summary = await pool.request().query(`
+      SELECT 
+        ISNULL(SUM(CASE WHEN CAST(created_at AS DATE) = CAST(GETDATE() AS DATE) THEN amount ELSE 0 END), 0) AS todayTotal,
+        ISNULL(SUM(CASE WHEN MONTH(created_at) = MONTH(GETDATE()) AND YEAR(created_at) = YEAR(GETDATE()) THEN amount ELSE 0 END), 0) AS monthlyTotal
+      FROM Bank_Statements
+    `);
+
+    res.json({ 
+      success: true, 
+      records: records.recordset, 
+      todayTotal: summary.recordset[0].todayTotal,
+      monthlyTotal: summary.recordset[0].monthlyTotal
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: 'ไม่สามารถดึงรายงานได้' });
+  }
+});
+
+
+// ==========================================
+// API: ดึงรายชื่อธนาคารสำหรับ Dropdown
+// ==========================================
+app.get('/api/admin/banks', async (req, res) => {
+  try {
+    const pool = await sql.connect(dbConfig);
+    const result = await pool.request().query("SELECT * FROM Banks WHERE is_active = 1");
+    res.json({ success: true, banks: result.recordset });
+  } catch (error) {
+    res.status(500).json({ success: false, message: 'ไม่สามารถดึงข้อมูลธนาคารได้' });
+  }
+});
+
+// ==========================================
+// API: คีย์ยอดเงินเข้า และ กระทบยอดอัตโนมัติ (Auto-Reconciliation)
+// ==========================================
+app.post('/api/admin/key-statement', async (req, res) => {
+  try {
+    const { bankId, bankName, accountNumber, amount, transferDate, transferTime, adminName } = req.body;
+    const pool = await sql.connect(dbConfig);
+
+    // 1. บันทึกข้อมูลที่แอดมินคีย์ลง Bank_Statements (เริ่มต้นสถานะยังไม่จับคู่)
+    const insertStmt = await pool.request()
+      .input('bankId', sql.Int, bankId)
+      .input('bankName', sql.NVarChar, bankName)
+      .input('accountNumber', sql.VarChar, accountNumber)
+      .input('amount', sql.Decimal(18,2), amount)
+      .input('transferDate', sql.Date, transferDate)
+      .input('transferTime', sql.Time, transferTime)
+      .input('recordedBy', sql.NVarChar, adminName)
+      .query(`
+        INSERT INTO Bank_Statements (bank_id, bank_name, account_number, amount, transfer_date, transfer_time, recorded_by, is_reconciled)
+        OUTPUT INSERTED.statement_id
+        VALUES (@bankId, @bankName, @accountNumber, @amount, @transferDate, @transferTime, @recordedBy, 0)
+      `);
+      
+    const statementId = insertStmt.recordset[0].statement_id;
+
+    // 2. ค้นหาคำขอฝากเงินของลูกค้าที่ "รอตรวจสอบ (Pending)" และข้อมูลตรงกันทุกประการ
+    const findMatch = await pool.request()
+      .input('amount', sql.Decimal(18,2), amount)
+      .input('accountNumber', sql.VarChar, accountNumber)
+      .input('transferDate', sql.Date, transferDate)
+      .input('transferTime', sql.Time, transferTime)
+      .query(`
+        SELECT TOP 1 deposit_id, user_id 
+        FROM Transactions_Deposit
+        WHERE status = 'Pending' 
+          AND account_number = @accountNumber
+          AND amount = @amount
+          AND CAST(deposit_datetime AS DATE) = @transferDate
+          AND CAST(deposit_datetime AS TIME(0)) = @transferTime
+      `);
+
+    if (findMatch.recordset.length > 0) {
+      // 🎉 เจอข้อมูลที่ตรงกัน! ดำเนินการอนุมัติอัตโนมัติ
+      const match = findMatch.recordset[0];
+      
+      // อัปเดตสถานะคำขอฝากเงิน
+      await pool.request()
+        .input('depositId', sql.Int, match.deposit_id)
+        .query("UPDATE Transactions_Deposit SET status = 'Approved', reviewed_by = 'Auto-Reconciled' WHERE deposit_id = @depositId");
+        
+      // เติมเงินเข้ากระเป๋าลูกค้า
+      await pool.request()
+        .input('userId', sql.Int, match.user_id)
+        .input('amount', sql.Decimal(18,2), amount)
+        .query("UPDATE Users SET wallet_balance = ISNULL(wallet_balance, 0) + @amount WHERE user_id = @userId");
+
+      // อัปเดตตาราง Bank_Statements ว่าจับคู่แล้ว
+      await pool.request()
+        .input('stmtId', sql.Int, statementId)
+        .input('depositId', sql.Int, match.deposit_id)
+        .query("UPDATE Bank_Statements SET is_reconciled = 1, reconciled_with_deposit_id = @depositId WHERE statement_id = @stmtId");
+
+      return res.json({ success: true, message: 'คีย์ยอดและกระทบยอดสำเร็จ! อนุมัติเงินเข้ากระเป๋าลูกค้าแล้ว', autoMatched: true });
+    }
+
+    // กรณีไม่เจอคู่
+    res.json({ success: true, message: 'บันทึกยอดเงินสำเร็จ (ยังไม่พบคำขอที่ตรงกัน รอระบบตรวจสอบภายหลัง)', autoMatched: false });
+
+  } catch (error) {
+    console.error('Error in key-statement:', error);
+    res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดของเซิร์ฟเวอร์' });
+  }
+});
+
+// ==========================================
+// API: ดึงรายงานสรุปและประวัติการคีย์ยอด
+// ==========================================
+app.get('/api/admin/statement-report', async (req, res) => {
+  try {
+    const { startDate, endDate } = req.query;
+    const pool = await sql.connect(dbConfig);
+    
+    // ดึงประวัติที่กรองตามช่วงวันที่
+    let query = "SELECT * FROM Bank_Statements WHERE 1=1";
+    if (startDate && endDate) {
+      query += ` AND transfer_date >= '${startDate}' AND transfer_date <= '${endDate}'`;
+    }
+    query += " ORDER BY created_at DESC";
+    
+    const records = await pool.request().query(query);
+
+    // คำนวณสรุปยอดวันนี้ และเดือนนี้
+    const summary = await pool.request().query(`
+      SELECT 
+        ISNULL(SUM(CASE WHEN CAST(created_at AS DATE) = CAST(GETDATE() AS DATE) THEN amount ELSE 0 END), 0) AS todayTotal,
+        ISNULL(SUM(CASE WHEN MONTH(created_at) = MONTH(GETDATE()) AND YEAR(created_at) = YEAR(GETDATE()) THEN amount ELSE 0 END), 0) AS monthlyTotal
+      FROM Bank_Statements
+    `);
+
+    res.json({ 
+      success: true, 
+      records: records.recordset, 
+      todayTotal: summary.recordset[0].todayTotal,
+      monthlyTotal: summary.recordset[0].monthlyTotal
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: 'ไม่สามารถดึงรายงานได้' });
+  }
+});
+
+
 app.listen(port, () => {
     console.log(`🚀 Server เปิดทำงานแล้วที่พอร์ต ${port}`);
 });
