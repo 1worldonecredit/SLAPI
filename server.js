@@ -1273,90 +1273,82 @@ app.get('/api/transactions/:userId', async (req, res) => {
 });
 
 // ==========================================
-// API: รับคำขอแจ้งฝากเงินจากผู้ใช้
-// POST /api/deposit-submit
+// API 1: ลูกค้าแจ้งฝากเงิน (อัปเดต: ใช้ Username บันทึกแทนชื่อจริง)
 // ==========================================
 app.post('/api/deposit-submit', async (req, res) => {
   try {
-    // 1. รับข้อมูลที่ส่งมาจากหน้า Deposit.jsx
-    const {
-      userId,
-      customerName,
-      bankName,
-      accountNumber,
-      currencyCode,
-      amount,
-      depositDate,
-      depositTime,
-      slipBase64
-    } = req.body;
+    const { userId, bankName, accountNumber, currencyCode, amount, depositDate, depositTime, slipBase64 } = req.body;
+    
+    const cleanAmount = Math.round(parseFloat(amount) * 100) / 100; 
+    const depositDatetime = `${depositDate} ${depositTime}`;
+    
+    const pool = await sql.connect(dbConfig); 
 
-    // 2. ตรวจสอบว่าส่งข้อมูลสำคัญมาครบหรือไม่
-    if (!userId || !amount || !slipBase64 || !depositDate || !depositTime) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'กรุณากรอกข้อมูลและแนบสลิปให้ครบถ้วน' 
-      });
+    // 🌟 1. ดึง Username จากตาราง Users มาใช้แทนชื่อจริง
+    const userResult = await pool.request()
+      .input('searchUserId', sql.Int, userId)
+      .query(`SELECT username FROM Users WHERE user_id = @searchUserId`);
+      
+    let customerName = 'ไม่ระบุชื่อ'; 
+    if (userResult.recordset.length > 0) {
+      customerName = userResult.recordset[0].username; // ใช้ Username เลย
     }
 
-    // 3. เชื่อมต่อฐานข้อมูล MSSQL
-    const pool = await sql.connect(dbConfig); // เช็กชื่อตัวแปร dbConfig ของคุณด้วยนะครับ
-
-    // 4. บันทึกข้อมูลลงตาราง Transactions_Deposit (สถานะ 'Pending')
-    // หมายเหตุ: ตรวจสอบชื่อคอลัมน์ให้ตรงกับในฐานข้อมูลของคุณ
-    const query = `
-      INSERT INTO Transactions_Deposit (
-        user_id, 
-        customer_name, 
-        system_bank_name, 
-        system_account_number, 
-        currency_code, 
-        amount, 
-        deposit_date, 
-        deposit_time, 
-        slip_image, 
-        status, 
-        created_at
-      )
-      VALUES (
-        @userId, 
-        @customerName, 
-        @bankName, 
-        @accountNumber, 
-        @currencyCode, 
-        @amount, 
-        @depositDate, 
-        @depositTime, 
-        @slipImage, 
-        'Pending', 
-        GETDATE()
-      )
-    `;
-
-    await pool.request()
+    // 2. บันทึกคำขอฝากเงินของลูกค้าลงตาราง
+    const insertResult = await pool.request()
       .input('userId', sql.Int, userId)
-      .input('customerName', sql.NVarChar, customerName || '')
-      .input('bankName', sql.NVarChar, bankName || '')
-      .input('accountNumber', sql.VarChar, accountNumber || '')
-      .input('currencyCode', sql.VarChar, currencyCode || 'THB')
-      .input('amount', sql.Decimal(18, 2), amount)
-      .input('depositDate', sql.Date, depositDate)
-      .input('depositTime', sql.Time, depositTime)
-      .input('slipImage', sql.VarChar(sql.MAX), slipBase64) // เก็บรูปเป็น Base64 String
-      .query(query);
+      .input('customerName', sql.NVarChar(100), customerName)
+      .input('bankName', sql.NVarChar(100), bankName || '')
+      .input('accountNumber', sql.VarChar(50), accountNumber || '')
+      .input('amount', sql.Decimal(18, 2), cleanAmount) 
+      .input('currencyCode', sql.VarChar(10), currencyCode || 'THB')
+      .input('slipImage', sql.NVarChar(sql.MAX), slipBase64) 
+      .input('depositDatetime', sql.DateTime, depositDatetime) 
+      .query(`
+        INSERT INTO Transactions_Deposit (user_id, customer_name, bank_name, account_number, amount, currency_code, slip_image, status, deposit_datetime, created_at)
+        OUTPUT INSERTED.deposit_id
+        VALUES (@userId, @customerName, @bankName, @accountNumber, @amount, @currencyCode, @slipImage, 'Pending', @depositDatetime, GETDATE())
+      `);
 
-    // 5. ส่งสถานะความสำเร็จกลับไปให้ Frontend
-    res.json({ 
-      success: true, 
-      message: '✅ ส่งคำขอฝากเงินสำเร็จ! กรุณารอแอดมินตรวจสอบสักครู่' 
-    });
+    const newDepositId = insertResult.recordset[0].deposit_id;
 
+    // 3. ตรวจสอบว่าแอดมินคีย์ยอดนี้รอไว้แล้วหรือยัง? (Auto-Reconcile)
+    const findAdminStatement = await pool.request()
+      .input('amount', sql.Decimal(18,2), cleanAmount)
+      .input('accountNumber', sql.VarChar, accountNumber)
+      .input('transferDate', sql.VarChar, depositDate)
+      .input('transferTime', sql.VarChar, depositTime)
+      .query(`
+        SELECT TOP 1 statement_id FROM Bank_Statements
+        WHERE is_reconciled = 0
+          AND account_number = @accountNumber
+          AND ABS(amount - @amount) <= 0.01
+          AND CAST(transfer_date AS DATE) = CAST(@transferDate AS DATE)
+          AND CAST(transfer_time AS TIME(0)) = CAST(@transferTime AS TIME(0))
+      `);
+
+    if (findAdminStatement.recordset.length > 0) {
+      // 🌟 เจอคู่! ดำเนินการอนุมัติและเติมเงินทันที
+      const stmtId = findAdminStatement.recordset[0].statement_id;
+
+      await pool.request().input('depositId', sql.Int, newDepositId)
+        .query("UPDATE Transactions_Deposit SET status = 'Approved', reviewed_by = 'Auto-Reconciled' WHERE deposit_id = @depositId");
+
+      await pool.request().input('userId', sql.Int, userId).input('amount', sql.Decimal(18,2), cleanAmount)
+        .query("UPDATE Wallets SET balance = ISNULL(balance, 0) + @amount, last_updated = GETDATE() WHERE user_id = @userId");
+
+      await pool.request().input('userId', sql.Int, userId).input('amount', sql.Decimal(18,2), cleanAmount).input('title', sql.NVarChar(255), 'ฝากเงิน (อัตโนมัติ)')
+        .query("INSERT INTO Transactions (user_id, transaction_type, title, amount, status, created_at) VALUES (@userId, 'Deposit', @title, @amount, 'Completed', GETDATE())");
+
+      await pool.request().input('stmtId', sql.Int, stmtId).input('depositId', sql.Int, newDepositId)
+        .query("UPDATE Bank_Statements SET is_reconciled = 1, reconciled_with_deposit_id = @depositId WHERE statement_id = @stmtId");
+    }
+
+    res.json({ success: true, message: 'ส่งคำขอฝากเงินสำเร็จ!' });
   } catch (error) {
-    console.error('Error in /api/deposit-submit:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: '❌ เกิดข้อผิดพลาดที่เซิร์ฟเวอร์ ไม่สามารถบันทึกข้อมูลได้' 
-    });
+    console.error('Error in deposit-submit:', error);
+    // 🌟 เปลี่ยนให้ส่ง Error แบบละเอียดกลับไป จะได้รู้ว่าพังที่จุดไหน
+    res.status(500).json({ success: false, message: 'เซิร์ฟเวอร์ขัดข้อง: ' + error.message });
   }
 });
 
