@@ -1309,6 +1309,95 @@ app.get('/api/transactions/:userId', async (req, res) => {
     }
 });
 
+// ==========================================
+// API: รับคำขอแจ้งฝากเงินจากผู้ใช้
+// POST /api/deposit-submit
+// ==========================================
+app.post('/api/deposit-submit', async (req, res) => {
+  try {
+    // 1. รับข้อมูลที่ส่งมาจากหน้า Deposit.jsx
+    const {
+      userId,
+      customerName,
+      bankName,
+      accountNumber,
+      currencyCode,
+      amount,
+      depositDate,
+      depositTime,
+      slipBase64
+    } = req.body;
+
+    // 2. ตรวจสอบว่าส่งข้อมูลสำคัญมาครบหรือไม่
+    if (!userId || !amount || !slipBase64 || !depositDate || !depositTime) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'กรุณากรอกข้อมูลและแนบสลิปให้ครบถ้วน' 
+      });
+    }
+
+    // 3. เชื่อมต่อฐานข้อมูล MSSQL
+    const pool = await sql.connect(dbConfig); // เช็กชื่อตัวแปร dbConfig ของคุณด้วยนะครับ
+
+    // 4. บันทึกข้อมูลลงตาราง Transactions_Deposit (สถานะ 'Pending')
+    // หมายเหตุ: ตรวจสอบชื่อคอลัมน์ให้ตรงกับในฐานข้อมูลของคุณ
+    const query = `
+      INSERT INTO Transactions_Deposit (
+        user_id, 
+        customer_name, 
+        system_bank_name, 
+        system_account_number, 
+        currency_code, 
+        amount, 
+        deposit_date, 
+        deposit_time, 
+        slip_image, 
+        status, 
+        created_at
+      )
+      VALUES (
+        @userId, 
+        @customerName, 
+        @bankName, 
+        @accountNumber, 
+        @currencyCode, 
+        @amount, 
+        @depositDate, 
+        @depositTime, 
+        @slipImage, 
+        'Pending', 
+        GETDATE()
+      )
+    `;
+
+    await pool.request()
+      .input('userId', sql.Int, userId)
+      .input('customerName', sql.NVarChar, customerName || '')
+      .input('bankName', sql.NVarChar, bankName || '')
+      .input('accountNumber', sql.VarChar, accountNumber || '')
+      .input('currencyCode', sql.VarChar, currencyCode || 'THB')
+      .input('amount', sql.Decimal(18, 2), amount)
+      .input('depositDate', sql.Date, depositDate)
+      .input('depositTime', sql.Time, depositTime)
+      .input('slipImage', sql.VarChar(sql.MAX), slipBase64) // เก็บรูปเป็น Base64 String
+      .query(query);
+
+    // 5. ส่งสถานะความสำเร็จกลับไปให้ Frontend
+    res.json({ 
+      success: true, 
+      message: '✅ ส่งคำขอฝากเงินสำเร็จ! กรุณารอแอดมินตรวจสอบสักครู่' 
+    });
+
+  } catch (error) {
+    console.error('Error in /api/deposit-submit:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: '❌ เกิดข้อผิดพลาดที่เซิร์ฟเวอร์ ไม่สามารถบันทึกข้อมูลได้' 
+    });
+  }
+});
+
+
 app.listen(port, () => {
     console.log(`🚀 Server เปิดทำงานแล้วที่พอร์ต ${port}`);
 });
