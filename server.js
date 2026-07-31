@@ -1421,10 +1421,7 @@ app.post('/api/deposit-submit', async (req, res) => {
   }
 });
 
-// 1. API: ดึงรายการแจ้งฝากเงิน + สรุปยอดรายเดือน
-// ==========================================
-// API: ดึงรายการแจ้งฝากเงิน + สรุปยอดรายเดือน
-// ==========================================
+
 // ==========================================
 // API: ดึงรายการแจ้งฝากเงิน + สรุปยอดรายเดือน (สำหรับ Admin)
 // ==========================================
@@ -1471,13 +1468,15 @@ app.get('/api/admin/deposit-requests', async (req, res) => {
   }
 });
 
-// 2. API: อนุมัติการฝากเงิน (Approve)
+// ==========================================
+// API ตัวที่ 2: อนุมัติการฝากเงิน (Approve แบบแมนนวลโดย Admin)
+// ==========================================
 app.post('/api/admin/deposit-approve', async (req, res) => {
   try {
     const { depositId, userId, amount } = req.body;
     const pool = await sql.connect(dbConfig);
 
-    // อัปเดตสถานะในตาราง Transactions_Deposit
+    // 1. อัปเดตสถานะในตาราง Transactions_Deposit
     await pool.request()
       .input('depositId', sql.Int, depositId)
       .query(`
@@ -1486,14 +1485,24 @@ app.post('/api/admin/deposit-approve', async (req, res) => {
         WHERE deposit_id = @depositId
       `);
 
-    // อัปเดตยอดเงินในกระเป๋าของ User 
+    // 2. เติมเงินเข้าตาราง Wallets
     await pool.request()
       .input('userId', sql.Int, userId)
       .input('amount', sql.Decimal(18,2), amount)
       .query(`
-        UPDATE Users 
-        SET wallet_balance = ISNULL(wallet_balance, 0) + @amount 
+        UPDATE Wallets 
+        SET balance = ISNULL(balance, 0) + @amount, last_updated = GETDATE() 
         WHERE user_id = @userId
+      `);
+
+    // 3. บันทึกประวัติในตาราง Transactions พร้อม title
+    await pool.request()
+      .input('userId', sql.Int, userId)
+      .input('amount', sql.Decimal(18,2), amount)
+      .input('title', sql.NVarChar(255), 'ฝากเงิน (อนุมัติโดย Admin)') 
+      .query(`
+        INSERT INTO Transactions (user_id, transaction_type, title, amount, status, created_at) 
+        VALUES (@userId, 'Deposit', @title, @amount, 'Completed', GETDATE())
       `);
 
     res.json({ success: true, message: 'อนุมัติและเติมเงินสำเร็จ' });
@@ -1502,6 +1511,7 @@ app.post('/api/admin/deposit-approve', async (req, res) => {
     res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการอนุมัติ' });
   }
 });
+
 
 // 3. API: ปฏิเสธ/ส่งกลับแก้ไขการฝากเงิน (Reject)
 app.post('/api/admin/deposit-reject', async (req, res) => {
@@ -1679,62 +1689,91 @@ app.get('/api/admin/banks', async (req, res) => {
 });
 
 // ==========================================
-// API: คีย์ยอดเงินเข้า และ กระทบยอดอัตโนมัติ (Auto-Reconciliation)
+// API ตัวที่ 1: คีย์ยอดเงินเข้า และ กระทบยอดอัตโนมัติ (Auto-Reconciliation)
 // ==========================================
 app.post('/api/admin/key-statement', async (req, res) => {
   try {
     const { bankId, bankName, accountNumber, amount, transferDate, transferTime, adminName } = req.body;
+    
+    // 1. คลีนตัวเลขเวลา (ป้องกันกรณีเบราว์เซอร์ส่งแบบแปลกๆ มา และแปลง AM/PM เป็น 24 ชม.)
+    let cleanTime = transferTime.trim();
+    if (cleanTime.toLowerCase().includes('am') || cleanTime.toLowerCase().includes('pm')) {
+      const [time, modifier] = cleanTime.split(' ');
+      let [hours, minutes, seconds] = time.split(':');
+      if (hours === '12') hours = '00';
+      if (modifier.toUpperCase() === 'PM') hours = parseInt(hours, 10) + 12;
+      cleanTime = `${hours}:${minutes}:${seconds || '00'}`;
+    }
+    
+    // ถ้าเวลามาเป็น 11:11 ไม่มีวินาที ให้เติม :00 เข้าไป
+    if (cleanTime.length === 5) {
+      cleanTime = cleanTime + ':00';
+    }
+
+    // ปัดเศษป้องกันปัญหาทศนิยมเพี้ยน
+    const cleanAmount = Math.round(parseFloat(amount) * 100) / 100;
+
     const pool = await sql.connect(dbConfig);
 
-    // 1. บันทึกข้อมูลที่แอดมินคีย์ลง Bank_Statements (เริ่มต้นสถานะยังไม่จับคู่)
+    // 2. บันทึกข้อมูลลง Bank_Statements โดยใช้ sql.VarChar แล้ว CAST ใน SQL ป้องกันเบราว์เซอร์ส่ง Data Type เพี้ยน
     const insertStmt = await pool.request()
       .input('bankId', sql.Int, bankId)
       .input('bankName', sql.NVarChar, bankName)
       .input('accountNumber', sql.VarChar, accountNumber)
-      .input('amount', sql.Decimal(18,2), amount)
-      .input('transferDate', sql.Date, transferDate)
-      .input('transferTime', sql.Time, transferTime)
+      .input('amount', sql.Decimal(18,2), cleanAmount)
+      .input('transferDate', sql.VarChar, transferDate) 
+      .input('transferTime', sql.VarChar, cleanTime)    
       .input('recordedBy', sql.NVarChar, adminName)
       .query(`
         INSERT INTO Bank_Statements (bank_id, bank_name, account_number, amount, transfer_date, transfer_time, recorded_by, is_reconciled)
         OUTPUT INSERTED.statement_id
-        VALUES (@bankId, @bankName, @accountNumber, @amount, @transferDate, @transferTime, @recordedBy, 0)
+        VALUES (@bankId, @bankName, @accountNumber, @amount, CAST(@transferDate AS DATE), CAST(@transferTime AS TIME(0)), @recordedBy, 0)
       `);
       
     const statementId = insertStmt.recordset[0].statement_id;
 
-    // 2. ค้นหาคำขอฝากเงินของลูกค้าที่ "รอตรวจสอบ (Pending)" และข้อมูลตรงกันทุกประการ
+    // 3. ค้นหาคำขอที่รอตรวจสอบ (ยอมรับความคลาดเคลื่อนได้ 0.01 บาท)
     const findMatch = await pool.request()
-      .input('amount', sql.Decimal(18,2), amount)
+      .input('amount', sql.Decimal(18,2), cleanAmount)
       .input('accountNumber', sql.VarChar, accountNumber)
-      .input('transferDate', sql.Date, transferDate)
-      .input('transferTime', sql.Time, transferTime)
+      .input('transferDate', sql.VarChar, transferDate)
+      .input('transferTime', sql.VarChar, cleanTime)
       .query(`
         SELECT TOP 1 deposit_id, user_id 
         FROM Transactions_Deposit
         WHERE status = 'Pending' 
           AND account_number = @accountNumber
-          AND amount = @amount
-          AND CAST(deposit_datetime AS DATE) = @transferDate
-          AND CAST(deposit_datetime AS TIME(0)) = @transferTime
+          AND ABS(amount - @amount) <= 0.01 
+          AND CAST(deposit_datetime AS DATE) = CAST(@transferDate AS DATE)
+          AND CAST(deposit_datetime AS TIME(0)) = CAST(@transferTime AS TIME(0))
       `);
 
+    // 4. ถ้าเจอคู่ที่ตรงกัน ทำการอนุมัติ โอนเข้า Wallets และสร้าง Transactions
     if (findMatch.recordset.length > 0) {
-      // 🎉 เจอข้อมูลที่ตรงกัน! ดำเนินการอนุมัติอัตโนมัติ
       const match = findMatch.recordset[0];
       
-      // อัปเดตสถานะคำขอฝากเงิน
+      // อัปเดตสถานะบิล
       await pool.request()
         .input('depositId', sql.Int, match.deposit_id)
         .query("UPDATE Transactions_Deposit SET status = 'Approved', reviewed_by = 'Auto-Reconciled' WHERE deposit_id = @depositId");
         
-      // เติมเงินเข้ากระเป๋าลูกค้า
+      // เติมเงินเข้าตาราง Wallets
       await pool.request()
         .input('userId', sql.Int, match.user_id)
-        .input('amount', sql.Decimal(18,2), amount)
-        .query("UPDATE Users SET wallet_balance = ISNULL(wallet_balance, 0) + @amount WHERE user_id = @userId");
+        .input('amount', sql.Decimal(18,2), cleanAmount)
+        .query("UPDATE Wallets SET balance = ISNULL(balance, 0) + @amount, last_updated = GETDATE() WHERE user_id = @userId");
 
-      // อัปเดตตาราง Bank_Statements ว่าจับคู่แล้ว
+      // บันทึกประวัติในตาราง Transactions พร้อม title
+      await pool.request()
+        .input('userId', sql.Int, match.user_id)
+        .input('amount', sql.Decimal(18,2), cleanAmount)
+        .input('title', sql.NVarChar(255), 'ฝากเงิน (อัตโนมัติ)') 
+        .query(`
+          INSERT INTO Transactions (user_id, transaction_type, title, amount, status, created_at) 
+          VALUES (@userId, 'Deposit', @title, @amount, 'Completed', GETDATE())
+        `);
+
+      // อัปเดต Bank_Statements ว่าจับคู่สำเร็จแล้ว
       await pool.request()
         .input('stmtId', sql.Int, statementId)
         .input('depositId', sql.Int, match.deposit_id)
@@ -1743,12 +1782,11 @@ app.post('/api/admin/key-statement', async (req, res) => {
       return res.json({ success: true, message: 'คีย์ยอดและกระทบยอดสำเร็จ! อนุมัติเงินเข้ากระเป๋าลูกค้าแล้ว', autoMatched: true });
     }
 
-    // กรณีไม่เจอคู่
     res.json({ success: true, message: 'บันทึกยอดเงินสำเร็จ (ยังไม่พบคำขอที่ตรงกัน รอระบบตรวจสอบภายหลัง)', autoMatched: false });
 
   } catch (error) {
-    console.error('Error in key-statement:', error);
-    res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดของเซิร์ฟเวอร์' });
+    console.error('❌ Error in key-statement:', error);
+    res.status(500).json({ success: false, message: 'ระบบขัดข้อง: ' + error.message });
   }
 });
 
