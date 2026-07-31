@@ -234,7 +234,7 @@ app.post('/api/register', async (req, res) => {
     
     // 1. เช็กซ้ำอีกรอบเพื่อความชัวร์ว่าชื่อยังไม่มีคนใช้
     const checkUser = await pool.request()
-      .input('username', sql.VarChar, username)
+      .input('username', sql.NVarChar, username) // 🌟 เปลี่ยนเป็น NVarChar
       .query('SELECT username FROM Users WHERE username = @username');
       
     if (checkUser.recordset.length > 0) {
@@ -248,10 +248,10 @@ app.post('/api/register', async (req, res) => {
     
     // 3. บันทึกข้อมูลลงตาราง Users 
     const insertResult = await pool.request()
-      .input('username', sql.VarChar, username)
-      .input('password', sql.VarChar, password) 
-      .input('referrer', sql.VarChar, referrer || null)
-      .input('country', sql.VarChar, country)
+      .input('username', sql.NVarChar, username) // 🌟 เปลี่ยนเป็น NVarChar
+      .input('password', sql.NVarChar, password) 
+      .input('referrer', sql.NVarChar, referrer || null)
+      .input('country', sql.NVarChar, country)
       .input('currency_code', sql.VarChar, currency_code)
       .input('role_id', sql.Int, role_id)
       .input('level_id', sql.Int, level_id)
@@ -268,7 +268,8 @@ app.post('/api/register', async (req, res) => {
     await pool.request()
       .input('user_id', sql.Int, newUserId)
       .query(`
-        INSERT INTO UserName_Lastname (user_id, firstname, lastname) VALUES (@user_id, 'ผู้ใช้', 'ใหม่');
+        -- 🌟 ใส่ N นำหน้าคำภาษาไทยเพื่อให้ SQL บันทึกเป็น Unicode
+        INSERT INTO UserName_Lastname (user_id, firstname, lastname) VALUES (@user_id, N'ผู้ใช้', N'ใหม่');
         INSERT INTO Wallets (user_id, balance, points) VALUES (@user_id, 0, 0);
       `);
 
