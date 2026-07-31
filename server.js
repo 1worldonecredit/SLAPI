@@ -1398,13 +1398,21 @@ app.post('/api/deposit-submit', async (req, res) => {
 });
 
 // 1. API: ดึงรายการแจ้งฝากเงิน + สรุปยอดรายเดือน
+// ==========================================
+// API: ดึงรายการแจ้งฝากเงิน + สรุปยอดรายเดือน
+// ==========================================
 app.get('/api/admin/deposit-requests', async (req, res) => {
   try {
     const pool = await sql.connect(dbConfig);
+    
+    // 🌟 แก้ไข: ใช้ FORMAT() เพื่อแปลงวันที่เป็น String ป้องกันเบราว์เซอร์บวกเวลา +7
     const queryList = `
       SELECT 
         deposit_id, user_id, customer_name, bank_name, account_number, 
-        amount, currency_code, slip_image, status, deposit_datetime, created_at, reject_reason
+        amount, currency_code, slip_image, status, 
+        FORMAT(deposit_datetime, 'yyyy-MM-ddTHH:mm:ss') AS deposit_datetime, 
+        FORMAT(created_at, 'yyyy-MM-ddTHH:mm:ss') AS created_at, 
+        reject_reason
       FROM Transactions_Deposit
       WHERE status = 'Pending' 
          OR CAST(created_at AS DATE) = CAST(GETDATE() AS DATE)
@@ -1412,6 +1420,7 @@ app.get('/api/admin/deposit-requests', async (req, res) => {
     `;
     const resultList = await pool.request().query(queryList);
 
+    // ... (ส่วน querySummary ด้านล่างปล่อยไว้เหมือนเดิมครับ) ...
     const querySummary = `
       SELECT currency_code, SUM(amount) as total_amount
       FROM Transactions_Deposit
@@ -1509,7 +1518,7 @@ app.post('/api/admin/key-statement', async (req, res) => {
     const { bankId, bankName, accountNumber, amount, transferDate, transferTime, adminName } = req.body;
     const pool = await sql.connect(dbConfig);
 
-    // 1. บันทึกข้อมูลที่แอดมินคีย์ลง Bank_Statements (เริ่มต้นสถานะยังไม่จับคู่)
+    // 1. บันทึก Bank_Statements (เหมือนเดิม)
     const insertStmt = await pool.request()
       .input('bankId', sql.Int, bankId)
       .input('bankName', sql.NVarChar, bankName)
@@ -1526,7 +1535,8 @@ app.post('/api/admin/key-statement', async (req, res) => {
       
     const statementId = insertStmt.recordset[0].statement_id;
 
-    // 2. ค้นหาคำขอฝากเงินของลูกค้าที่ "รอตรวจสอบ (Pending)" และข้อมูลตรงกันทุกประการ
+    // 🌟 2. ค้นหาคำขอฝากเงิน: ปรับ Logic ให้ ABS(amount - @amount) <= 0.01 
+    // เพื่อให้ยอดอย่าง 1999.99 จับคู่กับ 2000.00 ได้สำเร็จ!
     const findMatch = await pool.request()
       .input('amount', sql.Decimal(18,2), amount)
       .input('accountNumber', sql.VarChar, accountNumber)
@@ -1537,27 +1547,24 @@ app.post('/api/admin/key-statement', async (req, res) => {
         FROM Transactions_Deposit
         WHERE status = 'Pending' 
           AND account_number = @accountNumber
-          AND amount = @amount
+          AND ABS(amount - @amount) <= 0.01 
           AND CAST(deposit_datetime AS DATE) = @transferDate
           AND CAST(deposit_datetime AS TIME(0)) = @transferTime
       `);
 
     if (findMatch.recordset.length > 0) {
-      // 🎉 เจอข้อมูลที่ตรงกัน! ดำเนินการอนุมัติอัตโนมัติ
+      // (ส่วนโค้ดอนุมัติที่เหลือ ปล่อยไว้เหมือนเดิมครับ)
       const match = findMatch.recordset[0];
       
-      // อัปเดตสถานะคำขอฝากเงิน
       await pool.request()
         .input('depositId', sql.Int, match.deposit_id)
         .query("UPDATE Transactions_Deposit SET status = 'Approved', reviewed_by = 'Auto-Reconciled' WHERE deposit_id = @depositId");
         
-      // เติมเงินเข้ากระเป๋าลูกค้า
       await pool.request()
         .input('userId', sql.Int, match.user_id)
         .input('amount', sql.Decimal(18,2), amount)
         .query("UPDATE Users SET wallet_balance = ISNULL(wallet_balance, 0) + @amount WHERE user_id = @userId");
 
-      // อัปเดตตาราง Bank_Statements ว่าจับคู่แล้ว
       await pool.request()
         .input('stmtId', sql.Int, statementId)
         .input('depositId', sql.Int, match.deposit_id)
@@ -1566,7 +1573,6 @@ app.post('/api/admin/key-statement', async (req, res) => {
       return res.json({ success: true, message: 'คีย์ยอดและกระทบยอดสำเร็จ! อนุมัติเงินเข้ากระเป๋าลูกค้าแล้ว', autoMatched: true });
     }
 
-    // กรณีไม่เจอคู่
     res.json({ success: true, message: 'บันทึกยอดเงินสำเร็จ (ยังไม่พบคำขอที่ตรงกัน รอระบบตรวจสอบภายหลัง)', autoMatched: false });
 
   } catch (error) {
