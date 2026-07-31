@@ -973,20 +973,36 @@ app.put('/api/admin/user-banks/:id/status', async (req, res) => {
 // ==========================================
 // API ล่าสุด: สำหรับลูกค้าแจ้งฝากเงิน
 // ==========================================
+// ==========================================
+// API: รับคำขอแจ้งฝากเงินจากผู้ใช้
+// POST /api/deposit-submit
+// ==========================================
 app.post('/api/deposit-submit', async (req, res) => {
   try {
     const {
-      userId, customerName, bankName, accountNumber, currencyCode, 
+      userId, bankName, accountNumber, currencyCode, 
       amount, depositDate, depositTime, slipBase64
     } = req.body;
 
-    // 🌟 เพิ่มบรรทัดนี้: ทำการปัดเศษตัวเลข ถ้าเพี้ยนเป็น .99 จะถูกปัดขึ้นเป็นจำนวนเต็มที่ถูกต้อง
-    // (ใช้ Math.round เพื่อปัดทศนิยมให้เป็นยอดเต็มเสมอ)
+    // ปัดเศษให้เป็นจำนวนเต็ม (แก้ปัญหา .99)
     const cleanAmount = Math.round(parseFloat(amount)); 
-
     const depositDatetime = `${depositDate} ${depositTime}`;
+    
     const pool = await sql.connect(dbConfig); 
 
+    // 🌟 1. ดึงชื่อ-นามสกุล ของลูกค้าจากตาราง UserName_Lastname อัตโนมัติ
+    const nameResult = await pool.request()
+      .input('searchUserId', sql.Int, userId)
+      .query(`SELECT firstname, lastname FROM UserName_Lastname WHERE user_id = @searchUserId`);
+    
+    let fullName = 'ผู้ใช้ทั่วไป'; // ค่าเริ่มต้นกรณีเกิดข้อผิดพลาดหาชื่อไม่เจอ
+    if (nameResult.recordset.length > 0) {
+      const user = nameResult.recordset[0];
+      // นำชื่อและนามสกุลมาต่อกัน
+      fullName = `${user.firstname} ${user.lastname}`; 
+    }
+
+    // 🌟 2. บันทึกข้อมูลลงตาราง (โดยใช้ fullName ที่ดึงมาได้)
     const query = `
       INSERT INTO Transactions_Deposit (
         user_id, customer_name, bank_name, account_number, 
@@ -1000,10 +1016,9 @@ app.post('/api/deposit-submit', async (req, res) => {
 
     await pool.request()
       .input('userId', sql.Int, userId)
-      .input('customerName', sql.NVarChar(100), customerName || '')
+      .input('customerName', sql.NVarChar(100), fullName)  // ใส่ชื่อที่ระบบหาเจอตรงนี้
       .input('bankName', sql.NVarChar(100), bankName || '')
       .input('accountNumber', sql.VarChar(50), accountNumber || '')
-      // 🌟 นำตัวแปร cleanAmount ที่ปัดเศษแล้ว มาบันทึกลงฐานข้อมูล
       .input('amount', sql.Decimal(18, 2), cleanAmount) 
       .input('currencyCode', sql.VarChar(10), currencyCode || 'THB')
       .input('slipImage', sql.NVarChar(sql.MAX), slipBase64) 
@@ -1013,7 +1028,8 @@ app.post('/api/deposit-submit', async (req, res) => {
     res.json({ success: true, message: 'ส่งคำขอฝากเงินสำเร็จ!' });
 
   } catch (error) {
-    // ... โค้ดเดิม ...
+    console.error('Error in /api/deposit-submit:', error);
+    res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาด ไม่สามารถบันทึกข้อมูลได้' });
   }
 });
 // ==========================================
