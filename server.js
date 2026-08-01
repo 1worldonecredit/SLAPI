@@ -1681,7 +1681,7 @@ app.post('/api/admin/deposit-approve', async (req, res) => {
         `);
 
       // 3. วิ่งไปค้นหายอดเงินเข้า (Bank_Statements) 
-      // ⚠️ หมายเหตุ: ถ้าตาราง Bank_Statements ของคุณไม่ได้ใช้ชื่อคอลัมน์ว่า status ให้แก้ตรง WHERE status = 'Pending' นะครับ
+      // 🌟 [ปรับแก้ตาม DB จริง]: ใช้ is_reconciled = 0 แทน status และใช้ transfer_date แทน statement_date
       const matchRes = await transaction.request()
         .input('amount', sql.Decimal(18, 2), depositData.amount)
         .input('accountNumber', sql.VarChar, depositData.account_number || '')
@@ -1689,10 +1689,10 @@ app.post('/api/admin/deposit-approve', async (req, res) => {
         .query(`
           SELECT TOP 1 statement_id 
           FROM Bank_Statements 
-          WHERE status = 'Pending' 
+          WHERE (is_reconciled = 0 OR is_reconciled IS NULL) 
             AND amount = @amount 
             AND account_number = @accountNumber
-            AND CAST(transfer_date AS DATE) = CAST(@depositDate AS DATE)
+            AND transfer_date = CAST(@depositDate AS DATE)
         `);
 
       // 4. กรณีที่ 1: พบยอดเงินที่ตรงกัน! (กระทบยอดสำเร็จทันที)
@@ -1700,12 +1700,13 @@ app.post('/api/admin/deposit-approve', async (req, res) => {
         const matchedStatementId = matchRes.recordset[0].statement_id;
 
         // 4.1 อัปเดตสถานะทั้ง 2 ฝั่งให้เป็น 'สำเร็จ'
+        // 🌟 [ปรับแก้ตาม DB จริง]: เปลี่ยน is_reconciled ให้เป็น 1
         await transaction.request()
           .input('depositId', sql.Int, depositId)
           .input('statementId', sql.Int, matchedStatementId)
           .query(`
             UPDATE Transactions_Deposit SET status = 'Approved' WHERE deposit_id = @depositId;
-            UPDATE Bank_Statements SET status = 'Matched', reconciled_with_deposit_id = @depositId WHERE statement_id = @statementId;
+            UPDATE Bank_Statements SET is_reconciled = 1, reconciled_with_deposit_id = @depositId WHERE statement_id = @statementId;
           `);
 
         // 4.2 เติมเงินเข้า Wallet ลูกค้า
@@ -1715,7 +1716,6 @@ app.post('/api/admin/deposit-approve', async (req, res) => {
           .query(`UPDATE Wallets SET balance = balance + @amount WHERE user_id = @userId`);
 
         // 4.3 บันทึกประวัติการเงิน (Transaction Log) 
-        // 🌟 [แก้ไขล่าสุด] ผมเอาคอลัมน์ status ออกจากตาราง Transactions แล้วครับ น่าจะผ่าน 100%
         await transaction.request()
           .input('userId', sql.Int, userId)
           .input('amount', sql.Decimal(18, 2), amount)
@@ -1728,7 +1728,7 @@ app.post('/api/admin/deposit-approve', async (req, res) => {
         res.json({ success: true, message: 'สลิปถูกต้อง และระบบชนยอดอัตโนมัติสำเร็จ! (เงินเข้าลูกค้าแล้ว)' });
       
       } 
-      // 5. กรณีที่ 2: ยังไม่มียอดเงินตรงกันเข้ามา
+      // 5. กรณีที่ 2: ยังไม่มียอดเงินตรงกันเข้ามา (ให้ค้างสถานะรอฝั่งบัญชีคีย์ยอด)
       else {
         await transaction.commit();
         res.json({ success: true, message: 'สลิปถูกต้องแล้ว (กำลังรอฝั่งบัญชีเงินเข้าคีย์ยอดเพื่อชนยอดอัตโนมัติ)' });
