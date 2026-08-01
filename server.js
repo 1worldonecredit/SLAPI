@@ -1643,62 +1643,99 @@ app.post('/api/admin/key-statement', async (req, res) => {
 
 
 // ==========================================
-// API 1: แอดมินกดตรวจสลิป (แก้ไขบั๊ก: ไม่ให้รายการหายไปจากหน้าจอ)
+// 🚀 THE FUTURE RECONCILIATION ENGINE (ระบบกระทบยอดอัตโนมัติ 2 ทาง)
+// API: แอดมินกด "ตรวจสอบสลิปผ่าน" 1/1
 // ==========================================
 app.post('/api/admin/deposit-approve', async (req, res) => {
+  const { depositId, userId, amount } = req.body;
+
   try {
-    const { depositId, userId, amount } = req.body;
     const pool = await sql.connect(dbConfig);
+    const transaction = new sql.Transaction(pool);
+    await transaction.begin();
 
-    const depData = await pool.request()
-      .input('depositId', sql.Int, depositId)
-      .query("SELECT * FROM Transactions_Deposit WHERE deposit_id = @depositId");
-    
-    if(depData.recordset.length === 0) return res.status(404).json({ success: false, message: 'ไม่พบข้อมูล' });
-    const dep = depData.recordset[0];
-
-    // ค้นหากุญแจดอกที่ 2 (ยอดเงินที่บัญชีคีย์ไว้)
-    const findBankStmt = await pool.request()
-      .input('accountNumber', sql.VarChar, dep.account_number)
-      .input('amount', sql.Decimal(18,2), dep.amount)
-      .input('transferDate', sql.VarChar, dep.deposit_datetime.toISOString().split('T')[0])
-      .input('transferTime', sql.VarChar, dep.deposit_datetime.toISOString().split('T')[1].substring(0, 8))
-      .query(`
-        SELECT TOP 1 statement_id FROM Bank_Statements 
-        WHERE is_reconciled = 0
-          AND account_number = @accountNumber
-          AND ABS(amount - @amount) <= 0.01
-          AND CAST(transfer_date AS DATE) = CAST(@transferDate AS DATE)
-          AND CAST(transfer_time AS TIME(0)) = CAST(@transferTime AS TIME(0))
-      `);
-
-    if (findBankStmt.recordset.length > 0) {
-      // 🟢 กรณีที่บัญชีคีย์รอไว้แล้ว ข้อมูลตรงกัน 100% -> เปลี่ยนเป็น Approved และจ่ายเงิน!
-      const stmtId = findBankStmt.recordset[0].statement_id;
-
-      await pool.request().input('depositId', sql.Int, depositId)
-        .query("UPDATE Transactions_Deposit SET status = 'Approved', reviewed_by = 'Admin (Matched)' WHERE deposit_id = @depositId");
+    try {
+      // 1. ดึงข้อมูลคำขอฝากเงินขึ้นมา เพื่อเตรียมเอาไปเทียบกับยอดเงินเข้า
+      const depositRes = await transaction.request()
+        .input('depositId', sql.Int, depositId)
+        .query(`
+          SELECT amount, deposit_datetime, account_number, bank_name, currency_code 
+          FROM Transactions_Deposit 
+          WHERE deposit_id = @depositId
+        `);
       
-      await pool.request().input('userId', sql.Int, userId).input('amount', sql.Decimal(18,2), amount)
-        .query("UPDATE Wallets SET balance = ISNULL(balance, 0) + @amount, last_updated = GETDATE() WHERE user_id = @userId");
+      if (depositRes.recordset.length === 0) throw new Error('ไม่พบข้อมูลคำขอฝากเงิน');
+      const depositData = depositRes.recordset[0];
 
-      await pool.request().input('userId', sql.Int, userId).input('amount', sql.Decimal(18,2), amount).input('title', sql.NVarChar(255), 'ฝากเงิน (สำเร็จ)')
-        .query("INSERT INTO Transactions (user_id, transaction_type, title, amount, status, created_at) VALUES (@userId, 'Deposit', @title, @amount, 'Completed', GETDATE())");
+      // 2. เปลี่ยนสถานะคำขอฝากเป็น 'Slip Verified' (สลิปถูกต้องแล้ว รอกระทบยอด)
+      await transaction.request()
+        .input('depositId', sql.Int, depositId)
+        .query(`
+          UPDATE Transactions_Deposit 
+          SET status = 'Slip Verified', reviewed_at = GETDATE(), reviewed_by = 'Admin' 
+          WHERE deposit_id = @depositId
+        `);
 
-      await pool.request().input('stmtId', sql.Int, stmtId).input('depositId', sql.Int, depositId)
-        .query("UPDATE Bank_Statements SET is_reconciled = 1, reconciled_with_deposit_id = @depositId WHERE statement_id = @stmtId");
+      // 3. 🚀 วิ่งไปค้นหาว่ามี "ยอดเงินเข้า (Bank_Statements)" ที่คีย์รอไว้แล้วตรงกันไหม?
+      // (เช็คยอดเงินตรงกัน, บัญชีตรงกัน, และวันที่เดียวกัน)
+      const matchRes = await transaction.request()
+        .input('amount', sql.Decimal(18, 2), depositData.amount)
+        .input('accountNumber', sql.VarChar, depositData.account_number)
+        .query(`
+          SELECT TOP 1 statement_id 
+          FROM Bank_Statements 
+          WHERE status = 'Pending' 
+            AND amount = @amount 
+            AND account_number = @accountNumber
+            AND CAST(statement_date AS DATE) = CAST('${depositData.deposit_datetime.toISOString().split('T')[0]}' AS DATE)
+        `);
 
-      return res.json({ success: true, message: 'ตรวจสลิปผ่าน และระบบจับคู่กับยอดธนาคารสำเร็จ! (เติมเงินเข้า Wallet แล้ว)' });
-    } else {
-      // 🟡 🌟 แก้ไขตรงนี้: ไม่เปลี่ยนสถานะ ปล่อยให้เป็น Pending เหมือนเดิม แต่แอบบันทึกหลังบ้านว่าตรวจแล้ว
-      await pool.request().input('depositId', sql.Int, depositId)
-        .query("UPDATE Transactions_Deposit SET status = 'Pending', reviewed_by = 'Slip Verified' WHERE deposit_id = @depositId");
+      // 4. กรณีที่ 1: ✨ พบยอดเงินที่ตรงกัน! (กระทบยอดสำเร็จทันที)
+      if (matchRes.recordset.length > 0) {
+        const matchedStatementId = matchRes.recordset[0].statement_id;
+
+        // 4.1 อัปเดตสถานะทั้ง 2 ฝั่งให้เป็น 'สำเร็จ' และเชื่อม ID หากัน
+        await transaction.request()
+          .input('depositId', sql.Int, depositId)
+          .input('statementId', sql.Int, matchedStatementId)
+          .query(`
+            UPDATE Transactions_Deposit SET status = 'Approved' WHERE deposit_id = @depositId;
+            UPDATE Bank_Statements SET status = 'Matched', reconciled_with_deposit_id = @depositId WHERE statement_id = @statementId;
+          `);
+
+        // 4.2 เติมเงินเข้า Wallet ลูกค้า
+        await transaction.request()
+          .input('userId', sql.Int, userId)
+          .input('amount', sql.Decimal(18, 2), amount)
+          .query(`UPDATE Wallets SET balance = balance + @amount WHERE user_id = @userId`);
+
+        // 4.3 บันทึกประวัติการเงิน (Transaction Log) ว่าเงินเข้าสำเร็จ
+        await transaction.request()
+          .input('userId', sql.Int, userId)
+          .input('amount', sql.Decimal(18, 2), amount)
+          .input('currency', sql.VarChar, depositData.currency_code)
+          .query(`
+            INSERT INTO Transactions (user_id, type, amount, currency_code, status, description, created_at) 
+            VALUES (@userId, 'Deposit', @amount, @currency, 'Completed', 'ระบบกระทบยอดเงินฝากอัตโนมัติ', GETDATE())
+          `);
+
+        await transaction.commit();
+        res.json({ success: true, message: 'สลิปถูกต้อง และระบบชนยอดอัตโนมัติสำเร็จ! (เงินเข้าลูกค้าแล้ว)' });
       
-      return res.json({ success: true, message: 'บันทึกการตรวจรูปสลิปแล้ว! (รายการจะยังอยู่ในแท็บรอตรวจสอบ จนกว่าฝ่ายบัญชีจะคีย์ยอดรับเข้าให้ตรงกัน)' });
+      } 
+      // 5. กรณีที่ 2: ⏳ ยังไม่มียอดเงินตรงกันเข้ามา (ให้ค้างสถานะรอฝั่งบัญชีคีย์ยอด)
+      else {
+        await transaction.commit();
+        res.json({ success: true, message: 'สลิปถูกต้องแล้ว (กำลังรอฝั่งบัญชีเงินเข้าคีย์ยอดเพื่อชนยอดอัตโนมัติ)' });
+      }
+
+    } catch (err) {
+      await transaction.rollback();
+      throw err;
     }
   } catch (error) {
-    console.error('Error:', error);
-    res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการอนุมัติ' });
+    console.error('Auto Reconciliation Error:', error);
+    res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในระบบกระทบยอดฐานข้อมูล' });
   }
 });
 
