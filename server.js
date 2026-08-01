@@ -1659,7 +1659,7 @@ app.post('/api/admin/deposit-approve', async (req, res) => {
     await transaction.begin();
 
     try {
-      // 1. ดึงข้อมูลคำขอฝากเงินขึ้นมา เพื่อเตรียมเอาไปเทียบกับยอดเงินเข้า
+      // 1. ดึงข้อมูลคำขอฝากเงินขึ้นมา
       const depositRes = await transaction.request()
         .input('depositId', sql.Int, depositId)
         .query(`
@@ -1671,17 +1671,17 @@ app.post('/api/admin/deposit-approve', async (req, res) => {
       if (depositRes.recordset.length === 0) throw new Error('ไม่พบข้อมูลคำขอฝากเงิน');
       const depositData = depositRes.recordset[0];
 
-      // 2. เปลี่ยนสถานะคำขอฝากเป็น 'Slip Verified' (สลิปถูกต้องแล้ว รอกระทบยอด)
+      // 2. เปลี่ยนสถานะคำขอฝากเป็น 'Slip Verified' 
+      // 🌟 [แก้ไข] เอา reviewed_at ออก เพื่อป้องกัน Error หาคอลัมน์ไม่เจอ
       await transaction.request()
         .input('depositId', sql.Int, depositId)
         .query(`
           UPDATE Transactions_Deposit 
-          SET status = 'Slip Verified', reviewed_at = GETDATE(), reviewed_by = 'Admin' 
+          SET status = 'Slip Verified', reviewed_by = 'Admin' 
           WHERE deposit_id = @depositId
         `);
 
-      // 3. 🚀 วิ่งไปค้นหายอดเงินเข้า (Bank_Statements) 
-      // 🌟 [แก้บั๊ก] ให้ SQL เป็นคนเทียบวันที่ (CAST AS DATE) แทนการใช้ JavaScript แปลงค่า
+      // 3. วิ่งไปค้นหายอดเงินเข้า (Bank_Statements) 
       const matchRes = await transaction.request()
         .input('amount', sql.Decimal(18, 2), depositData.amount)
         .input('accountNumber', sql.VarChar, depositData.account_number || '')
@@ -1695,11 +1695,11 @@ app.post('/api/admin/deposit-approve', async (req, res) => {
             AND CAST(statement_date AS DATE) = CAST(@depositDate AS DATE)
         `);
 
-      // 4. กรณีที่ 1: ✨ พบยอดเงินที่ตรงกัน! (กระทบยอดสำเร็จทันที)
+      // 4. กรณีที่ 1: พบยอดเงินที่ตรงกัน! (กระทบยอดสำเร็จทันที)
       if (matchRes.recordset.length > 0) {
         const matchedStatementId = matchRes.recordset[0].statement_id;
 
-        // 4.1 อัปเดตสถานะทั้ง 2 ฝั่งให้เป็น 'สำเร็จ' และเชื่อม ID หากัน
+        // 4.1 อัปเดตสถานะทั้ง 2 ฝั่งให้เป็น 'สำเร็จ'
         await transaction.request()
           .input('depositId', sql.Int, depositId)
           .input('statementId', sql.Int, matchedStatementId)
@@ -1714,21 +1714,21 @@ app.post('/api/admin/deposit-approve', async (req, res) => {
           .input('amount', sql.Decimal(18, 2), amount)
           .query(`UPDATE Wallets SET balance = balance + @amount WHERE user_id = @userId`);
 
-        // 4.3 บันทึกประวัติการเงิน (Transaction Log) ว่าเงินเข้าสำเร็จ
+        // 4.3 บันทึกประวัติการเงิน (Transaction Log) 
+        // 🌟 [แก้ไข] ลบคอลัมน์ที่สุ่มเสี่ยงออก ใช้เฉพาะคอลัมน์พื้นฐานที่ทุกระบบมี
         await transaction.request()
           .input('userId', sql.Int, userId)
           .input('amount', sql.Decimal(18, 2), amount)
-          .input('currency', sql.VarChar, depositData.currency_code || 'THB')
           .query(`
-            INSERT INTO Transactions (user_id, type, amount, currency_code, status, description, created_at) 
-            VALUES (@userId, 'Deposit', @amount, @currency, 'Completed', 'ระบบกระทบยอดเงินฝากอัตโนมัติ', GETDATE())
+            INSERT INTO Transactions (user_id, type, amount, status, description, created_at) 
+            VALUES (@userId, 'Deposit', @amount, 'Completed', 'ระบบกระทบยอดเงินฝากอัตโนมัติ', GETDATE())
           `);
 
         await transaction.commit();
         res.json({ success: true, message: 'สลิปถูกต้อง และระบบชนยอดอัตโนมัติสำเร็จ! (เงินเข้าลูกค้าแล้ว)' });
       
       } 
-      // 5. กรณีที่ 2: ⏳ ยังไม่มียอดเงินตรงกันเข้ามา (ให้ค้างสถานะรอฝั่งบัญชีคีย์ยอด)
+      // 5. กรณีที่ 2: ยังไม่มียอดเงินตรงกันเข้ามา
       else {
         await transaction.commit();
         res.json({ success: true, message: 'สลิปถูกต้องแล้ว (กำลังรอฝั่งบัญชีเงินเข้าคีย์ยอดเพื่อชนยอดอัตโนมัติ)' });
@@ -1737,11 +1737,12 @@ app.post('/api/admin/deposit-approve', async (req, res) => {
     } catch (err) {
       await transaction.rollback();
       console.error("SQL Transaction Error:", err);
-      res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในระบบกระทบยอดฐานข้อมูล' });
+      // 🌟 [ทีเด็ดอยู่ตรงนี้] ถ้าพังอีก มันจะส่ง Error จากฐานข้อมูล ไปโชว์ให้คุณเห็นที่หน้าจอเลยครับ!
+      res.status(500).json({ success: false, message: 'DB Error: ' + err.message });
     }
   } catch (error) {
     console.error('Auto Reconciliation Connection Error:', error);
-    res.status(500).json({ success: false, message: 'ไม่สามารถเชื่อมต่อฐานข้อมูลได้' });
+    res.status(500).json({ success: false, message: 'ไม่สามารถเชื่อมต่อฐานข้อมูลได้: ' + error.message });
   }
 });
 
