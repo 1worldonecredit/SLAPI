@@ -1646,6 +1646,10 @@ app.post('/api/admin/key-statement', async (req, res) => {
 // 🚀 THE FUTURE RECONCILIATION ENGINE (ระบบกระทบยอดอัตโนมัติ 2 ทาง)
 // API: แอดมินกด "ตรวจสอบสลิปผ่าน" 1/1
 // ==========================================
+// ==========================================
+// 🚀 THE FUTURE RECONCILIATION ENGINE (ระบบกระทบยอดอัตโนมัติ 2 ทาง)
+// API: แอดมินกด "ตรวจสอบสลิปผ่าน"
+// ==========================================
 app.post('/api/admin/deposit-approve', async (req, res) => {
   const { depositId, userId, amount } = req.body;
 
@@ -1676,18 +1680,19 @@ app.post('/api/admin/deposit-approve', async (req, res) => {
           WHERE deposit_id = @depositId
         `);
 
-      // 3. 🚀 วิ่งไปค้นหาว่ามี "ยอดเงินเข้า (Bank_Statements)" ที่คีย์รอไว้แล้วตรงกันไหม?
-      // (เช็คยอดเงินตรงกัน, บัญชีตรงกัน, และวันที่เดียวกัน)
+      // 3. 🚀 วิ่งไปค้นหายอดเงินเข้า (Bank_Statements) 
+      // 🌟 [แก้บั๊ก] ให้ SQL เป็นคนเทียบวันที่ (CAST AS DATE) แทนการใช้ JavaScript แปลงค่า
       const matchRes = await transaction.request()
         .input('amount', sql.Decimal(18, 2), depositData.amount)
-        .input('accountNumber', sql.VarChar, depositData.account_number)
+        .input('accountNumber', sql.VarChar, depositData.account_number || '')
+        .input('depositDate', sql.DateTime, depositData.deposit_datetime)
         .query(`
           SELECT TOP 1 statement_id 
           FROM Bank_Statements 
           WHERE status = 'Pending' 
             AND amount = @amount 
             AND account_number = @accountNumber
-            AND CAST(statement_date AS DATE) = CAST('${depositData.deposit_datetime.toISOString().split('T')[0]}' AS DATE)
+            AND CAST(statement_date AS DATE) = CAST(@depositDate AS DATE)
         `);
 
       // 4. กรณีที่ 1: ✨ พบยอดเงินที่ตรงกัน! (กระทบยอดสำเร็จทันที)
@@ -1713,7 +1718,7 @@ app.post('/api/admin/deposit-approve', async (req, res) => {
         await transaction.request()
           .input('userId', sql.Int, userId)
           .input('amount', sql.Decimal(18, 2), amount)
-          .input('currency', sql.VarChar, depositData.currency_code)
+          .input('currency', sql.VarChar, depositData.currency_code || 'THB')
           .query(`
             INSERT INTO Transactions (user_id, type, amount, currency_code, status, description, created_at) 
             VALUES (@userId, 'Deposit', @amount, @currency, 'Completed', 'ระบบกระทบยอดเงินฝากอัตโนมัติ', GETDATE())
@@ -1731,11 +1736,12 @@ app.post('/api/admin/deposit-approve', async (req, res) => {
 
     } catch (err) {
       await transaction.rollback();
-      throw err;
+      console.error("SQL Transaction Error:", err);
+      res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในระบบกระทบยอดฐานข้อมูล' });
     }
   } catch (error) {
-    console.error('Auto Reconciliation Error:', error);
-    res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในระบบกระทบยอดฐานข้อมูล' });
+    console.error('Auto Reconciliation Connection Error:', error);
+    res.status(500).json({ success: false, message: 'ไม่สามารถเชื่อมต่อฐานข้อมูลได้' });
   }
 });
 
