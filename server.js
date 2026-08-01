@@ -1362,26 +1362,85 @@ app.get('/api/admin/deposit-requests', async (req, res) => {
 });
 
 
-
-// 3. API: ปฏิเสธ/ส่งกลับแก้ไขการฝากเงิน (Reject)
+// ==========================================
+// API: แอดมินตีกลับคำขอฝากเงิน (Reject & Anti-Spam Check)
+// ==========================================
 app.post('/api/admin/deposit-reject', async (req, res) => {
   try {
-    const { depositId, reason } = req.body;
+    const { depositId, userId, rejectReasons } = req.body;
     const pool = await sql.connect(dbConfig);
 
-    await pool.request()
+    // แปลง Object เหตุผลที่ติ๊กเลือก เป็น JSON String เพื่อบันทึกลงฐานข้อมูล
+    const reasonsJson = JSON.stringify(rejectReasons);
+
+    // 1. อัปเดตสถานะเป็น ตีกลับ (Rejected), บันทึกเหตุผล, และบวก edit_count เพิ่มทีละ 1
+    const updateResult = await pool.request()
       .input('depositId', sql.Int, depositId)
-      .input('reason', sql.NVarChar(255), reason)
+      .input('reasons', sql.NVarChar, reasonsJson)
       .query(`
         UPDATE Transactions_Deposit 
-        SET status = 'Rejected', reject_reason = @reason, reviewed_by = 'Admin'
+        SET status = 'Rejected', 
+            reviewed_by = 'Admin (Returned)', 
+            reject_reasons = @reasons,
+            edit_count = ISNULL(edit_count, 0) + 1
+        OUTPUT INSERTED.edit_count
         WHERE deposit_id = @depositId
       `);
+      
+    const currentEditCount = updateResult.recordset[0].edit_count;
 
-    res.json({ success: true, message: 'ส่งกลับให้ลูกค้าแก้ไขแล้ว' });
+    // ==========================================
+    // 🛡️ ระบบตรวจจับการก่อกวน (Anti-Spam / Fraud Detection)
+    // ==========================================
+    let isSpammer = false;
+    let spamReason = '';
+
+    // กฎข้อที่ 1: รายการเดียว แต่ส่งแก้ผิดซ้ำซากเกิน 3 ครั้ง
+    if (currentEditCount > 3) {
+      isSpammer = true;
+      spamReason = `แก้ไขคำขอเดิมผิดพลาดเกิน 3 ครั้ง (Deposit ID: ${depositId})`;
+    }
+
+    // กฎข้อที่ 2: สแปมส่งคำขอฝากเงิน (แต่ไม่เคยจับคู่ผ่านเลย) เกิน 10 รายการในวันนี้
+    if (!isSpammer) {
+      const checkDailySpam = await pool.request()
+        .input('userId', sql.Int, userId)
+        .query(`
+          SELECT COUNT(*) as pending_count FROM Transactions_Deposit 
+          WHERE user_id = @userId 
+            AND status IN ('Pending', 'Rejected') 
+            AND CAST(created_at AS DATE) = CAST(GETDATE() AS DATE)
+        `);
+        
+      if (checkDailySpam.recordset[0].pending_count >= 10) {
+        isSpammer = true;
+        spamReason = 'ส่งคำขอฝากเงินที่ไม่สำเร็จ/ตีกลับ เกิน 10 รายการใน 1 วัน';
+      }
+    }
+
+    // หากเข้าข่ายก่อกวน ให้ขึ้น Blacklist แจ้งเตือนแอดมินทันที!
+    if (isSpammer) {
+      await pool.request()
+        .input('userId', sql.Int, userId)
+        .input('reason', sql.NVarChar, spamReason)
+        .query(`
+          UPDATE Users 
+          SET is_suspicious = 1, suspicious_reason = @reason 
+          WHERE user_id = @userId
+        `);
+        
+      return res.json({ 
+        success: true, 
+        message: 'ส่งกลับให้ลูกค้าแก้ไขแล้ว! ⚠️ แจ้งเตือน: ระบบตรวจพบพฤติกรรมก่อกวนจากลูกค้ารายนี้ และได้ทำเครื่องหมายเฝ้าระวังแล้ว',
+        isSuspicious: true
+      });
+    }
+
+    res.json({ success: true, message: 'ส่งกลับให้ลูกค้าแก้ไขเรียบร้อยแล้ว' });
+
   } catch (error) {
     console.error('Error rejecting deposit:', error);
-    res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการปฏิเสธรายการ' });
+    res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการตีกลับรายการ' });
   }
 });
 
