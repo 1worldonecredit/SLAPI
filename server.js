@@ -892,6 +892,70 @@ app.get('/api/lottery/history/:userId', async (req, res) => {
     }
 });
 
+// ==========================================
+// 1. API ดึงรายการคำขอเพิ่มบัญชีธนาคารทั้งหมด (เพิ่มดึงรูปสมุดบัญชี)
+// ==========================================
+app.get('/api/admin/user-banks', async (req, res) => {
+    try {
+        const pool = await sql.connect(dbConfig);
+        const result = await pool.request().query(`
+            SELECT ub.user_bank_id, ub.user_id, ub.bank_id, ub.account_name, ub.account_number, 
+                   ub.is_primary, ub.created_at, ub.currency_code, ub.status, 
+                   ub.passbook_image, ub.reject_reason, -- 🌟 ดึงรูปสมุดบัญชีและเหตุผลมาด้วย
+                   un.firstname, un.lastname
+            FROM UserBanks ub 
+            LEFT JOIN UserName_Lastname un ON ub.user_id = un.user_id 
+            ORDER BY ub.created_at DESC
+        `);
+        res.json({ success: true, data: result.recordset });
+    } catch (err) {
+        console.error('Error fetching user banks:', err);
+        res.status(500).json({ success: false, message: 'Server error' });
+    }
+});
+
+// ==========================================
+// 2. API อัปเดตสถานะ (อนุมัติ/ไม่อนุมัติ)
+// ==========================================
+app.put('/api/admin/user-banks/:id/status', async (req, res) => {
+    const { id } = req.params;
+    const { status, user_id, reject_reason } = req.body; 
+
+    try {
+        const pool = await sql.connect(dbConfig);
+        
+        // 🌟 อัปเดตสถานะ และเก็บเหตุผลที่ปฏิเสธ (ถ้ามี)
+        await pool.request()
+            .input('id', sql.Int, id)
+            .input('status', sql.VarChar, status)
+            .input('reject_reason', sql.NVarChar, reject_reason || null)
+            .query(`
+                UPDATE UserBanks 
+                SET status = @status, reject_reason = @reject_reason
+                WHERE user_bank_id = @id
+            `);
+
+        // ส่งแจ้งเตือนให้ลูกค้า
+        const notifMessage = status === 'Approved' 
+            ? 'บัญชีธนาคารของคุณได้รับการอนุมัติเรียบร้อยแล้ว' 
+            : 'คำขอเพิ่มบัญชีถูกปฏิเสธ โปรดตรวจสอบและแก้ไขข้อมูล';
+            
+        await pool.request()
+            .input('user_id', sql.Int, user_id)
+            .input('message', sql.NVarChar, notifMessage)
+            .query(`
+                INSERT INTO Notifications (user_id, message, is_read, created_at)
+                VALUES (@user_id, @message, 0, GETDATE())
+            `);
+
+        res.json({ success: true, message: 'บันทึกข้อมูลสำเร็จ' });
+    } catch (err) {
+        console.error('Error updating bank status:', err);
+        res.status(500).json({ success: false, message: 'Server error' });
+    }
+});
+
+
 app.listen(port, () => {
     console.log(`🚀 Server เปิดทำงานแล้วที่พอร์ต ${port}`);
 });
