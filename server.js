@@ -1318,27 +1318,27 @@ app.post('/api/deposit-submit', async (req, res) => {
 
 
 // ==========================================
-// API: ดึงรายการแจ้งฝากเงิน + สรุปยอดรายเดือน (สำหรับ Admin)
+// API: ดึงรายการแจ้งฝากเงิน + สรุปยอดรายเดือน (สำหรับ Admin) แก้เพิ่มถ้าซ่ำให้ลบตัวอิ่น
 // ==========================================
 app.get('/api/admin/deposit-requests', async (req, res) => {
   try {
     const pool = await sql.connect(dbConfig);
     
+    // 🌟 แก้ไข: ดึงรายการรอตรวจทั้งหมด + ประวัติย้อนหลัง 7 วัน (รายการเมื่อวานจะได้ไม่หาย)
     const queryList = `
       SELECT 
         deposit_id, user_id, customer_name, bank_name, account_number, 
         amount, currency_code, slip_image, status, 
         FORMAT(deposit_datetime, 'yyyy-MM-ddTHH:mm:ss') AS deposit_datetime, 
         FORMAT(created_at, 'yyyy-MM-ddTHH:mm:ss') AS created_at, 
-        reject_reason
+        reject_reasons, edit_count
       FROM Transactions_Deposit
-      WHERE status = 'Pending' 
-         OR CAST(created_at AS DATE) = CAST(GETDATE() AS DATE)
+      WHERE status IN ('Pending', 'Slip Verified') 
+         OR CAST(created_at AS DATE) >= CAST(DATEADD(day, -7, GETDATE()) AS DATE)
       ORDER BY created_at DESC
     `;
     const resultList = await pool.request().query(queryList);
 
-    // 🌟 แก้ไข: ดึงเฉพาะยอดที่ "กระทบยอดสำเร็จแล้ว" (มีรหัสอ้างอิงในตาราง Bank_Statements)
     const querySummary = `
       SELECT t.currency_code, ISNULL(SUM(t.amount), 0) as total_amount
       FROM Transactions_Deposit t
@@ -1362,7 +1362,6 @@ app.get('/api/admin/deposit-requests', async (req, res) => {
     res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการดึงข้อมูล' });
   }
 });
-
 
 // ==========================================
 // API: แอดมินตีกลับคำขอฝากเงิน (Reject & Anti-Spam Check)
