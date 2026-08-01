@@ -1739,6 +1739,87 @@ app.post('/api/admin/deposit-approve', async (req, res) => {
   }
 });
 
+// ==========================================
+// 🌟 API 1: ดึงประวัติการฝากเงินของลูกค้า (เพื่อเช็คยอดตีกลับและแจ้งเตือน)
+// ==========================================
+app.get('/api/user/deposits/:userId', async (req, res) => {
+  const { userId } = req.params;
+  try {
+    const pool = await sql.connect(dbConfig);
+    const result = await pool.request()
+      .input('userId', sql.Int, userId)
+      .query(`
+        SELECT deposit_id, amount, deposit_datetime, slip_image, status, reject_reasons, account_number, bank_name
+        FROM Transactions_Deposit 
+        WHERE user_id = @userId 
+        ORDER BY created_at DESC
+      `);
+    
+    // ส่งข้อมูลกลับไปให้หน้าบ้าน (Dashboard และ TopNavbar เอาไปนับจำนวน Rejected)
+    res.json({ success: true, data: result.recordset });
+  } catch (error) {
+    console.error('Error fetching user deposits:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+
+// ==========================================
+// 🌟 API 2: สำหรับลูกค้ารับส่งข้อมูลที่ "แก้ไขแล้ว" กลับไปให้แอดมิน
+// ==========================================
+app.put('/api/deposit-edit/:depositId', async (req, res) => {
+  const { depositId } = req.params;
+  const { amount, depositDate, depositTime, slipBase64 } = req.body;
+  
+  // รวมวันที่และเวลาเข้าด้วยกัน
+  const depositDatetime = `${depositDate}T${depositTime}:00`;
+
+  try {
+    const pool = await sql.connect(dbConfig);
+    
+    // อัปเดตข้อมูล และเปลี่ยนสถานะกลับเป็น Pending เพื่อให้แอดมินตรวจใหม่
+    if (slipBase64) {
+      // ถ้ามีการอัปโหลดสลิปใหม่
+      await pool.request()
+        .input('depositId', sql.Int, depositId)
+        .input('amount', sql.Decimal(18, 2), amount)
+        .input('depositDatetime', sql.DateTime, depositDatetime)
+        .input('slipImage', sql.VarChar(sql.MAX), slipBase64)
+        .query(`
+          UPDATE Transactions_Deposit 
+          SET amount = @amount, 
+              deposit_datetime = @depositDatetime, 
+              slip_image = @slipImage,
+              status = 'Pending', 
+              reject_reasons = NULL,
+              edit_count = ISNULL(edit_count, 0) + 1
+          WHERE deposit_id = @depositId
+        `);
+    } else {
+      // ถ้าไม่มีการอัปโหลดสลิปใหม่ (แก้แค่จำนวนเงิน หรือเวลา)
+      await pool.request()
+        .input('depositId', sql.Int, depositId)
+        .input('amount', sql.Decimal(18, 2), amount)
+        .input('depositDatetime', sql.DateTime, depositDatetime)
+        .query(`
+          UPDATE Transactions_Deposit 
+          SET amount = @amount, 
+              deposit_datetime = @depositDatetime, 
+              status = 'Pending', 
+              reject_reasons = NULL,
+              edit_count = ISNULL(edit_count, 0) + 1
+          WHERE deposit_id = @depositId
+        `);
+    }
+
+    res.json({ success: true, message: 'ส่งข้อมูลแก้ไขเรียบร้อยแล้ว แอดมินจะรีบตรวจสอบอีกครั้งครับ' });
+  } catch (error) {
+    console.error('Error updating deposit:', error);
+    res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการบันทึกข้อมูลแก้ไข' });
+  }
+});
+
+
 
 // ==========================================
 // API 2: บัญชีคีย์ยอดโอนเข้า (ค้นหาบิลที่แอดมินตรวจไว้แล้ว)
