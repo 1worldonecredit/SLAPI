@@ -1672,7 +1672,6 @@ app.post('/api/admin/deposit-approve', async (req, res) => {
       const depositData = depositRes.recordset[0];
 
       // 2. เปลี่ยนสถานะคำขอฝากเป็น 'Slip Verified' 
-      // 🌟 [แก้ไข] เอา reviewed_at ออก เพื่อป้องกัน Error หาคอลัมน์ไม่เจอ
       await transaction.request()
         .input('depositId', sql.Int, depositId)
         .query(`
@@ -1682,6 +1681,7 @@ app.post('/api/admin/deposit-approve', async (req, res) => {
         `);
 
       // 3. วิ่งไปค้นหายอดเงินเข้า (Bank_Statements) 
+      // ⚠️ หมายเหตุ: ถ้าตาราง Bank_Statements ของคุณไม่ได้ใช้ชื่อคอลัมน์ว่า status ให้แก้ตรง WHERE status = 'Pending' นะครับ
       const matchRes = await transaction.request()
         .input('amount', sql.Decimal(18, 2), depositData.amount)
         .input('accountNumber', sql.VarChar, depositData.account_number || '')
@@ -1715,13 +1715,13 @@ app.post('/api/admin/deposit-approve', async (req, res) => {
           .query(`UPDATE Wallets SET balance = balance + @amount WHERE user_id = @userId`);
 
         // 4.3 บันทึกประวัติการเงิน (Transaction Log) 
-        // 🌟 [แก้ไข] ลบคอลัมน์ที่สุ่มเสี่ยงออก ใช้เฉพาะคอลัมน์พื้นฐานที่ทุกระบบมี
+        // 🌟 [แก้ไขล่าสุด] ผมเอาคอลัมน์ status ออกจากตาราง Transactions แล้วครับ น่าจะผ่าน 100%
         await transaction.request()
           .input('userId', sql.Int, userId)
           .input('amount', sql.Decimal(18, 2), amount)
           .query(`
-            INSERT INTO Transactions (user_id, type, amount, status, description, created_at) 
-            VALUES (@userId, 'Deposit', @amount, 'Completed', 'ระบบกระทบยอดเงินฝากอัตโนมัติ', GETDATE())
+            INSERT INTO Transactions (user_id, type, amount, description, created_at) 
+            VALUES (@userId, 'Deposit', @amount, 'ระบบกระทบยอดเงินฝากอัตโนมัติ', GETDATE())
           `);
 
         await transaction.commit();
@@ -1737,7 +1737,6 @@ app.post('/api/admin/deposit-approve', async (req, res) => {
     } catch (err) {
       await transaction.rollback();
       console.error("SQL Transaction Error:", err);
-      // 🌟 [ทีเด็ดอยู่ตรงนี้] ถ้าพังอีก มันจะส่ง Error จากฐานข้อมูล ไปโชว์ให้คุณเห็นที่หน้าจอเลยครับ!
       res.status(500).json({ success: false, message: 'DB Error: ' + err.message });
     }
   } catch (error) {
