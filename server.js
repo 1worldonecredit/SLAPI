@@ -1445,6 +1445,44 @@ app.post('/api/admin/deposit-reject', async (req, res) => {
 });
 
 // ==========================================
+// API: ลูกค้าแก้ไขคำขอที่ถูกตีกลับ แล้วส่งมาให้แอดมินตรวจใหม่
+// ==========================================
+app.put('/api/deposit-edit/:id', async (req, res) => {
+  try {
+    const depositId = req.params.id;
+    const { amount, depositDate, depositTime, slipBase64 } = req.body;
+    
+    const depositDatetime = `${depositDate} ${depositTime}`;
+    const cleanAmount = Math.round(parseFloat(amount) * 100) / 100;
+    
+    const pool = await sql.connect(dbConfig);
+    
+    // 🌟 อัปเดตข้อมูลที่ลูกค้าแก้ เปลี่ยนสถานะเป็น Pending เพื่อกลับไปเข้าคิวให้แอดมินตรวจ
+    await pool.request()
+      .input('id', sql.Int, depositId)
+      .input('amount', sql.Decimal(18,2), cleanAmount)
+      .input('depositDatetime', sql.DateTime, depositDatetime)
+      .input('slipImage', sql.NVarChar(sql.MAX), slipBase64)
+      .query(`
+        UPDATE Transactions_Deposit
+        SET amount = @amount,
+            deposit_datetime = @depositDatetime,
+            slip_image = @slipImage,
+            status = 'Pending', 
+            reviewed_by = 'User Updated',
+            reject_reasons = NULL
+        WHERE deposit_id = @id
+      `);
+      
+    res.json({ success: true, message: 'ส่งคำขอที่แก้ไขแล้วเรียบร้อย กรุณารอแอดมินตรวจสอบ' });
+  } catch(error) {
+    console.error('Error updating deposit:', error);
+    res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการบันทึกข้อมูลแก้ไข' });
+  }
+});
+
+
+// ==========================================
 // API: ดึงรายชื่อธนาคารสำหรับ Dropdown
 // ==========================================
 app.get('/api/admin/banks', async (req, res) => {
