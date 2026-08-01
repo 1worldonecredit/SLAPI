@@ -2158,38 +2158,31 @@ app.get('/api/admin/statement-report', async (req, res) => {
 });
 
 // ==========================================
-// API: ดึงประวัติการฝากเงิน (สำหรับฝั่งลูกค้า)
-// GET /api/user/deposits/:userId
+// 🌟 API 1: ดึงประวัติการฝากเงินของลูกค้า (เพื่อเช็คยอดตีกลับและแจ้งเตือน)
 // ==========================================
 app.get('/api/user/deposits/:userId', async (req, res) => {
+  const { userId } = req.params;
   try {
-    const userId = req.params.userId;
     const pool = await sql.connect(dbConfig);
-    
-    // ดึงข้อมูลเรียงจากล่าสุดไปเก่าสุด
-    const query = `
-      SELECT 
-        deposit_id, amount, currency_code, status, 
-        reject_reason, 
-        FORMAT(deposit_datetime, 'yyyy-MM-dd HH:mm:ss') AS deposit_datetime,
-        FORMAT(created_at, 'yyyy-MM-dd HH:mm:ss') AS created_at
-      FROM Transactions_Deposit
-      WHERE user_id = @userId
-      ORDER BY created_at DESC
-    `;
-    
     const result = await pool.request()
       .input('userId', sql.Int, userId)
-      .query(query);
-
-    res.json({ success: true, history: result.recordset });
-
+      .query(`
+        SELECT 
+          deposit_id, amount, deposit_datetime, slip_image, status, reject_reasons, account_number, bank_name,
+          -- 🌟 สั่ง SQL ให้หั่นวันที่และเวลาเป็นข้อความ (String) ป้องกันเวลาเพี้ยน +7
+          CONVERT(varchar(10), deposit_datetime, 120) AS edit_date,
+          CONVERT(varchar(8), deposit_datetime, 108) AS edit_time
+        FROM Transactions_Deposit 
+        WHERE user_id = @userId 
+        ORDER BY created_at DESC
+      `);
+    
+    res.json({ success: true, data: result.recordset });
   } catch (error) {
     console.error('Error fetching user deposits:', error);
-    res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการดึงประวัติ' });
+    res.status(500).json({ success: false, message: 'Server error' });
   }
 });
-
 
 app.listen(port, () => {
     console.log(`🚀 Server เปิดทำงานแล้วที่พอร์ต ${port}`);
