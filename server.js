@@ -1692,7 +1692,7 @@ app.post('/api/admin/deposit-approve', async (req, res) => {
           WHERE status = 'Pending' 
             AND amount = @amount 
             AND account_number = @accountNumber
-            AND CAST(statement_date AS DATE) = CAST(@depositDate AS DATE)
+            AND CAST(transfer_date AS DATE) = CAST(@depositDate AS DATE)
         `);
 
       // 4. กรณีที่ 1: พบยอดเงินที่ตรงกัน! (กระทบยอดสำเร็จทันที)
