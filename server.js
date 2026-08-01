@@ -1769,7 +1769,6 @@ app.get('/api/user/deposits/:userId', async (req, res) => {
   }
 });
 
-
 // ==========================================
 // 🌟 API 2: สำหรับลูกค้ารับส่งข้อมูลที่ "แก้ไขแล้ว" กลับไปให้แอดมิน
 // ==========================================
@@ -1777,19 +1776,21 @@ app.put('/api/deposit-edit/:depositId', async (req, res) => {
   const { depositId } = req.params;
   const { amount, depositDate, depositTime, slipBase64 } = req.body;
   
-  // รวมวันที่และเวลาเข้าด้วยกัน
-  const depositDatetime = `${depositDate}T${depositTime}:00`;
+  // 🌟 [แก้บั๊กเวลาเพี้ยน] จัดฟอร์แมตเวลาให้เป็น YYYY-MM-DD HH:mm:ss เป๊ะๆ
+  let timeStr = depositTime;
+  if (timeStr.length === 5) timeStr += ':00'; // ถ้ามาแค่ 11:11 ให้เติมวินาทีเป็น 11:11:00
+  
+  const depositDatetime = `${depositDate} ${timeStr}`; // ใช้เว้นวรรค ห้ามใช้ตัว T เพื่อกัน SQL เพี้ยน
 
   try {
     const pool = await sql.connect(dbConfig);
     
-    // อัปเดตข้อมูล และเปลี่ยนสถานะกลับเป็น Pending เพื่อให้แอดมินตรวจใหม่
     if (slipBase64) {
-      // ถ้ามีการอัปโหลดสลิปใหม่
       await pool.request()
         .input('depositId', sql.Int, depositId)
         .input('amount', sql.Decimal(18, 2), amount)
-        .input('depositDatetime', sql.DateTime, depositDatetime)
+        // 🌟 บังคับให้ SQL รับเป็นตัวหนังสือตรงๆ (VarChar) ห้ามมันบวกลบเวลาเอง
+        .input('depositDatetime', sql.VarChar, depositDatetime) 
         .input('slipImage', sql.VarChar(sql.MAX), slipBase64)
         .query(`
           UPDATE Transactions_Deposit 
@@ -1802,11 +1803,10 @@ app.put('/api/deposit-edit/:depositId', async (req, res) => {
           WHERE deposit_id = @depositId
         `);
     } else {
-      // ถ้าไม่มีการอัปโหลดสลิปใหม่ (แก้แค่จำนวนเงิน หรือเวลา)
       await pool.request()
         .input('depositId', sql.Int, depositId)
         .input('amount', sql.Decimal(18, 2), amount)
-        .input('depositDatetime', sql.DateTime, depositDatetime)
+        .input('depositDatetime', sql.VarChar, depositDatetime)
         .query(`
           UPDATE Transactions_Deposit 
           SET amount = @amount, 
