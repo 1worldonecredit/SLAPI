@@ -2185,32 +2185,31 @@ app.get('/api/user/deposits/:userId', async (req, res) => {
 });
 
 // ==========================================
-// 🌟 API: ดึงข้อมูลทีมงานและรายได้ (อัปเดตแก้บั๊ก SQL mssql)
+// 🌟 API: ดึงข้อมูลทีมงานและรายได้ (แก้ไขชื่อคอลัมน์ให้ตรงตารางจริง 100%)
 // ==========================================
 app.get('/api/team/:userId', async (req, res) => {
   const { userId } = req.params;
+  
   try {
     const pool = await sql.connect(dbConfig);
     
-    // 🌟 ใช้ INNER JOIN ดึงข้อมูลในรวดเดียว (แก้ปัญหา mssql หา recordset ไม่เจอ)
+    // 🌟 ใช้ Subquery และเรียกเฉพาะคอลัมน์ที่มีในตาราง (username, created_at)
     const teamRes = await pool.request()
       .input('userId', sql.Int, userId)
       .query(`
         SELECT 
-          u.user_id as id,
-          ISNULL(u.firstname, u.username) as name, 
-          ISNULL(u.profile_picture, 'https://ui-avatars.com/api/?name=' + ISNULL(u.firstname, u.username) + '&background=random') as avatar,
-          CONVERT(varchar(10), u.created_at, 103) as joinDate, 
+          user_id as id,
+          username as name, 
+          'https://ui-avatars.com/api/?name=' + username + '&background=random' as avatar,
+          CONVERT(varchar(10), created_at, 103) as joinDate, 
           0.00 as purchaseComm,
           0.00 as winComm,
-          CAST(CASE WHEN DATEDIFF(day, u.created_at, GETDATE()) < 30 THEN 1 ELSE 0 END AS BIT) as isActive
-        FROM Users u
-        INNER JOIN Users me ON u.referrer_username = me.username
-        WHERE me.user_id = @userId
-        ORDER BY u.created_at DESC
+          CAST(CASE WHEN DATEDIFF(day, created_at, GETDATE()) < 30 THEN 1 ELSE 0 END AS BIT) as isActive
+        FROM Users
+        WHERE referrer_username = (SELECT username FROM Users WHERE user_id = @userId)
+        ORDER BY created_at DESC
       `);
       
-    // ดึงก้อนข้อมูลออกมา (ใส่ [] เผื่อกรณีไม่มีข้อมูลจะได้ไม่พัง)
     const teamMembers = teamRes.recordset || [];
     
     const totalIncome = teamMembers.reduce((sum, m) => sum + Number(m.purchaseComm || 0) + Number(m.winComm || 0), 0);
@@ -2228,7 +2227,6 @@ app.get('/api/team/:userId', async (req, res) => {
     res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการดึงข้อมูลทีม' });
   }
 });
-
 
 app.listen(port, () => {
     console.log(`🚀 Server เปิดทำงานแล้วที่พอร์ต ${port}`);
