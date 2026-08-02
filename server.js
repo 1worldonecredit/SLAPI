@@ -64,6 +64,50 @@ app.get('/api/status', (req, res) => {
 
 
 // ==========================================
+// 🌟 ระบบเปิด-ปิดรับซื้ออัตโนมัติตามเวลา (Cron Job รันทุกๆ 1 นาที)
+// ==========================================
+cron.schedule('* * * * *', async () => {
+    try {
+        const pool = await sql.connect(dbConfig);
+        
+        // 1. ดึงเวลาเปิด/ปิด จาก Database
+        const res = await pool.request().query(`
+            SELECT 
+                CONVERT(varchar(5), close_time, 108) as close_time,
+                CONVERT(varchar(5), open_time, 108) as open_time
+            FROM System_Settings WHERE id = 1
+        `);
+        
+        if (res.recordset.length > 0) {
+            const { close_time, open_time } = res.recordset[0];
+            
+            // 2. ดึงเวลาปัจจุบันของ Server (ล็อกเป็นเวลาไทย HH:mm)
+            const currentTime = new Date().toLocaleTimeString('en-US', { 
+                timeZone: 'Asia/Bangkok', 
+                hour12: false, 
+                hour: '2-digit', 
+                minute: '2-digit' 
+            });
+
+            // 3. ถ้าถึงเวลาปิดรับซื้อ -> สั่งอัปเดตตารางปิดระบบ
+            if (currentTime === close_time) {
+                await pool.request().query("UPDATE System_Settings SET is_sales_open = 0 WHERE id = 1");
+                console.log(`⏰ [${currentTime}] ถึงเวลาปิดรับซื้อ -> สั่งปิดระบบอัตโนมัติเรียบร้อย`);
+            }
+            
+            // 4. ถ้าถึงเวลาเปิดรับซื้อ (รอบใหม่) -> สั่งอัปเดตตารางเปิดระบบ
+            if (currentTime === open_time) {
+                await pool.request().query("UPDATE System_Settings SET is_sales_open = 1 WHERE id = 1");
+                console.log(`⏰ [${currentTime}] ถึงเวลาเปิดรับซื้อ -> สั่งเปิดระบบอัตโนมัติเรียบร้อย`);
+            }
+        }
+    } catch (err) {
+        console.error('❌ เกิดข้อผิดพลาดในระบบตั้งเวลาอัตโนมัติ:', err);
+    }
+});
+// ==========================================
+
+// ==========================================
 // 🌟 API สำหรับระบบเมนูอัจฉริยะ (Dynamic Menu)
 // ==========================================
 // 1. ดึงข้อมูลเมนูทั้งหมด (GET) - ส่งไปให้ React วาดเมนูซ้ายมือ
