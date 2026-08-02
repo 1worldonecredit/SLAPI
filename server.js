@@ -2715,6 +2715,40 @@ app.get('/api/lottery/status', async (req, res) => {
     }
 });
 
+// ==========================================
+// 🌟 API: ดึงประวัติผลการออกรางวัลและรายชื่อคนถูกรางวัล ย้อนหลังตามวันที่
+// ==========================================
+app.get('/api/admin/draw-history', async (req, res) => {
+    const { date } = req.query; // คาดหวัง Format: YYYY-MM-DD (ค.ศ.)
+    try {
+        const pool = await sql.connect(dbConfig);
+        
+        // 1. ดึงผลรางวัลของวันนั้น
+        const resultRes = await pool.request()
+            .input('dDate', sql.Date, date)
+            .query("SELECT * FROM Draw_Results WHERE draw_date = @dDate");
+            
+        // 2. ดึงคนถูกรางวัลของวันนั้น
+        const winnersRes = await pool.request()
+            .input('dDate', sql.Date, date)
+            .query(`
+                SELECT u.username, i.lottery_type, i.selected_number, i.price, i.prize_amount, o.currency_code
+                FROM Lottery_Order_Items i
+                JOIN Lottery_Orders o ON i.order_id = o.order_id
+                JOIN Users u ON o.user_id = u.user_id
+                WHERE o.draw_date = @dDate AND i.status = N'ถูกรางวัล'
+            `);
+
+        res.json({ 
+            success: true, 
+            results: resultRes.recordset.length > 0 ? resultRes.recordset[0] : null,
+            winners: winnersRes.recordset 
+        });
+    } catch (err) {
+        res.status(500).json({ success: false });
+    }
+});
+
 app.listen(port, () => {
     console.log(`🚀 Server เปิดทำงานแล้วที่พอร์ต ${port}`);
 });
