@@ -1113,6 +1113,17 @@ app.put('/api/admin/animal-numbers/:id', async (req, res) => {
 app.post('/api/lottery/buy', async (req, res) => {
     const { user_id, cart, total_price, currency } = req.body;
     const pool = await sql.connect(dbConfig);
+    
+    // ==========================================
+    // 🌟 0. แทรกระบบเช็คสถานะการขาย (ทำก่อนเริ่ม Transaction เพื่อความปลอดภัย)
+    // ==========================================
+    const statusRes = await pool.request().query("SELECT is_sales_open, close_time FROM System_Settings WHERE id = 1");
+    if (!statusRes.recordset[0].is_sales_open) {
+        return res.status(400).json({ success: false, message: 'ระบบปิดรับซื้อแล้วในขณะนี้ กรุณารอรอบถัดไป' });
+    }
+    const closeTimeStr = statusRes.recordset[0].close_time; // ดึงเวลาปิดเก็บไว้คำนวณบิล
+    // ==========================================
+
     const transaction = new sql.Transaction(pool);
 
     try {
@@ -1158,12 +1169,29 @@ app.post('/api/lottery/buy', async (req, res) => {
             .query(`INSERT INTO Transactions (user_id, transaction_type, title, amount, status, created_at)
                     VALUES (@userId, 'Buy Lottery', @title, @amount, 'Completed', GETDATE())`);
 
+        // ==========================================
+        // 🌟 แทรกระบบคำนวณ งวดวันที่ (draw_date) เข้าไปในบิล Lottery_Orders
+        // ==========================================
         const orderRes = await request
             .input('currency', sql.VarChar, currency)
             .input('totalPrice', sql.Decimal(18,2), deductAmount)
-            .query(`INSERT INTO Lottery_Orders (user_id, total_amount, currency_code, status, created_at)
-                    OUTPUT INSERTED.order_id
-                    VALUES (@userId, @totalPrice, @currency, N'รอผลตรวจ', GETDATE())`);
+            .input('closeTime', sql.VarChar, closeTimeStr) // โยนเวลาปิดรับซื้อเข้าไปใน SQL
+            .query(`
+                DECLARE @TargetDrawDate DATE;
+                DECLARE @CurrentTime TIME = CAST(GETDATE() AS TIME);
+                DECLARE @CurrentDate DATE = CAST(GETDATE() AS DATE);
+                
+                -- ถ้าซื้อหลังเวลาปิดรับ ให้ถือว่าเป็นบิลของวันพรุ่งนี้
+                IF @CurrentTime >= CAST(@closeTime AS TIME)
+                    SET @TargetDrawDate = DATEADD(day, 1, @CurrentDate);
+                ELSE
+                    SET @TargetDrawDate = @CurrentDate;
+
+                INSERT INTO Lottery_Orders (user_id, total_amount, currency_code, status, draw_date, created_at)
+                OUTPUT INSERTED.order_id
+                VALUES (@userId, @totalPrice, @currency, N'รอผลตรวจ', @TargetDrawDate, GETDATE())
+            `);
+        // ==========================================
 
         const orderId = orderRes.recordset[0].order_id;
 
@@ -2567,6 +2595,19 @@ app.post('/api/admin/draw-results', async (req, res) => {
 });
 
 //=====================
+
+// ==========================================
+// 🌟 API: สำหรับหน้าลูกค้า เช็คสถานะการขายปัจจุบัน
+// ==========================================
+app.get('/api/lottery/status', async (req, res) => {
+    try {
+        const pool = await sql.connect(dbConfig);
+        const result = await pool.request().query("SELECT is_sales_open, close_time FROM System_Settings WHERE id = 1");
+        res.json({ success: true, data: result.recordset[0] });
+    } catch (err) {
+        res.status(500).json({ success: false });
+    }
+});
 
 app.listen(port, () => {
     console.log(`🚀 Server เปิดทำงานแล้วที่พอร์ต ${port}`);
