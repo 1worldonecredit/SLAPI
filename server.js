@@ -2185,44 +2185,35 @@ app.get('/api/user/deposits/:userId', async (req, res) => {
 });
 
 // ==========================================
-// 🌟 API: ดึงข้อมูลทีมงานและรายได้ (ดึงจากตาราง Users ตัวจริงของคุณ)
+// 🌟 API: ดึงข้อมูลทีมงานและรายได้ (อัปเดตแก้บั๊ก SQL mssql)
 // ==========================================
 app.get('/api/team/:userId', async (req, res) => {
   const { userId } = req.params;
   try {
     const pool = await sql.connect(dbConfig);
     
-    // 🌟 ดึงข้อมูลลูกทีมจากตาราง Users โดยใช้ referrer_username
+    // 🌟 ใช้ INNER JOIN ดึงข้อมูลในรวดเดียว (แก้ปัญหา mssql หา recordset ไม่เจอ)
     const teamRes = await pool.request()
       .input('userId', sql.Int, userId)
       .query(`
-        -- 1. หา username ของเราเองก่อน (จาก userId ที่ส่งมา)
-        DECLARE @myUsername NVARCHAR(255);
-        SELECT @myUsername = username FROM Users WHERE user_id = @userId;
-
-        -- 2. ดึงลูกทีมทุกคนที่มี referrer_username ตรงกับเรา
         SELECT 
-          user_id as id,
-          -- ถ้าไม่มีชื่อจริง ให้เอา username มาโชว์แทน
-          ISNULL(firstname, username) as name, 
-          ISNULL(profile_picture, 'https://ui-avatars.com/api/?name=' + ISNULL(firstname, username) + '&background=random') as avatar,
-          CONVERT(varchar(10), created_at, 103) as joinDate, 
-          
-          -- 🌟 ค่าคอมมิชชั่น: ตอนนี้ใส่ 0.00 ไปก่อน (เพราะในตาราง Users คุณยังไม่ได้สร้างคอลัมน์เก็บยอดเงิน 2%)
+          u.user_id as id,
+          ISNULL(u.firstname, u.username) as name, 
+          ISNULL(u.profile_picture, 'https://ui-avatars.com/api/?name=' + ISNULL(u.firstname, u.username) + '&background=random') as avatar,
+          CONVERT(varchar(10), u.created_at, 103) as joinDate, 
           0.00 as purchaseComm,
           0.00 as winComm,
-          
-          -- เช็คสถานะใช้งาน: สมมติว่าถ้าเพิ่งสมัครไม่เกิน 30 วัน ให้ขึ้นจุดสีเขียว (Online)
-          CAST(CASE WHEN DATEDIFF(day, created_at, GETDATE()) < 30 THEN 1 ELSE 0 END AS BIT) as isActive
-        FROM Users
-        WHERE referrer_username = @myUsername
-        ORDER BY created_at DESC
+          CAST(CASE WHEN DATEDIFF(day, u.created_at, GETDATE()) < 30 THEN 1 ELSE 0 END AS BIT) as isActive
+        FROM Users u
+        INNER JOIN Users me ON u.referrer_username = me.username
+        WHERE me.user_id = @userId
+        ORDER BY u.created_at DESC
       `);
       
-    const teamMembers = teamRes.recordset;
+    // ดึงก้อนข้อมูลออกมา (ใส่ [] เผื่อกรณีไม่มีข้อมูลจะได้ไม่พัง)
+    const teamMembers = teamRes.recordset || [];
     
-    // คำนวณยอดสะสมรวม
-    const totalIncome = teamMembers.reduce((sum, m) => sum + Number(m.purchaseComm) + Number(m.winComm), 0);
+    const totalIncome = teamMembers.reduce((sum, m) => sum + Number(m.purchaseComm || 0) + Number(m.winComm || 0), 0);
     const incomeThisMonth = totalIncome * 0.5;
 
     res.json({ 
