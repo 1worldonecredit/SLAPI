@@ -2505,24 +2505,33 @@ app.get('/api/admin/daily-sales', async (req, res) => {
 //==============================
 
 // ==========================================
-// 🌟 API 1: จัดการการตั้งค่าระบบ (เวลาปิด และสถานะเปิด/ปิดรับ)
+// 🌟 API 1: ดึงการตั้งค่าระบบ (รวมเวลา 3 อย่าง)
 // ==========================================
 app.get('/api/admin/settings', async (req, res) => {
     try {
         const pool = await sql.connect(dbConfig);
-        const result = await pool.request().query("SELECT * FROM System_Settings WHERE id = 1");
+        const result = await pool.request().query("SELECT close_time, open_time, draw_time, is_sales_open FROM System_Settings WHERE id = 1");
         res.json({ success: true, data: result.recordset[0] });
     } catch (err) { res.status(500).json({ success: false }); }
 });
 
+// ==========================================
+// 🌟 API 2: บันทึกการตั้งค่าระบบ (รวมเวลา 3 อย่าง)
+// ==========================================
 app.post('/api/admin/settings', async (req, res) => {
-    const { close_time, is_sales_open } = req.body;
+    const { close_time, open_time, draw_time, is_sales_open } = req.body;
     try {
         const pool = await sql.connect(dbConfig);
         await pool.request()
-            .input('time', sql.Time, close_time)
+            .input('closeTime', sql.Time, close_time)
+            .input('openTime', sql.Time, open_time)
+            .input('drawTime', sql.Time, draw_time)
             .input('isOpen', sql.Bit, is_sales_open)
-            .query("UPDATE System_Settings SET close_time = @time, is_sales_open = @isOpen WHERE id = 1");
+            .query(`
+                UPDATE System_Settings 
+                SET close_time = @closeTime, open_time = @openTime, draw_time = @drawTime, is_sales_open = @isOpen 
+                WHERE id = 1
+            `);
         res.json({ success: true });
     } catch (err) { res.status(500).json({ success: false }); }
 });
