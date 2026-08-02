@@ -1109,7 +1109,6 @@ app.put('/api/admin/animal-numbers/:id', async (req, res) => {
         res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการ UPDATE Database', error: error.message });
     }
 });
-
 app.post('/api/lottery/buy', async (req, res) => {
     const { user_id, cart, total_price, currency } = req.body;
     const pool = await sql.connect(dbConfig);
@@ -1134,23 +1133,24 @@ app.post('/api/lottery/buy', async (req, res) => {
         // 3. คำนวณยอดที่จะหักเงิน (แปลงกลับเป็นสกุลเงินกระเป๋าลูกค้า)
         const deductAmount = baseTHBAmount * exchangeRate; 
 
-        // 4. เช็คยอดเงินและหักเงินในกระเป๋า (หักตามยอด deductAmount)
+        // 4. เช็คยอดเงินและหักเงินในกระเป๋า (🌟 แก้ไข: เปลี่ยนมาเช็คจากตาราง Wallets ตัวจริง)
         const userRes = await request
             .input('userId', sql.Int, user_id)
-            .query('SELECT wallet_balance FROM Users WHERE user_id = @userId'); 
+            .query('SELECT balance FROM Wallets WHERE user_id = @userId'); 
 
-        if (userRes.recordset.length === 0) throw new Error('ไม่พบข้อมูลผู้ใช้ในระบบ');
-        if (userRes.recordset[0].wallet_balance < deductAmount) { 
+        if (userRes.recordset.length === 0) throw new Error('ไม่พบข้อมูลกระเป๋าเงินในระบบ (กรุณาแจ้งแอดมินตรวจสอบ)');
+        if (userRes.recordset[0].balance < deductAmount) { 
             throw new Error('ยอดเงินในกระเป๋าไม่เพียงพอ');
         }
 
         request.input('deductAmount', sql.Decimal(18,2), deductAmount);
         await request.query(`
-            UPDATE Users SET wallet_balance = wallet_balance - @deductAmount WHERE user_id = @userId;
+            -- 🌟 เพิ่ม ISNULL กันเหนียว กรณีตาราง Users เป็นค่าว่าง จะได้ไม่ Error
+            UPDATE Users SET wallet_balance = ISNULL(wallet_balance, 0) - @deductAmount WHERE user_id = @userId;
             UPDATE Wallets SET balance = balance - @deductAmount WHERE user_id = @userId;
         `);
 
-        // 5. บันทึกประวัติและสร้างบิล (โค้ดส่วนนี้เหมือนเดิมครับ)
+        // 5. บันทึกประวัติและสร้างบิล
         await request
             .input('title', sql.NVarChar, 'ซื้อหวยเวียดนาม')
             .input('amount', sql.Decimal(18,2), -deductAmount) 
