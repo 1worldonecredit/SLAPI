@@ -2806,6 +2806,32 @@ app.get('/api/admin/draw-history', async (req, res) => {
     }
 });
 
+
+// ==========================================
+// 🌟 API: ดึงประวัติผลการออกรางวัลแบบ "ช่วงวันที่" (รายเดือน)
+// ==========================================
+app.get('/api/admin/draw-history-range', async (req, res) => {
+    const { startDate, endDate } = req.query;
+    try {
+        const pool = await sql.connect(dbConfig);
+        const result = await pool.request()
+            // ใช้ VarChar แล้ว CAST เป็น DATE เพื่อป้องกันบั๊กเวลาเหลื่อมล้ำ
+            .input('startDate', sql.VarChar, startDate)
+            .input('endDate', sql.VarChar, endDate)
+            .query(`
+                SELECT * FROM Draw_Results
+                WHERE draw_date >= CAST(@startDate AS DATE) 
+                  AND draw_date <= CAST(@endDate AS DATE)
+                ORDER BY draw_date DESC
+            `);
+            
+        res.json({ success: true, history: result.recordset });
+    } catch (err) {
+        console.error("Error fetching history range:", err);
+        res.status(500).json({ success: false });
+    }
+});
+
 app.listen(port, () => {
     console.log(`🚀 Server เปิดทำงานแล้วที่พอร์ต ${port}`);
 });
