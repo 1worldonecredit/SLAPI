@@ -2510,7 +2510,16 @@ app.get('/api/admin/daily-sales', async (req, res) => {
 app.get('/api/admin/settings', async (req, res) => {
     try {
         const pool = await sql.connect(dbConfig);
-        const result = await pool.request().query("SELECT close_time, open_time, draw_time, is_sales_open FROM System_Settings WHERE id = 1");
+        // 🌟 แก้ไข: สั่ง SQL ให้แปลงเวลาเป็น Format HH:mm เลย หน้าบ้านจะได้ไม่งง
+        const result = await pool.request().query(`
+            SELECT 
+                CONVERT(varchar(5), close_time, 108) as close_time,
+                CONVERT(varchar(5), open_time, 108) as open_time,
+                CONVERT(varchar(5), draw_time, 108) as draw_time,
+                is_sales_open 
+            FROM System_Settings 
+            WHERE id = 1
+        `);
         res.json({ success: true, data: result.recordset[0] });
     } catch (err) { res.status(500).json({ success: false }); }
 });
