@@ -64,22 +64,23 @@ app.get('/api/status', (req, res) => {
 
 
 // ==========================================
-// 🌟 ระบบเปิด-ปิดรับซื้ออัตโนมัติตามเวลา (Cron Job รันทุกๆ 1 นาที)
+// 🌟 ระบบเปิด-ปิดรับซื้อ และ ออกรางวัลอัตโนมัติ (Cron Job รันทุกๆ 1 นาที)
 // ==========================================
 cron.schedule('* * * * *', async () => {
     try {
         const pool = await sql.connect(dbConfig);
         
-        // 1. ดึงเวลาเปิด/ปิด จาก Database
+        // 1. ดึงเวลาเปิด/ปิด และ เพิ่มการดึงเวลาออกเลข (draw_time) จาก Database
         const res = await pool.request().query(`
             SELECT 
                 CONVERT(varchar(5), close_time, 108) as close_time,
-                CONVERT(varchar(5), open_time, 108) as open_time
+                CONVERT(varchar(5), open_time, 108) as open_time,
+                CONVERT(varchar(5), draw_time, 108) as draw_time
             FROM System_Settings WHERE id = 1
         `);
         
         if (res.recordset.length > 0) {
-            const { close_time, open_time } = res.recordset[0];
+            const { close_time, open_time, draw_time } = res.recordset[0];
             
             // 2. ดึงเวลาปัจจุบันของ Server (ล็อกเป็นเวลาไทย HH:mm)
             const currentTime = new Date().toLocaleTimeString('en-US', { 
@@ -100,12 +101,68 @@ cron.schedule('* * * * *', async () => {
                 await pool.request().query("UPDATE System_Settings SET is_sales_open = 1 WHERE id = 1");
                 console.log(`⏰ [${currentTime}] ถึงเวลาเปิดรับซื้อ -> สั่งเปิดระบบอัตโนมัติเรียบร้อย`);
             }
+
+            // ==========================================
+            // 🌟 5. ส่วนที่วางต่อ: ถ้าถึงเวลาออกเลข ให้ออกรางวัลอัตโนมัติ!
+            // ==========================================
+            if (currentTime === draw_time) {
+                console.log(`🎰 [${currentTime}] กำลังสุ่มออกรางวัลและตรวจบิลอัตโนมัติ...`);
+                
+                const num8 = Math.floor(10000000 + Math.random() * 90000000).toString();
+                const num6 = Math.floor(100000 + Math.random() * 900000).toString();
+                const num4 = num6.slice(-4);
+                const num3 = num6.slice(-3);
+                const num2 = num6.slice(-2);
+                
+                // หาวันที่ปัจจุบัน (ล็อกเป็นเวลาไทย เพื่อความแม่นยำในการเก็บงวด ค.ศ.)
+                const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Bangkok' });
+                
+                // 5.1 บันทึกผลลงตาราง Draw_Results
+                await pool.request()
+                    .input('dDate', sql.Date, today)
+                    .input('p8', sql.VarChar, num8)
+                    .input('p6', sql.VarChar, num6)
+                    .input('p4', sql.VarChar, num4)
+                    .input('p3', sql.VarChar, num3)
+                    .input('p2', sql.VarChar, num2)
+                    .query(`
+                        IF NOT EXISTS (SELECT 1 FROM Draw_Results WHERE draw_date = @dDate)
+                            INSERT INTO Draw_Results (draw_date, prize_8, prize_6, prize_4, prize_3, prize_2) 
+                            VALUES (@dDate, @p8, @p6, @p4, @p3, @p2);
+                    `);
+
+                // 5.2 ตรวจบิลและจ่ายเงินอัตโนมัติ
+                await pool.request().input('dDate', sql.Date, today).query(`
+                    UPDATE i SET 
+                        status = CASE 
+                            WHEN (i.lottery_type = '2' AND i.selected_number = '${num2}') OR
+                                 (i.lottery_type = '3' AND i.selected_number = '${num3}') OR
+                                 (i.lottery_type = '4' AND i.selected_number = '${num4}') OR
+                                 (i.lottery_type = '6' AND i.selected_number = '${num6}') OR
+                                 (i.lottery_type = '8' AND i.selected_number = '${num8}') THEN N'ถูกรางวัล'
+                            ELSE N'ไม่ถูกรางวัล'
+                        END,
+                        prize_amount = CASE
+                            WHEN i.lottery_type = '2' AND i.selected_number = '${num2}' THEN i.price * 90
+                            WHEN i.lottery_type = '3' AND i.selected_number = '${num3}' THEN i.price * 900
+                            WHEN i.lottery_type = '4' AND i.selected_number = '${num4}' THEN i.price * 7000
+                            WHEN i.lottery_type = '6' AND i.selected_number = '${num6}' THEN i.price * 400000
+                            WHEN i.lottery_type = '8' AND i.selected_number = '${num8}' THEN i.price * 1000000
+                            ELSE 0
+                        END
+                    FROM Lottery_Order_Items i
+                    JOIN Lottery_Orders o ON i.order_id = o.order_id
+                    WHERE o.draw_date = @dDate AND i.status = N'รอผลตรวจ';
+                `);
+                
+                console.log(`✅ ออกรางวัลเสร็จสิ้น! (ผล 2 ตัวท้ายคือ: ${num2})`);
+            }
+            // ==========================================
         }
     } catch (err) {
         console.error('❌ เกิดข้อผิดพลาดในระบบตั้งเวลาอัตโนมัติ:', err);
     }
 });
-// ==========================================
 
 // ==========================================
 // 🌟 API สำหรับระบบเมนูอัจฉริยะ (Dynamic Menu)
