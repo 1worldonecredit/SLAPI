@@ -2362,15 +2362,13 @@ cron.schedule('0 5 * * *', async () => {
 // 🌟 API: รายงานยอดขายหวยรายวัน (Admin)
 // ==========================================
 // ==========================================
-// 🌟 API: รายงานยอดขายหวยรายวัน (Admin)
+// 🌟 API: รายงานยอดขายหวยรายวัน (Admin) - อัปเดตดึงชื่อนามสัตว์
 // ==========================================
 app.get('/api/admin/daily-sales', async (req, res) => {
   try {
     const pool = await sql.connect(dbConfig);
-    // รับค่าวันที่ที่ต้องการดู ถ้าไม่ส่งมาให้ใช้วันนี้
     const targetDate = req.query.date || new Date().toISOString().split('T')[0];
 
-    // 1. ดึงสรุปยอดขาย (รายวัน และ รายเดือน)
     const summaryRes = await pool.request()
       .input('targetDate', sql.Date, targetDate)
       .query(`
@@ -2380,7 +2378,7 @@ app.get('/api/admin/daily-sales', async (req, res) => {
         FROM Lottery_Orders;
       `);
 
-    // 2. ดึงรายการซื้อของวันนี้
+    // 🌟 อัปเดต: ดึงชื่อสัตว์จากตาราง Master_Animal_Numbers 
     const salesRes = await pool.request()
       .input('targetDate', sql.Date, targetDate)
       .query(`
@@ -2394,7 +2392,14 @@ app.get('/api/admin/daily-sales', async (req, res) => {
           o.currency_code,
           i.status,
           ISNULL(i.prize_amount, 0) as prize_amount,
-          CONVERT(varchar(16), o.created_at, 120) as buy_time
+          CONVERT(varchar(16), o.created_at, 120) as buy_time,
+          -- ค้นหาชื่อสัตว์ที่ตรงกับเลขที่ซื้อ
+          ISNULL((
+            SELECT TOP 1 animal_name_th 
+            FROM Master_Animal_Numbers 
+            WHERE lottery_type = i.lottery_type 
+              AND (num1 = i.selected_number OR num2 = i.selected_number OR num3 = i.selected_number)
+          ), '') as animal_name
         FROM Lottery_Order_Items i
         JOIN Lottery_Orders o ON i.order_id = o.order_id
         JOIN Users u ON o.user_id = u.user_id
@@ -2402,7 +2407,6 @@ app.get('/api/admin/daily-sales', async (req, res) => {
         ORDER BY o.created_at DESC;
       `);
 
-    // 3. ดึงยอดจ่ายรางวัลรวมของวันนี้
     const payoutRes = await pool.request()
       .input('targetDate', sql.Date, targetDate)
       .query(`
