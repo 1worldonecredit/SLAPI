@@ -1815,11 +1815,6 @@ app.post('/api/admin/key-statement', async (req, res) => {
   }
 });
 
-
-// ==========================================
-// 🚀 THE FUTURE RECONCILIATION ENGINE (ระบบกระทบยอดอัตโนมัติ 2 ทาง)
-// API: แอดมินกด "ตรวจสอบสลิปผ่าน" 1/1
-// ==========================================
 // ==========================================
 // 🚀 THE FUTURE RECONCILIATION ENGINE (ระบบกระทบยอดอัตโนมัติ 2 ทาง)
 // API: แอดมินกด "ตรวจสอบสลิปผ่าน"
@@ -1855,7 +1850,6 @@ app.post('/api/admin/deposit-approve', async (req, res) => {
         `);
 
       // 3. วิ่งไปค้นหายอดเงินเข้า (Bank_Statements) 
-      // 🌟 [ปรับแก้ตาม DB จริง]: ใช้ is_reconciled = 0 แทน status และใช้ transfer_date แทน statement_date
       const matchRes = await transaction.request()
         .input('amount', sql.Decimal(18, 2), depositData.amount)
         .input('accountNumber', sql.VarChar, depositData.account_number || '')
@@ -1874,7 +1868,6 @@ app.post('/api/admin/deposit-approve', async (req, res) => {
         const matchedStatementId = matchRes.recordset[0].statement_id;
 
         // 4.1 อัปเดตสถานะทั้ง 2 ฝั่งให้เป็น 'สำเร็จ'
-        // 🌟 [ปรับแก้ตาม DB จริง]: เปลี่ยน is_reconciled ให้เป็น 1
         await transaction.request()
           .input('depositId', sql.Int, depositId)
           .input('statementId', sql.Int, matchedStatementId)
@@ -1887,15 +1880,17 @@ app.post('/api/admin/deposit-approve', async (req, res) => {
         await transaction.request()
           .input('userId', sql.Int, userId)
           .input('amount', sql.Decimal(18, 2), amount)
-          .query(`UPDATE Wallets SET balance = balance + @amount WHERE user_id = @userId`);
+          .query(`UPDATE Wallets SET balance = ISNULL(balance, 0) + @amount, last_updated = GETDATE() WHERE user_id = @userId`);
 
-        // 4.3 บันทึกประวัติการเงิน (Transaction Log) 
+        // 4.3 บันทึกประวัติการเงิน (Transaction Log)
+        // 🌟 [แก้ไขชื่อคอลัมน์ให้ถูกต้องตาม DB แล้วครับ!]
         await transaction.request()
           .input('userId', sql.Int, userId)
           .input('amount', sql.Decimal(18, 2), amount)
+          .input('title', sql.NVarChar(255), 'ระบบกระทบยอดเงินฝากอัตโนมัติ')
           .query(`
-            INSERT INTO Transactions (user_id, type, amount, description, created_at) 
-            VALUES (@userId, 'Deposit', @amount, 'ระบบกระทบยอดเงินฝากอัตโนมัติ', GETDATE())
+            INSERT INTO Transactions (user_id, transaction_type, title, amount, status, created_at) 
+            VALUES (@userId, 'Deposit', @title, @amount, 'Completed', GETDATE())
           `);
 
         await transaction.commit();
