@@ -2358,8 +2358,77 @@ cron.schedule('0 5 * * *', async () => {
 });
 // ==========================================
 
+// ==========================================
+// 🌟 API: รายงานยอดขายหวยรายวัน (Admin)
+// ==========================================
+// ==========================================
+// 🌟 API: รายงานยอดขายหวยรายวัน (Admin)
+// ==========================================
+app.get('/api/admin/daily-sales', async (req, res) => {
+  try {
+    const pool = await sql.connect(dbConfig);
+    // รับค่าวันที่ที่ต้องการดู ถ้าไม่ส่งมาให้ใช้วันนี้
+    const targetDate = req.query.date || new Date().toISOString().split('T')[0];
 
+    // 1. ดึงสรุปยอดขาย (รายวัน และ รายเดือน)
+    const summaryRes = await pool.request()
+      .input('targetDate', sql.Date, targetDate)
+      .query(`
+        SELECT 
+          ISNULL(SUM(CASE WHEN CAST(created_at AS DATE) = @targetDate THEN total_amount ELSE 0 END), 0) AS daily_total,
+          ISNULL(SUM(CASE WHEN MONTH(created_at) = MONTH(@targetDate) AND YEAR(created_at) = YEAR(@targetDate) THEN total_amount ELSE 0 END), 0) AS monthly_total
+        FROM Lottery_Orders;
+      `);
 
+    // 2. ดึงรายการซื้อของวันนี้
+    const salesRes = await pool.request()
+      .input('targetDate', sql.Date, targetDate)
+      .query(`
+        SELECT 
+          i.item_id,
+          o.order_id,
+          u.username,
+          i.lottery_type,
+          i.selected_number,
+          i.price,
+          o.currency_code,
+          i.status,
+          ISNULL(i.prize_amount, 0) as prize_amount,
+          CONVERT(varchar(16), o.created_at, 120) as buy_time
+        FROM Lottery_Order_Items i
+        JOIN Lottery_Orders o ON i.order_id = o.order_id
+        JOIN Users u ON o.user_id = u.user_id
+        WHERE CAST(o.created_at AS DATE) = @targetDate
+        ORDER BY o.created_at DESC;
+      `);
+
+    // 3. ดึงยอดจ่ายรางวัลรวมของวันนี้
+    const payoutRes = await pool.request()
+      .input('targetDate', sql.Date, targetDate)
+      .query(`
+        SELECT ISNULL(SUM(prize_amount), 0) AS daily_payout
+        FROM Lottery_Order_Items i
+        JOIN Lottery_Orders o ON i.order_id = o.order_id
+        WHERE CAST(o.created_at AS DATE) = @targetDate AND i.status = N'ถูกรางวัล';
+      `);
+
+    res.json({
+      success: true,
+      summary: {
+        dailyTotal: summaryRes.recordset[0].daily_total,
+        monthlyTotal: summaryRes.recordset[0].monthly_total,
+        dailyPayout: payoutRes.recordset[0].daily_payout
+      },
+      salesDetails: salesRes.recordset
+    });
+
+  } catch (error) {
+    console.error('Error fetching daily sales:', error);
+    res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการดึงรายงาน' });
+  }
+});
+
+//==============================
 
 app.listen(port, () => {
     console.log(`🚀 Server เปิดทำงานแล้วที่พอร์ต ${port}`);
