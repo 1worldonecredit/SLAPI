@@ -2832,6 +2832,86 @@ app.get('/api/admin/draw-history-range', async (req, res) => {
     }
 });
 
+
+// ==========================================
+// 🌟 API 1: ดึงเรทการจ่ายรางวัล (Lottery_Prize_Rates)
+// ==========================================
+app.get('/api/admin/prize-rates', async (req, res) => {
+    try {
+        const pool = await sql.connect(dbConfig);
+        const result = await pool.request().query("SELECT * FROM Lottery_Prize_Rates ORDER BY CAST(lottery_type AS INT)");
+        res.json({ success: true, rates: result.recordset });
+    } catch (err) { res.status(500).json({ success: false }); }
+});
+
+// ==========================================
+// 🌟 API 2: อัปเดตเรทการจ่ายรางวัล
+// ==========================================
+app.post('/api/admin/prize-rates', async (req, res) => {
+    const { rates } = req.body;
+    try {
+        const pool = await sql.connect(dbConfig);
+        for (let r of rates) {
+            await pool.request()
+                .input('id', sql.Int, r.id)
+                .input('multiplier', sql.Decimal(18,2), r.multiplier)
+                .query("UPDATE Lottery_Prize_Rates SET multiplier = @multiplier WHERE id = @id");
+        }
+        res.json({ success: true, message: "อัปเดตอัตราจ่ายสำเร็จ" });
+    } catch (err) { res.status(500).json({ success: false }); }
+});
+
+// ==========================================
+// 🌟 API 3: ระบบจำลองวิเคราะห์ความเสี่ยงก่อนออกเลข (Draw Analyzer)
+// ==========================================
+app.post('/api/admin/analyze-draw', async (req, res) => {
+    const { number } = req.body; // รับเลขจำลองมา 8 หลัก
+    try {
+        const pool = await sql.connect(dbConfig);
+        const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Bangkok' });
+        
+        // หั่นเลขจำลองเป็นประเภทต่างๆ
+        const num8 = number;
+        const num6 = number.slice(-6);
+        const num4 = number.slice(-4);
+        const num3 = number.slice(-3);
+        const num2 = number.slice(-2);
+
+        // 1. ดึงยอดขายรวมของวันนี้ (ทุน)
+        const salesRes = await pool.request()
+            .input('dDate', sql.Date, today)
+            .query("SELECT ISNULL(SUM(price), 0) as totalSales FROM Lottery_Order_Items i JOIN Lottery_Orders o ON i.order_id = o.order_id WHERE o.draw_date = @dDate");
+        const totalSales = salesRes.recordset[0].totalSales;
+
+        // 2. จำลองตรวจบิลทั้งหมดของวันนี้เทียบกับเลขจำลอง
+        const analysisRes = await pool.request()
+            .input('dDate', sql.Date, today)
+            .input('n8', sql.VarChar, num8).input('n6', sql.VarChar, num6)
+            .input('n4', sql.VarChar, num4).input('n3', sql.VarChar, num3).input('n2', sql.VarChar, num2)
+            .query(`
+                SELECT 
+                    i.lottery_type,
+                    COUNT(i.item_id) as winner_count,
+                    SUM(i.price) as total_bet,
+                    SUM(i.price * r.multiplier) as total_payout
+                FROM Lottery_Order_Items i
+                JOIN Lottery_Orders o ON i.order_id = o.order_id
+                LEFT JOIN Lottery_Prize_Rates r ON CAST(i.lottery_type AS INT) = CAST(r.lottery_type AS INT)
+                WHERE o.draw_date = @dDate AND i.status = N'รอผลตรวจ'
+                AND (
+                    (i.lottery_type = '2' AND i.selected_number = @n2) OR
+                    (i.lottery_type = '3' AND i.selected_number = @n3) OR
+                    (i.lottery_type = '4' AND i.selected_number = @n4) OR
+                    (i.lottery_type = '6' AND i.selected_number = @n6) OR
+                    (i.lottery_type = '8' AND i.selected_number = @n8)
+                )
+                GROUP BY i.lottery_type
+            `);
+        
+        res.json({ success: true, totalSales, analysis: analysisRes.recordset });
+    } catch (err) { res.status(500).json({ success: false }); }
+});
+
 app.listen(port, () => {
     console.log(`🚀 Server เปิดทำงานแล้วที่พอร์ต ${port}`);
 });
