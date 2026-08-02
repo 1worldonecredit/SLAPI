@@ -2862,38 +2862,62 @@ app.post('/api/admin/prize-rates', async (req, res) => {
 });
 
 // ==========================================
-// 🌟 API 3: ระบบจำลองวิเคราะห์ความเสี่ยงก่อนออกเลข (Draw Analyzer)
+// 🌟 API: ดึงและอัปเดตอัตราแลกเปลี่ยน (ExchangeRates)
+// ==========================================
+app.get('/api/admin/exchange-rates', async (req, res) => {
+    try {
+        const pool = await sql.connect(dbConfig);
+        const result = await pool.request().query("SELECT * FROM ExchangeRates");
+        res.json({ success: true, rates: result.recordset });
+    } catch (err) { res.status(500).json({ success: false }); }
+});
+
+app.post('/api/admin/exchange-rates', async (req, res) => {
+    const { pair, rate } = req.body;
+    try {
+        const pool = await sql.connect(dbConfig);
+        await pool.request()
+            .input('pair', sql.VarChar, pair)
+            .input('rate', sql.Decimal(18,6), rate)
+            .query("UPDATE ExchangeRates SET rate = @rate, last_updated = GETDATE() WHERE currency_pair = @pair");
+        res.json({ success: true, message: "อัปเดตเรทเงินสำเร็จ" });
+    } catch (err) { res.status(500).json({ success: false }); }
+});
+
+// ==========================================
+// 🌟 API: ระบบจำลองวิเคราะห์ความเสี่ยง (ดึงเรทเงิน LAK จาก DB)
 // ==========================================
 app.post('/api/admin/analyze-draw', async (req, res) => {
-    const { number } = req.body; // รับเลขจำลองมา 8 หลัก
+    const { number } = req.body; 
     try {
         const pool = await sql.connect(dbConfig);
         const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Bangkok' });
         
-        // หั่นเลขจำลองเป็นประเภทต่างๆ
-        const num8 = number;
-        const num6 = number.slice(-6);
+        // ดึงเรท THB_LAK จากตาราง ExchangeRates
+        const rateRes = await pool.request().query("SELECT rate FROM ExchangeRates WHERE currency_pair = 'THB_LAK'");
+        const exchangeRate = rateRes.recordset.length > 0 ? rateRes.recordset[0].rate : 620.0;
+
+        const num6 = number;
         const num4 = number.slice(-4);
         const num3 = number.slice(-3);
         const num2 = number.slice(-2);
 
-        // 1. ดึงยอดขายรวมของวันนี้ (ทุน)
+        // 1. ดึงยอดขายรวม (แปลงกีบเป็นบาททั้งหมด)
         const salesRes = await pool.request()
             .input('dDate', sql.Date, today)
-            .query("SELECT ISNULL(SUM(price), 0) as totalSales FROM Lottery_Order_Items i JOIN Lottery_Orders o ON i.order_id = o.order_id WHERE o.draw_date = @dDate");
-        const totalSales = salesRes.recordset[0].totalSales;
+            .query(`SELECT ISNULL(SUM(CASE WHEN currency_code = 'LAK' THEN total_amount / ${exchangeRate} ELSE total_amount END), 0) as totalSalesTHB FROM Lottery_Orders WHERE draw_date = @dDate`);
+        const totalSales = salesRes.recordset[0].totalSalesTHB;
 
-        // 2. จำลองตรวจบิลทั้งหมดของวันนี้เทียบกับเลขจำลอง
+        // 2. วิเคราะห์ยอดจ่าย (แปลงกีบเป็นบาททั้งหมด)
         const analysisRes = await pool.request()
             .input('dDate', sql.Date, today)
-            .input('n8', sql.VarChar, num8).input('n6', sql.VarChar, num6)
-            .input('n4', sql.VarChar, num4).input('n3', sql.VarChar, num3).input('n2', sql.VarChar, num2)
+            .input('n6', sql.VarChar, num6).input('n4', sql.VarChar, num4)
+            .input('n3', sql.VarChar, num3).input('n2', sql.VarChar, num2)
             .query(`
                 SELECT 
                     i.lottery_type,
                     COUNT(i.item_id) as winner_count,
-                    SUM(i.price) as total_bet,
-                    SUM(i.price * r.multiplier) as total_payout
+                    SUM(CASE WHEN o.currency_code = 'LAK' THEN (i.price * r.multiplier) / ${exchangeRate} ELSE (i.price * r.multiplier) END) as total_payout
                 FROM Lottery_Order_Items i
                 JOIN Lottery_Orders o ON i.order_id = o.order_id
                 LEFT JOIN Lottery_Prize_Rates r ON CAST(i.lottery_type AS INT) = CAST(r.lottery_type AS INT)
@@ -2902,13 +2926,87 @@ app.post('/api/admin/analyze-draw', async (req, res) => {
                     (i.lottery_type = '2' AND i.selected_number = @n2) OR
                     (i.lottery_type = '3' AND i.selected_number = @n3) OR
                     (i.lottery_type = '4' AND i.selected_number = @n4) OR
-                    (i.lottery_type = '6' AND i.selected_number = @n6) OR
-                    (i.lottery_type = '8' AND i.selected_number = @n8)
+                    (i.lottery_type = '6' AND i.selected_number = @n6)
                 )
                 GROUP BY i.lottery_type
             `);
         
         res.json({ success: true, totalSales, analysis: analysisRes.recordset });
+    } catch (err) { res.status(500).json({ success: false }); }
+});
+
+// ==========================================
+// 🌟 API: ระบบ "แนะนำเลข" ตาม % ยอดจ่ายที่เจ้ามือตั้งไว้ (ดึงเรทเงิน LAK จาก DB)
+// ==========================================
+app.post('/api/admin/suggest-draw', async (req, res) => {
+    const { targetPercent } = req.body; 
+    try {
+        const pool = await sql.connect(dbConfig);
+        const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Bangkok' });
+
+        // ดึงเรท THB_LAK จากตาราง ExchangeRates
+        const rateRes = await pool.request().query("SELECT rate FROM ExchangeRates WHERE currency_pair = 'THB_LAK'");
+        const exchangeRate = rateRes.recordset.length > 0 ? rateRes.recordset[0].rate : 620.0;
+
+        const salesRes = await pool.request().input('dDate', sql.Date, today)
+            .query(`SELECT ISNULL(SUM(CASE WHEN currency_code = 'LAK' THEN total_amount / ${exchangeRate} ELSE total_amount END), 0) as totalSalesTHB FROM Lottery_Orders WHERE draw_date = @dDate`);
+        
+        const totalSalesTHB = salesRes.recordset[0].totalSalesTHB || 0;
+        const maxPayoutTHB = totalSalesTHB * (targetPercent / 100);
+
+        // ดึงรายการรอตรวจทั้งหมดมาคำนวณ
+        const itemsRes = await pool.request().input('dDate', sql.Date, today)
+            .query(`
+                SELECT 
+                    i.lottery_type, i.selected_number, 
+                    CASE WHEN o.currency_code = 'LAK' THEN i.price / ${exchangeRate} ELSE i.price END as price_thb,
+                    r.multiplier
+                FROM Lottery_Order_Items i
+                JOIN Lottery_Orders o ON i.order_id = o.order_id
+                LEFT JOIN Lottery_Prize_Rates r ON CAST(i.lottery_type AS INT) = CAST(r.lottery_type AS INT)
+                WHERE o.draw_date = @dDate AND i.status = N'รอผลตรวจ' AND i.lottery_type IN ('2','3','4','6')
+            `);
+        
+        const pendingItems = itemsRes.recordset;
+        let bestNumber = null, bestAnalysis = null, bestPayout = -1;
+
+        // สุ่มหาเลขที่ดีที่สุด
+        for (let i = 0; i < 500; i++) {
+            const random6 = Math.floor(100000 + Math.random() * 900000).toString();
+            const n4 = random6.slice(-4), n3 = random6.slice(-3), n2 = random6.slice(-2);
+            let currentPayout = 0;
+            let analysis = { '6': { count: 0, payout: 0 }, '4': { count: 0, payout: 0 }, '3': { count: 0, payout: 0 }, '2': { count: 0, payout: 0 } };
+
+            for (const item of pendingItems) {
+                let isWin = false;
+                if (item.lottery_type === '6' && item.selected_number === random6) isWin = true;
+                else if (item.lottery_type === '4' && item.selected_number === n4) isWin = true;
+                else if (item.lottery_type === '3' && item.selected_number === n3) isWin = true;
+                else if (item.lottery_type === '2' && item.selected_number === n2) isWin = true;
+
+                if (isWin) {
+                    const winAmountTHB = item.price_thb * (item.multiplier || 0);
+                    currentPayout += winAmountTHB;
+                    analysis[item.lottery_type].count += 1;
+                    analysis[item.lottery_type].payout += winAmountTHB;
+                }
+            }
+
+            if (currentPayout <= maxPayoutTHB && currentPayout > bestPayout) {
+                bestPayout = currentPayout; bestNumber = random6; bestAnalysis = analysis;
+            }
+        }
+
+        if (!bestNumber) {
+            bestNumber = Math.floor(100000 + Math.random() * 900000).toString();
+            bestAnalysis = { '6': { count: 0, payout: 0 }, '4': { count: 0, payout: 0 }, '3': { count: 0, payout: 0 }, '2': { count: 0, payout: 0 } };
+        }
+
+        const analysisArray = Object.keys(bestAnalysis).map(type => ({
+            lottery_type: type, winner_count: bestAnalysis[type].count, total_payout: bestAnalysis[type].payout
+        }));
+
+        res.json({ success: true, suggestedNumber: bestNumber, totalSales: totalSalesTHB, analysis: analysisArray });
     } catch (err) { res.status(500).json({ success: false }); }
 });
 
