@@ -2884,16 +2884,20 @@ app.post('/api/admin/exchange-rates', async (req, res) => {
     } catch (err) { res.status(500).json({ success: false }); }
 });
 
-// ==========================================
-// 🌟 API: ระบบจำลองวิเคราะห์ความเสี่ยง (ดึงเรทเงิน LAK จาก DB)
+/// ==========================================
+// 🌟 API: ระบบจำลองวิเคราะห์ความเสี่ยง (แก้ให้อิงตามเวลา เปิด-ปิด บิล)
 // ==========================================
 app.post('/api/admin/analyze-draw', async (req, res) => {
     const { number } = req.body; 
     try {
         const pool = await sql.connect(dbConfig);
-        const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Bangkok' });
         
-        // ดึงเรท THB_LAK จากตาราง ExchangeRates
+        // 1. ดึงเวลา เปิด/ปิด รับซื้อปัจจุบัน
+        const settingsRes = await pool.request().query("SELECT open_time, close_time FROM System_Settings");
+        const openTime = settingsRes.recordset[0]?.open_time || '18:00:00';
+        const closeTime = settingsRes.recordset[0]?.close_time || '17:00:00';
+
+        // 2. ดึงเรท THB_LAK 
         const rateRes = await pool.request().query("SELECT rate FROM ExchangeRates WHERE currency_pair = 'THB_LAK'");
         const exchangeRate = rateRes.recordset.length > 0 ? rateRes.recordset[0].rate : 620.0;
 
@@ -2902,15 +2906,13 @@ app.post('/api/admin/analyze-draw', async (req, res) => {
         const num3 = number.slice(-3);
         const num2 = number.slice(-2);
 
-        // 1. ดึงยอดขายรวม (แปลงกีบเป็นบาททั้งหมด)
+        // 3. เงื่อนไขการคำนวณ: ดึงบิลที่ 'รอผลตรวจ' และอยู่ในสถานะ Completed 
+        // (เราจะไม่ใช้ draw_date แล้ว แต่จะดูเฉพาะบิลที่ค้างอยู่ในระบบและยังไม่ตรวจ)
         const salesRes = await pool.request()
-            .input('dDate', sql.Date, today)
-            .query(`SELECT ISNULL(SUM(CASE WHEN currency_code = 'LAK' THEN total_amount / ${exchangeRate} ELSE total_amount END), 0) as totalSalesTHB FROM Lottery_Orders WHERE draw_date = @dDate`);
+            .query(`SELECT ISNULL(SUM(CASE WHEN currency_code = 'LAK' THEN total_amount / ${exchangeRate} ELSE total_amount END), 0) as totalSalesTHB FROM Lottery_Orders WHERE status = N'รอผลตรวจ'`);
         const totalSales = salesRes.recordset[0].totalSalesTHB;
 
-        // 2. วิเคราะห์ยอดจ่าย (แปลงกีบเป็นบาททั้งหมด)
         const analysisRes = await pool.request()
-            .input('dDate', sql.Date, today)
             .input('n6', sql.VarChar, num6).input('n4', sql.VarChar, num4)
             .input('n3', sql.VarChar, num3).input('n2', sql.VarChar, num2)
             .query(`
@@ -2921,7 +2923,7 @@ app.post('/api/admin/analyze-draw', async (req, res) => {
                 FROM Lottery_Order_Items i
                 JOIN Lottery_Orders o ON i.order_id = o.order_id
                 LEFT JOIN Lottery_Prize_Rates r ON CAST(i.lottery_type AS INT) = CAST(r.lottery_type AS INT)
-                WHERE o.draw_date = @dDate AND i.status = N'รอผลตรวจ'
+                WHERE o.status = N'รอผลตรวจ' AND i.status = N'รอผลตรวจ'
                 AND (
                     (i.lottery_type = '2' AND i.selected_number = @n2) OR
                     (i.lottery_type = '3' AND i.selected_number = @n3) OR
@@ -2936,26 +2938,22 @@ app.post('/api/admin/analyze-draw', async (req, res) => {
 });
 
 // ==========================================
-// 🌟 API: ระบบ "แนะนำเลข" ตาม % ยอดจ่ายที่เจ้ามือตั้งไว้ (ดึงเรทเงิน LAK จาก DB)
+// 🌟 API: ระบบ "แนะนำเลข" ตาม % ยอดจ่ายที่เจ้ามือตั้งไว้
 // ==========================================
 app.post('/api/admin/suggest-draw', async (req, res) => {
     const { targetPercent } = req.body; 
     try {
         const pool = await sql.connect(dbConfig);
-        const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Bangkok' });
-
-        // ดึงเรท THB_LAK จากตาราง ExchangeRates
         const rateRes = await pool.request().query("SELECT rate FROM ExchangeRates WHERE currency_pair = 'THB_LAK'");
         const exchangeRate = rateRes.recordset.length > 0 ? rateRes.recordset[0].rate : 620.0;
 
-        const salesRes = await pool.request().input('dDate', sql.Date, today)
-            .query(`SELECT ISNULL(SUM(CASE WHEN currency_code = 'LAK' THEN total_amount / ${exchangeRate} ELSE total_amount END), 0) as totalSalesTHB FROM Lottery_Orders WHERE draw_date = @dDate`);
+        const salesRes = await pool.request()
+            .query(`SELECT ISNULL(SUM(CASE WHEN currency_code = 'LAK' THEN total_amount / ${exchangeRate} ELSE total_amount END), 0) as totalSalesTHB FROM Lottery_Orders WHERE status = N'รอผลตรวจ'`);
         
         const totalSalesTHB = salesRes.recordset[0].totalSalesTHB || 0;
         const maxPayoutTHB = totalSalesTHB * (targetPercent / 100);
 
-        // ดึงรายการรอตรวจทั้งหมดมาคำนวณ
-        const itemsRes = await pool.request().input('dDate', sql.Date, today)
+        const itemsRes = await pool.request()
             .query(`
                 SELECT 
                     i.lottery_type, i.selected_number, 
@@ -2964,13 +2962,12 @@ app.post('/api/admin/suggest-draw', async (req, res) => {
                 FROM Lottery_Order_Items i
                 JOIN Lottery_Orders o ON i.order_id = o.order_id
                 LEFT JOIN Lottery_Prize_Rates r ON CAST(i.lottery_type AS INT) = CAST(r.lottery_type AS INT)
-                WHERE o.draw_date = @dDate AND i.status = N'รอผลตรวจ' AND i.lottery_type IN ('2','3','4','6')
+                WHERE o.status = N'รอผลตรวจ' AND i.status = N'รอผลตรวจ' AND i.lottery_type IN ('2','3','4','6')
             `);
         
         const pendingItems = itemsRes.recordset;
         let bestNumber = null, bestAnalysis = null, bestPayout = -1;
 
-        // สุ่มหาเลขที่ดีที่สุด
         for (let i = 0; i < 500; i++) {
             const random6 = Math.floor(100000 + Math.random() * 900000).toString();
             const n4 = random6.slice(-4), n3 = random6.slice(-3), n2 = random6.slice(-2);
@@ -3009,6 +3006,34 @@ app.post('/api/admin/suggest-draw', async (req, res) => {
         res.json({ success: true, suggestedNumber: bestNumber, totalSales: totalSalesTHB, analysis: analysisArray });
     } catch (err) { res.status(500).json({ success: false }); }
 });
+
+// ==========================================
+// 🌟 API: ดึงรายชื่อคนแทงเลขนั้นๆ (เพื่อความโปร่งใส)
+// ==========================================
+app.post('/api/admin/simulate-winners', async (req, res) => {
+    const { number, lottery_type } = req.body;
+    try {
+        const pool = await sql.connect(dbConfig);
+        const result = await pool.request()
+            .input('num', sql.VarChar, number)
+            .input('type', sql.VarChar, lottery_type)
+            .query(`
+                SELECT 
+                    u.username, o.currency_code, i.price, 
+                    (i.price * r.multiplier) as estimated_prize
+                FROM Lottery_Order_Items i
+                JOIN Lottery_Orders o ON i.order_id = o.order_id
+                JOIN Users u ON o.user_id = u.user_id
+                LEFT JOIN Lottery_Prize_Rates r ON CAST(i.lottery_type AS INT) = CAST(r.lottery_type AS INT)
+                WHERE o.status = N'รอผลตรวจ' AND i.status = N'รอผลตรวจ'
+                  AND i.lottery_type = @type AND i.selected_number = @num
+                ORDER BY i.price DESC
+            `);
+        
+        res.json({ success: true, users: result.recordset });
+    } catch (err) { res.status(500).json({ success: false }); }
+});
+
 
 app.listen(port, () => {
     console.log(`🚀 Server เปิดทำงานแล้วที่พอร์ต ${port}`);
