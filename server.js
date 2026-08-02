@@ -2,6 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const sql = require('mssql');
+const cron = require('node-cron');
 
 const app = express();
 const port = process.env.PORT || 5000;
@@ -1133,7 +1134,7 @@ app.post('/api/lottery/buy', async (req, res) => {
         // 3. คำนวณยอดที่จะหักเงิน (แปลงกลับเป็นสกุลเงินกระเป๋าลูกค้า)
         const deductAmount = baseTHBAmount * exchangeRate; 
 
-        // 4. เช็คยอดเงินและหักเงินในกระเป๋า (🌟 แก้ไข: เปลี่ยนมาเช็คจากตาราง Wallets ตัวจริง)
+        // 4. เช็คยอดเงินและหักเงินในกระเป๋า (เช็คจากตาราง Wallets)
         const userRes = await request
             .input('userId', sql.Int, user_id)
             .query('SELECT balance FROM Wallets WHERE user_id = @userId'); 
@@ -1145,7 +1146,7 @@ app.post('/api/lottery/buy', async (req, res) => {
 
         request.input('deductAmount', sql.Decimal(18,2), deductAmount);
         await request.query(`
-            -- 🌟 เพิ่ม ISNULL กันเหนียว กรณีตาราง Users เป็นค่าว่าง จะได้ไม่ Error
+            -- เพิ่ม ISNULL กันเหนียว กรณีตาราง Users เป็นค่าว่าง จะได้ไม่ Error
             UPDATE Users SET wallet_balance = ISNULL(wallet_balance, 0) - @deductAmount WHERE user_id = @userId;
             UPDATE Wallets SET balance = balance - @deductAmount WHERE user_id = @userId;
         `);
@@ -1176,6 +1177,50 @@ app.post('/api/lottery/buy', async (req, res) => {
                 .query(`INSERT INTO Lottery_Order_Items (order_id, lottery_type, selected_number, price, status)
                         VALUES (@orderId, @lotteryType, @lotteryNumber, @price, N'รอผลตรวจ')`);
         }
+
+        // ==========================================
+        // 🌟 6. ระบบจ่ายค่าแนะนำ ทันทีที่ทีมงานซื้อ (ดึง % จาก Database)
+        // ==========================================
+        const refReq = new sql.Request(transaction);
+        refReq.input('buyerId', sql.Int, user_id);
+        
+        const referrerRes = await refReq.query(`
+            SELECT u_referrer.user_id 
+            FROM Users u_buyer
+            JOIN Users u_referrer ON u_buyer.referrer_username = u_referrer.username
+            WHERE u_buyer.user_id = @buyerId
+        `);
+
+        if (referrerRes.recordset.length > 0) {
+            const referrerId = referrerRes.recordset[0].user_id;
+            
+            // ดึง % การซื้อ จากตารางตั้งค่า (ถ้าไม่มีให้ใช้ 2.00)
+            const settingReq = new sql.Request(transaction);
+            const settingRes = await settingReq.query("SELECT purchase_percent FROM Commission_Settings WHERE id = 1");
+            const purchasePercent = settingRes.recordset.length > 0 ? settingRes.recordset[0].purchase_percent : 2.00; 
+            
+            // คำนวณเงินค่าคอมมิชชัน
+            const purchaseCommission = deductAmount * (purchasePercent / 100); 
+
+            // จ่ายเงินให้ผู้แนะนำ
+            const commReq = new sql.Request(transaction);
+            commReq.input('referrerId', sql.Int, referrerId);
+            commReq.input('commission', sql.Decimal(18,2), purchaseCommission);
+            commReq.input('transTitle', sql.NVarChar, `รายได้ ${purchasePercent}% จากการซื้อของทีมงาน`); 
+            
+            await commReq.query(`
+                -- เติมเงินเข้ากระเป๋า (Wallets)
+                UPDATE Wallets SET balance = balance + @commission WHERE user_id = @referrerId;
+                
+                -- เก็บสถิติรายได้สะสม
+                UPDATE Users SET total_purchase_comm = ISNULL(total_purchase_comm, 0) + @commission WHERE user_id = @referrerId;
+
+                -- สร้างรายการ Transaction
+                INSERT INTO Transactions (user_id, transaction_type, title, amount, status, created_at)
+                VALUES (@referrerId, 'Affiliate Purchase', @transTitle, @commission, 'Completed', GETDATE());
+            `);
+        }
+        // ==========================================
 
         await transaction.commit();
         res.status(200).json({ success: true, message: 'ชำระเงินสำเร็จ', order_id: orderId });
@@ -2185,15 +2230,12 @@ app.get('/api/user/deposits/:userId', async (req, res) => {
 });
 
 // ==========================================
-// 🌟 API: ดึงข้อมูลทีมงานและรายได้ (แก้ไขชื่อคอลัมน์ให้ตรงตารางจริง 100%)
+// 🌟 API: ดึงข้อมูลทีมงานและรายได้ (อัปเดต 3 รายได้)
 // ==========================================
 app.get('/api/team/:userId', async (req, res) => {
   const { userId } = req.params;
-  
   try {
     const pool = await sql.connect(dbConfig);
-    
-    // 🌟 ใช้ Subquery และเรียกเฉพาะคอลัมน์ที่มีในตาราง (username, created_at)
     const teamRes = await pool.request()
       .input('userId', sql.Int, userId)
       .query(`
@@ -2202,8 +2244,12 @@ app.get('/api/team/:userId', async (req, res) => {
           username as name, 
           'https://ui-avatars.com/api/?name=' + username + '&background=random' as avatar,
           CONVERT(varchar(10), created_at, 103) as joinDate, 
-          0.00 as purchaseComm,
-          0.00 as winComm,
+          
+          -- ดึงรายได้ 3 ช่องทาง
+          ISNULL(total_purchase_comm, 0) as purchaseComm,
+          ISNULL(total_win_comm, 0) as winComm,
+          ISNULL(total_daily_bonus, 0) as dailyBonus,
+          
           CAST(CASE WHEN DATEDIFF(day, created_at, GETDATE()) < 30 THEN 1 ELSE 0 END AS BIT) as isActive
         FROM Users
         WHERE referrer_username = (SELECT username FROM Users WHERE user_id = @userId)
@@ -2212,21 +2258,108 @@ app.get('/api/team/:userId', async (req, res) => {
       
     const teamMembers = teamRes.recordset || [];
     
-    const totalIncome = teamMembers.reduce((sum, m) => sum + Number(m.purchaseComm || 0) + Number(m.winComm || 0), 0);
-    const incomeThisMonth = totalIncome * 0.5;
+    // รวมรายได้ทั้งหมด
+    const totalIncome = teamMembers.reduce((sum, m) => sum + Number(m.purchaseComm) + Number(m.winComm) + Number(m.dailyBonus), 0);
+    const incomeThisMonth = totalIncome * 0.5; // (สมมติยอดเดือนนี้)
 
-    res.json({ 
-      success: true, 
-      teamMembers,
-      totalIncome,
-      incomeThisMonth
-    });
-
+    res.json({ success: true, teamMembers, totalIncome, incomeThisMonth });
   } catch (error) {
     console.error('Error fetching team:', error);
     res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการดึงข้อมูลทีม' });
   }
 });
+
+// ==========================================
+// 🌟 API: ดึงข้อมูลทีมงานและรายได้ (อัปเดต 3 รายได้)
+// ==========================================
+app.get('/api/team/:userId', async (req, res) => {
+  const { userId } = req.params;
+  try {
+    const pool = await sql.connect(dbConfig);
+    const teamRes = await pool.request()
+      .input('userId', sql.Int, userId)
+      .query(`
+        SELECT 
+          user_id as id,
+          username as name, 
+          'https://ui-avatars.com/api/?name=' + username + '&background=random' as avatar,
+          CONVERT(varchar(10), created_at, 103) as joinDate, 
+          
+          -- ดึงรายได้ 3 ช่องทาง
+          ISNULL(total_purchase_comm, 0) as purchaseComm,
+          ISNULL(total_win_comm, 0) as winComm,
+          ISNULL(total_daily_bonus, 0) as dailyBonus,
+          
+          CAST(CASE WHEN DATEDIFF(day, created_at, GETDATE()) < 30 THEN 1 ELSE 0 END AS BIT) as isActive
+        FROM Users
+        WHERE referrer_username = (SELECT username FROM Users WHERE user_id = @userId)
+        ORDER BY created_at DESC
+      `);
+      
+    const teamMembers = teamRes.recordset || [];
+    
+    // รวมรายได้ทั้งหมด
+    const totalIncome = teamMembers.reduce((sum, m) => sum + Number(m.purchaseComm) + Number(m.winComm) + Number(m.dailyBonus), 0);
+    const incomeThisMonth = totalIncome * 0.5; // (สมมติยอดเดือนนี้)
+
+    res.json({ success: true, teamMembers, totalIncome, incomeThisMonth });
+  } catch (error) {
+    console.error('Error fetching team:', error);
+    res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการดึงข้อมูลทีม' });
+  }
+});
+
+
+// ... (API อื่นๆ ของคุณที่อยู่ด้านบน) ...
+
+// ==========================================
+// 🌟 วางโค้ด Cron Job ไว้ตรงนี้เลยครับ (ก่อน app.listen)
+// ==========================================
+// รันทุกวันเวลา 05:00 น. เพื่อจ่ายโบนัสรายยอดรวมทีม
+cron.schedule('0 5 * * *', async () => {
+    console.log('⏰ รันระบบโบนัสทีมประจำวัน...');
+    try {
+        const pool = await sql.connect(dbConfig);
+        
+        // ดึง % จากฐานข้อมูล
+        const settingRes = await pool.request().query("SELECT daily_bonus_percent FROM Commission_Settings WHERE id = 1");
+        const bonusPercent = settingRes.recordset.length > 0 ? settingRes.recordset[0].daily_bonus_percent : 1.00;
+
+        const bonusRes = await pool.request().query(`
+            SELECT 
+                u_referrer.user_id as referrer_id,
+                SUM(t.amount) * (${bonusPercent} / 100.0) as daily_bonus 
+            FROM Users u_buyer
+            JOIN Users u_referrer ON u_buyer.referrer_username = u_referrer.username
+            JOIN Transactions t ON t.user_id = u_buyer.user_id
+            WHERE t.transaction_type IN ('Buy Lottery', 'Win Lottery') 
+              AND CAST(t.created_at AS DATE) = CAST(DATEADD(day, -1, GETDATE()) AS DATE)
+            GROUP BY u_referrer.user_id
+            HAVING SUM(t.amount) > 0
+        `);
+
+        for (const record of bonusRes.recordset) {
+            const req = pool.request();
+            req.input('refId', sql.Int, record.referrer_id);
+            req.input('bonusAmt', sql.Decimal(18,2), record.daily_bonus);
+            req.input('title', sql.NVarChar, `โบนัสทีมงานรายวัน ${bonusPercent}%`);
+            
+            await req.query(`
+                UPDATE Wallets SET balance = balance + @bonusAmt WHERE user_id = @refId;
+                UPDATE Users SET total_daily_bonus = ISNULL(total_daily_bonus, 0) + @bonusAmt WHERE user_id = @refId;
+                INSERT INTO Transactions (user_id, transaction_type, title, amount, status, created_at)
+                VALUES (@refId, 'Daily Team Bonus', @title, @bonusAmt, 'Completed', GETDATE());
+            `);
+        }
+        console.log('✅ แจกโบนัสรายวันสำเร็จ!');
+    } catch (error) {
+        console.error('❌ Error Cron Job:', error);
+    }
+});
+// ==========================================
+
+
+
 
 app.listen(port, () => {
     console.log(`🚀 Server เปิดทำงานแล้วที่พอร์ต ${port}`);
