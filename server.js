@@ -2510,7 +2510,6 @@ app.get('/api/admin/daily-sales', async (req, res) => {
 app.get('/api/admin/settings', async (req, res) => {
     try {
         const pool = await sql.connect(dbConfig);
-        // 🌟 แก้ไข: สั่ง SQL ให้แปลงเวลาเป็น Format HH:mm เลย หน้าบ้านจะได้ไม่งง
         const result = await pool.request().query(`
             SELECT 
                 CONVERT(varchar(5), close_time, 108) as close_time,
@@ -2521,7 +2520,10 @@ app.get('/api/admin/settings', async (req, res) => {
             WHERE id = 1
         `);
         res.json({ success: true, data: result.recordset[0] });
-    } catch (err) { res.status(500).json({ success: false }); }
+    } catch (err) { 
+        console.error(err);
+        res.status(500).json({ success: false }); 
+    }
 });
 
 // ==========================================
@@ -2538,11 +2540,40 @@ app.post('/api/admin/settings', async (req, res) => {
             .input('isOpen', sql.Bit, is_sales_open)
             .query(`
                 UPDATE System_Settings 
-                SET close_time = @closeTime, open_time = @openTime, draw_time = @drawTime, is_sales_open = @isOpen 
+                SET 
+                    close_time = @closeTime, 
+                    open_time = @openTime, 
+                    draw_time = @drawTime, 
+                    is_sales_open = @isOpen,
+                    last_updated = GETDATE()
                 WHERE id = 1
             `);
-        res.json({ success: true });
-    } catch (err) { res.status(500).json({ success: false }); }
+        res.json({ success: true, message: 'บันทึกสำเร็จ' });
+    } catch (err) { 
+        console.error(err);
+        res.status(500).json({ success: false, message: 'บันทึกไม่สำเร็จ' }); 
+    }
+});
+
+// ==========================================
+// 🌟 API 3: ส่งสถานะและเวลา ให้หน้าบ้านลูกค้า (ฝั่ง Client)
+// ==========================================
+app.get('/api/lottery/status', async (req, res) => {
+    try {
+        const pool = await sql.connect(dbConfig);
+        const result = await pool.request().query(`
+            SELECT 
+                CONVERT(varchar(5), close_time, 108) as close_time,
+                CONVERT(varchar(5), open_time, 108) as open_time,
+                CONVERT(varchar(5), draw_time, 108) as draw_time,
+                is_sales_open 
+            FROM System_Settings 
+            WHERE id = 1
+        `);
+        res.json({ success: true, data: result.recordset[0] });
+    } catch (err) {
+        res.status(500).json({ success: false });
+    }
 });
 
 // ==========================================
