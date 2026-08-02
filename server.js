@@ -2357,18 +2357,15 @@ cron.schedule('0 5 * * *', async () => {
     }
 });
 // ==========================================
-
 // ==========================================
-// 🌟 API: รายงานยอดขายหวยรายวัน (Admin)
-// ==========================================
-// ==========================================
-// 🌟 API: รายงานยอดขายหวยรายวัน (Admin) - อัปเดตดึงชื่อนามสัตว์
+// 🌟 API: รายงานยอดขายหวยรายวัน (Admin) - แบบจัดกลุ่มบิล + รูปสัตว์
 // ==========================================
 app.get('/api/admin/daily-sales', async (req, res) => {
   try {
     const pool = await sql.connect(dbConfig);
     const targetDate = req.query.date || new Date().toISOString().split('T')[0];
 
+    // 1. ดึงสรุปยอดขาย 
     const summaryRes = await pool.request()
       .input('targetDate', sql.Date, targetDate)
       .query(`
@@ -2378,52 +2375,97 @@ app.get('/api/admin/daily-sales', async (req, res) => {
         FROM Lottery_Orders;
       `);
 
-    // 🌟 อัปเดต: ดึงชื่อสัตว์จากตาราง Master_Animal_Numbers 
+    // 2. ดึงรายการซื้อทั้งหมดของวันนี้ พร้อมชื่อและรูปสัตว์
     const salesRes = await pool.request()
       .input('targetDate', sql.Date, targetDate)
       .query(`
         SELECT 
-          i.item_id,
           o.order_id,
           u.username,
+          o.total_amount,
+          o.currency_code,
+          o.status as order_status,
+          CONVERT(varchar(16), o.created_at, 120) as buy_time,
+          i.item_id,
           i.lottery_type,
           i.selected_number,
           i.price,
-          o.currency_code,
-          i.status,
+          i.status as item_status,
           ISNULL(i.prize_amount, 0) as prize_amount,
-          CONVERT(varchar(16), o.created_at, 120) as buy_time,
-          -- ค้นหาชื่อสัตว์ที่ตรงกับเลขที่ซื้อ
+          
+          -- ดึงชื่อนามสัตว์
           ISNULL((
             SELECT TOP 1 animal_name_th 
             FROM Master_Animal_Numbers 
             WHERE lottery_type = i.lottery_type 
               AND (num1 = i.selected_number OR num2 = i.selected_number OR num3 = i.selected_number)
-          ), '') as animal_name
-        FROM Lottery_Order_Items i
-        JOIN Lottery_Orders o ON i.order_id = o.order_id
+          ), '') as animal_name,
+
+          -- ดึงรูปภาพสัตว์
+          ISNULL((
+            SELECT TOP 1 image_url 
+            FROM Master_Animal_Numbers 
+            WHERE lottery_type = i.lottery_type 
+              AND (num1 = i.selected_number OR num2 = i.selected_number OR num3 = i.selected_number)
+          ), '') as animal_image
+
+        FROM Lottery_Orders o
         JOIN Users u ON o.user_id = u.user_id
+        JOIN Lottery_Order_Items i ON o.order_id = i.order_id
         WHERE CAST(o.created_at AS DATE) = @targetDate
         ORDER BY o.created_at DESC;
       `);
 
-    const payoutRes = await pool.request()
-      .input('targetDate', sql.Date, targetDate)
-      .query(`
-        SELECT ISNULL(SUM(prize_amount), 0) AS daily_payout
-        FROM Lottery_Order_Items i
-        JOIN Lottery_Orders o ON i.order_id = o.order_id
-        WHERE CAST(o.created_at AS DATE) = @targetDate AND i.status = N'ถูกรางวัล';
-      `);
+    // 3. จัดกลุ่มข้อมูลด้วย JavaScript (รวม Item เข้าไปอยู่ในบิลเดียวกัน)
+    const groupedOrders = {};
+    const winnersList = [];
+    let dailyPayout = 0;
+
+    salesRes.recordset.forEach(row => {
+        // ถ้ายังไม่มีบิลนี้ใน Object ให้สร้างใหม่
+        if (!groupedOrders[row.order_id]) {
+            groupedOrders[row.order_id] = {
+                order_id: row.order_id,
+                username: row.username,
+                buy_time: row.buy_time,
+                total_amount: row.total_amount,
+                currency_code: row.currency_code,
+                order_status: row.order_status,
+                items: []
+            };
+        }
+        
+        // ข้อมูลเลขย่อยแต่ละตัว
+        const itemDetails = {
+            item_id: row.item_id,
+            lottery_type: row.lottery_type,
+            selected_number: row.selected_number,
+            price: row.price,
+            item_status: row.item_status,
+            prize_amount: row.prize_amount,
+            animal_name: row.animal_name,
+            animal_image: row.animal_image
+        };
+        
+        // ยัดเลขเข้าไปในบิล
+        groupedOrders[row.order_id].items.push(itemDetails);
+
+        // ถ้าเลขนี้ "ถูกรางวัล" ให้แยกออกมาไว้ในตารางผู้โชคดีด้วย
+        if (row.item_status === 'ถูกรางวัล' || row.item_status === 'ถูก') {
+            winnersList.push({ ...itemDetails, username: row.username, currency_code: row.currency_code });
+            dailyPayout += row.prize_amount;
+        }
+    });
 
     res.json({
       success: true,
       summary: {
         dailyTotal: summaryRes.recordset[0].daily_total,
         monthlyTotal: summaryRes.recordset[0].monthly_total,
-        dailyPayout: payoutRes.recordset[0].daily_payout
+        dailyPayout: dailyPayout
       },
-      salesDetails: salesRes.recordset
+      salesDetails: Object.values(groupedOrders), // แปลง Object เป็น Array ส่งให้ React
+      winners: winnersList
     });
 
   } catch (error) {
