@@ -2569,32 +2569,38 @@ app.get('/api/admin/settings', async (req, res) => {
         res.status(500).json({ success: false }); 
     }
 });
-
 // ==========================================
-// 🌟 API 2: บันทึกการตั้งค่าระบบ (รวมเวลา 3 อย่าง)
+// 🌟 API: บันทึกการตั้งค่าระบบและเวลา 3 อย่าง (แก้ไขให้เซฟลง Database 100%)
 // ==========================================
 app.post('/api/admin/settings', async (req, res) => {
     const { close_time, open_time, draw_time, is_sales_open } = req.body;
+    
+    // พิมพ์ค่าที่รับมาออกหน้าจอดำๆ (Terminal) จะได้รู้ว่าส่งมาถูกไหม
+    console.log("📥 ข้อมูลที่หน้าเว็บส่งมาบันทึก:", req.body); 
+
     try {
         const pool = await sql.connect(dbConfig);
         await pool.request()
-            .input('closeTime', sql.Time, close_time)
-            .input('openTime', sql.Time, open_time)
-            .input('drawTime', sql.Time, draw_time)
+            // 🌟 แก้ตรงนี้: เปลี่ยนจาก sql.Time เป็น sql.VarChar เพื่อตัดปัญหา Error
+            .input('closeTime', sql.VarChar, close_time) 
+            .input('openTime', sql.VarChar, open_time)
+            .input('drawTime', sql.VarChar, draw_time)
             .input('isOpen', sql.Bit, is_sales_open)
             .query(`
                 UPDATE System_Settings 
                 SET 
-                    close_time = @closeTime, 
-                    open_time = @openTime, 
-                    draw_time = @drawTime, 
+                    close_time = CAST(@closeTime AS TIME), 
+                    open_time = CAST(@openTime AS TIME), 
+                    draw_time = CAST(@drawTime AS TIME), 
                     is_sales_open = @isOpen,
                     last_updated = GETDATE()
                 WHERE id = 1
             `);
+            
+        console.log("✅ บันทึกเวลาลงฐานข้อมูลสำเร็จ!");
         res.json({ success: true, message: 'บันทึกสำเร็จ' });
     } catch (err) { 
-        console.error(err);
+        console.error("❌ Error ตอนบันทึก:", err);
         res.status(500).json({ success: false, message: 'บันทึกไม่สำเร็จ' }); 
     }
 });
