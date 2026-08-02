@@ -2476,6 +2476,98 @@ app.get('/api/admin/daily-sales', async (req, res) => {
 
 //==============================
 
+// ==========================================
+// 🌟 API 1: จัดการการตั้งค่าระบบ (เวลาปิด และสถานะเปิด/ปิดรับ)
+// ==========================================
+app.get('/api/admin/settings', async (req, res) => {
+    try {
+        const pool = await sql.connect(dbConfig);
+        const result = await pool.request().query("SELECT * FROM System_Settings WHERE id = 1");
+        res.json({ success: true, data: result.recordset[0] });
+    } catch (err) { res.status(500).json({ success: false }); }
+});
+
+app.post('/api/admin/settings', async (req, res) => {
+    const { close_time, is_sales_open } = req.body;
+    try {
+        const pool = await sql.connect(dbConfig);
+        await pool.request()
+            .input('time', sql.Time, close_time)
+            .input('isOpen', sql.Bit, is_sales_open)
+            .query("UPDATE System_Settings SET close_time = @time, is_sales_open = @isOpen WHERE id = 1");
+        res.json({ success: true });
+    } catch (err) { res.status(500).json({ success: false }); }
+});
+
+// ==========================================
+// 🌟 API 2: บันทึกผลออกรางวัล และ ค้นหาคนถูกรางวัล
+// ==========================================
+app.post('/api/admin/draw-results', async (req, res) => {
+    const { prize_8, prize_6, prize_4, prize_3, prize_2 } = req.body;
+    const today = new Date().toISOString().split('T')[0];
+
+    try {
+        const pool = await sql.connect(dbConfig);
+        
+        // 1. บันทึกผลลงตาราง Draw_Results
+        await pool.request()
+            .input('dDate', sql.Date, today)
+            .input('p8', sql.VarChar, prize_8)
+            .input('p6', sql.VarChar, prize_6)
+            .input('p4', sql.VarChar, prize_4)
+            .input('p3', sql.VarChar, prize_3)
+            .input('p2', sql.VarChar, prize_2)
+            .query(`
+                IF EXISTS (SELECT 1 FROM Draw_Results WHERE draw_date = @dDate)
+                    UPDATE Draw_Results SET prize_8=@p8, prize_6=@p6, prize_4=@p4, prize_3=@p3, prize_2=@p2 WHERE draw_date=@dDate;
+                ELSE
+                    INSERT INTO Draw_Results (draw_date, prize_8, prize_6, prize_4, prize_3, prize_2) 
+                    VALUES (@dDate, @p8, @p6, @p4, @p3, @p2);
+            `);
+
+        // 2. อัปเดตสถานะบิลที่ "รอผลตรวจ" ให้เป็น "ถูกรางวัล" หรือ "ไม่ถูก"
+        // (สมมติเรทจ่าย: 2ตัว=x90, 3ตัว=x900, 4ตัว=x7000, 6ตัว=x400000, 8ตัว=x1000000)
+        await pool.request().input('dDate', sql.Date, today).query(`
+            UPDATE i SET 
+                status = CASE 
+                    WHEN (i.lottery_type = '2' AND i.selected_number = '${prize_2}') OR
+                         (i.lottery_type = '3' AND i.selected_number = '${prize_3}') OR
+                         (i.lottery_type = '4' AND i.selected_number = '${prize_4}') OR
+                         (i.lottery_type = '6' AND i.selected_number = '${prize_6}') OR
+                         (i.lottery_type = '8' AND i.selected_number = '${prize_8}') THEN N'ถูกรางวัล'
+                    ELSE N'ไม่ถูกรางวัล'
+                END,
+                prize_amount = CASE
+                    WHEN i.lottery_type = '2' AND i.selected_number = '${prize_2}' THEN i.price * 90
+                    WHEN i.lottery_type = '3' AND i.selected_number = '${prize_3}' THEN i.price * 900
+                    WHEN i.lottery_type = '4' AND i.selected_number = '${prize_4}' THEN i.price * 7000
+                    WHEN i.lottery_type = '6' AND i.selected_number = '${prize_6}' THEN i.price * 400000
+                    WHEN i.lottery_type = '8' AND i.selected_number = '${prize_8}' THEN i.price * 1000000
+                    ELSE 0
+                END
+            FROM Lottery_Order_Items i
+            JOIN Lottery_Orders o ON i.order_id = o.order_id
+            WHERE CAST(o.created_at AS DATE) = @dDate AND i.status = N'รอผลตรวจ';
+        `);
+
+        // 3. ดึงรายชื่อคนถูกรางวัลส่งกลับไปหน้าเว็บเพื่อทำ PDF
+        const winnersRes = await pool.request().input('dDate', sql.Date, today).query(`
+            SELECT u.username, i.lottery_type, i.selected_number, i.price, i.prize_amount, o.currency_code
+            FROM Lottery_Order_Items i
+            JOIN Lottery_Orders o ON i.order_id = o.order_id
+            JOIN Users u ON o.user_id = u.user_id
+            WHERE CAST(o.created_at AS DATE) = @dDate AND i.status = N'ถูกรางวัล';
+        `);
+
+        res.json({ success: true, winners: winnersRes.recordset });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการตรวจรางวัล' });
+    }
+});
+
+//=====================
+
 app.listen(port, () => {
     console.log(`🚀 Server เปิดทำงานแล้วที่พอร์ต ${port}`);
 });
