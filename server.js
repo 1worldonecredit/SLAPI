@@ -2184,6 +2184,56 @@ app.get('/api/user/deposits/:userId', async (req, res) => {
   }
 });
 
+// ==========================================
+// 🌟 API: ดึงข้อมูลทีมงานและรายได้ (Team & Referrals)
+// ==========================================
+app.get('/api/team/:userId', async (req, res) => {
+  const { userId } = req.params;
+  try {
+    const pool = await sql.connect(dbConfig);
+    
+    // ดึงข้อมูลลูกทีม พร้อม join กับตาราง Users เพื่อเอาชื่อและรูป
+    const teamRes = await pool.request()
+      .input('userId', sql.Int, userId)
+      .query(`
+        SELECT 
+          r.referred_user_id as id,
+          ISNULL(u.firstname, 'ผู้ใช้') + ' ' + ISNULL(u.lastname, '') as name,
+          -- ถ้าไม่มีรูป ให้ใช้ api สร้างรูปจากชื่อชั่วคราว
+          ISNULL(u.profile_picture, 'https://ui-avatars.com/api/?name=' + ISNULL(u.firstname, 'U') + '&background=random') as avatar,
+          CONVERT(varchar(10), r.created_at, 103) as joinDate, -- แปลงวันที่เป็น DD/MM/YYYY
+          r.total_purchase_comm as purchaseComm,
+          r.total_win_comm as winComm,
+          -- เช็คสถานะใช้งาน: สมมติว่าถ้าเพิ่งสมัครไม่เกิน 30 วัน ให้ขึ้นจุดสีเขียว (Online)
+          CAST(CASE WHEN DATEDIFF(day, u.created_at, GETDATE()) < 30 THEN 1 ELSE 0 END AS BIT) as isActive
+        FROM User_Referrals r
+        LEFT JOIN Users u ON r.referred_user_id = u.user_id
+        WHERE r.referrer_id = @userId
+        ORDER BY r.created_at DESC
+      `);
+      
+    const teamMembers = teamRes.recordset;
+    
+    // คำนวณยอดสะสมรวมทั้งหมดที่ได้จากลูกทีมทุกคน
+    const totalIncome = teamMembers.reduce((sum, m) => sum + Number(m.purchaseComm) + Number(m.winComm), 0);
+    
+    // (จำลอง) ยอดเดือนนี้: ในของจริงคุณสามารถทำตาราง Log แยกรายเดือนได้ ตอนนี้ให้โชว์เป็น 50% ของยอดรวมไปก่อนเพื่อให้เห็นภาพ
+    const incomeThisMonth = totalIncome * 0.5;
+
+    res.json({ 
+      success: true, 
+      teamMembers,
+      totalIncome,
+      incomeThisMonth
+    });
+
+  } catch (error) {
+    console.error('Error fetching team:', error);
+    res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการดึงข้อมูลทีม' });
+  }
+});
+
+
 app.listen(port, () => {
     console.log(`🚀 Server เปิดทำงานแล้วที่พอร์ต ${port}`);
 });
