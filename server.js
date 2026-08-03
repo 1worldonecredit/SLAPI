@@ -3443,6 +3443,62 @@ app.post('/api/admin/prize-report', async (req, res) => {
     }
 });
 
+
+// ==========================================
+// 🛡️ API: ระบบจัดการ IP เฝ้าระวัง
+// ==========================================
+
+// ดึงรายการ IP ที่ถูกบล็อกหรือเฝ้าระวัง
+app.get('/api/admin/malicious-ips', async (req, res) => {
+    try {
+        const pool = await sql.connect(dbConfig);
+        const result = await pool.request().query(`
+            SELECT id, ip_address, reason, is_blocked, created_at 
+            FROM Blocked_IPs 
+            ORDER BY created_at DESC
+        `);
+        res.json({ success: true, ips: result.recordset });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ success: false, message: 'Server Error' });
+    }
+});
+
+// ปลดบล็อก / หรือบล็อก IP แบบ Manual
+app.post('/api/admin/toggle-block-ip', async (req, res) => {
+    const { ip_address, is_blocked, reason } = req.body;
+    try {
+        const pool = await sql.connect(dbConfig);
+        
+        if (is_blocked) {
+            // สั่งบล็อก Manual
+            await pool.request()
+                .input('ip', sql.VarChar, ip_address)
+                .input('reason', sql.NVarChar, reason || 'Manual Block')
+                .query(`
+                    IF EXISTS (SELECT 1 FROM Blocked_IPs WHERE ip_address = @ip)
+                        UPDATE Blocked_IPs SET is_blocked = 1, reason = @reason, updated_at = GETDATE() WHERE ip_address = @ip;
+                    ELSE
+                        INSERT INTO Blocked_IPs (ip_address, reason, is_blocked) VALUES (@ip, @reason, 1);
+                `);
+        } else {
+            // สั่งปลดบล็อก
+            await pool.request()
+                .input('ip', sql.VarChar, ip_address)
+                .query(`UPDATE Blocked_IPs SET is_blocked = 0, updated_at = GETDATE() WHERE ip_address = @ip`);
+            
+            // ล้างประวัติการ Login ผิดพลาดให้ด้วย
+            await pool.request()
+                .input('ip', sql.VarChar, ip_address)
+                .query(`DELETE FROM Login_Failed_Attempts WHERE ip_address = @ip`);
+        }
+        res.json({ success: true });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ success: false });
+    }
+});
+
 app.listen(port, () => {
     console.log(`🚀 Server เปิดทำงานแล้วที่พอร์ต ${port}`);
 });
