@@ -3357,6 +3357,94 @@ app.get('/api/team/:uid', async (req, res) => {
     }
 });
 
+// ==========================================
+// 🌟 API: รายงานโอนเงินรางวัลและสรุปกำไร (Prize Transfer Report)
+// ==========================================
+app.post('/api/admin/prize-report', async (req, res) => {
+    const { startDate, endDate, country } = req.body;
+    try {
+        const pool = await sql.connect(dbConfig);
+        
+        // 1. ดึงเรทแลกเปลี่ยนปัจจุบัน (เพื่อใช้แปลง LAK เป็น THB สำหรับสรุปยอด)
+        const rateRes = await pool.request().query("SELECT rate FROM ExchangeRates WHERE currency_pair = 'THB_LAK'");
+        const exchangeRate = rateRes.recordset.length > 0 ? rateRes.recordset[0].rate : 500.0;
+
+        // 2. Query ดึงข้อมูลสรุปของ "เดือนปัจจุบัน" (สะสม)
+        const monthlyQuery = `
+            SELECT 
+                ISNULL(SUM(CASE WHEN o.currency_code = 'LAK' THEN o.total_amount / ${exchangeRate} ELSE o.total_amount END), 0) as monthly_sales,
+                ISNULL((
+                    SELECT SUM(CASE WHEN o2.currency_code = 'LAK' THEN i2.prize_amount / ${exchangeRate} ELSE i2.prize_amount END)
+                    FROM Lottery_Order_Items i2 
+                    JOIN Lottery_Orders o2 ON i2.order_id = o2.order_id
+                    WHERE i2.status = N'ถูกรางวัล' AND MONTH(o2.created_at) = MONTH(GETDATE()) AND YEAR(o2.created_at) = YEAR(GETDATE())
+                ), 0) as monthly_prizes
+            FROM Lottery_Orders o
+            WHERE MONTH(o.created_at) = MONTH(GETDATE()) AND YEAR(o.created_at) = YEAR(GETDATE());
+        `;
+        const monthlyRes = await pool.request().query(monthlyQuery);
+        const monthlySales = monthlyRes.recordset[0].monthly_sales;
+        const monthlyProfit = monthlySales - monthlyRes.recordset[0].monthly_prizes;
+
+        // 3. Query ดึงข้อมูล "ตามช่วงเวลาและประเทศที่เลือก"
+        let countryCondition = "";
+        if (country === 'Thailand') countryCondition = "AND u.country = 'Thailand'";
+        if (country === 'Laos') countryCondition = "AND u.country = 'Laos'";
+
+        const filterSummaryQuery = `
+            SELECT 
+                ISNULL(SUM(CASE WHEN o.currency_code = 'LAK' THEN o.total_amount / ${exchangeRate} ELSE o.total_amount END), 0) as period_sales,
+                ISNULL((
+                    SELECT SUM(CASE WHEN o2.currency_code = 'LAK' THEN i2.prize_amount / ${exchangeRate} ELSE i2.prize_amount END)
+                    FROM Lottery_Order_Items i2 
+                    JOIN Lottery_Orders o2 ON i2.order_id = o2.order_id
+                    JOIN Users u2 ON o2.user_id = u2.user_id
+                    WHERE i2.status = N'ถูกรางวัล' AND CAST(o2.created_at AS DATE) BETWEEN @StartDate AND @EndDate ${countryCondition.replace(/u\./g, 'u2.')}
+                ), 0) as period_prizes
+            FROM Lottery_Orders o
+            JOIN Users u ON o.user_id = u.user_id
+            WHERE CAST(o.created_at AS DATE) BETWEEN @StartDate AND @EndDate ${countryCondition};
+        `;
+        const summaryRes = await pool.request()
+            .input('StartDate', sql.Date, startDate)
+            .input('EndDate', sql.Date, endDate)
+            .query(filterSummaryQuery);
+        
+        const periodSales = summaryRes.recordset[0].period_sales;
+        const periodPrizes = summaryRes.recordset[0].period_prizes;
+        const periodProfit = periodSales - periodPrizes;
+
+        // 4. Query ดึงรายชื่อ "ผู้ถูกรางวัล" ตามเงื่อนไข
+        const winnersQuery = `
+            SELECT 
+                u.username, u.country, o.currency_code, 
+                i.lottery_type, i.selected_number, i.price, i.prize_amount, o.created_at,
+                CASE WHEN o.currency_code = 'LAK' THEN i.prize_amount / ${exchangeRate} ELSE i.prize_amount END as prize_thb
+            FROM Lottery_Order_Items i
+            JOIN Lottery_Orders o ON i.order_id = o.order_id
+            JOIN Users u ON o.user_id = u.user_id
+            WHERE i.status = N'ถูกรางวัล' 
+            AND CAST(o.created_at AS DATE) BETWEEN @StartDate AND @EndDate
+            ${countryCondition}
+            ORDER BY o.created_at DESC;
+        `;
+        const winnersRes = await pool.request()
+            .input('StartDate', sql.Date, startDate)
+            .input('EndDate', sql.Date, endDate)
+            .query(winnersQuery);
+
+        res.json({
+            success: true,
+            monthly: { sales: monthlySales, profit: monthlyProfit },
+            period: { sales: periodSales, prizes: periodPrizes, profit: periodProfit },
+            winners: winnersRes.recordset
+        });
+
+    } catch (err) {
+        console.error("Prize Report Error:", err);
+        res.status(500).json({ success: false, message: 'Server Error' });
+    }
+});
 
 app.listen(port, () => {
     console.log(`🚀 Server เปิดทำงานแล้วที่พอร์ต ${port}`);
