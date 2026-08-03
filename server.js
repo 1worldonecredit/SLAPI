@@ -3125,19 +3125,93 @@ app.post('/api/admin/search-buyers', async (req, res) => {
 
 
 // ==========================================
-// 🌟 API 4: [ใหม่!] ยืนยันออกผลรางวัลด้วยเลขที่เลือกทันที
+// 🌟 API: ยืนยันผลรางวัลด้วยมือ (Manual Execute Draw)
+// กดปุ่มเดียวตรวจบิล เปลี่ยนสถานะ และโอนเงินเข้า Wallet ทันที!
 // ==========================================
 app.post('/api/admin/execute-draw', async (req, res) => {
     const { number6 } = req.body;
     try {
-        // *** หมายเหตุ: ในระบบจริง API นี้ต้องเขียนโค้ดเพื่อ UPDATE สถานะบิลทั้งหมด ***
-        // *** แจกเงินเข้า Wallet ของผู้ชนะ และ INSERT ผลรางวัลลงตาราง Draw_Results ***
-        // *** แต่เพื่อการทดสอบส่วน UI ผมจะส่ง success กลับไปให้แจ้งเตือนหน้าเว็บก่อน ***
+        const pool = await sql.connect(dbConfig);
         
-        // (ส่วนนี้คุณจะต้องนำโค้ดระบบตรวจบิลที่คุณมีอยู่มาใส่ เพื่อประมวลผลแจกเงินจริง)
+        const num8 = Math.floor(10000000 + Math.random() * 90000000).toString(); // สุ่มเลข 8 ตัว
+        const num6 = number6;
+        const num4 = num6.slice(-4);
+        const num3 = num6.slice(-3);
+        const num2 = num6.slice(-2);
         
-        res.json({ success: true, message: `✅ ออกรางวัลด้วยเลข ${number6} สำเร็จ และแจกเงินเรียบร้อยแล้ว!` });
-    } catch (err) { res.status(500).json({ success: false }); }
+        const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Bangkok' });
+
+        // 1. บันทึกผลรางวัลลง Draw_Results
+        await pool.request()
+            .input('dDate', sql.Date, today).input('p8', sql.VarChar, num8)
+            .input('p6', sql.VarChar, num6).input('p4', sql.VarChar, num4)
+            .input('p3', sql.VarChar, num3).input('p2', sql.VarChar, num2)
+            .query(`
+                IF NOT EXISTS (SELECT 1 FROM Draw_Results WHERE draw_date = @dDate)
+                    INSERT INTO Draw_Results (draw_date, prize_8, prize_6, prize_4, prize_3, prize_2) 
+                    VALUES (@dDate, @p8, @p6, @p4, @p3, @p2);
+                ELSE
+                    UPDATE Draw_Results 
+                    SET prize_8 = @p8, prize_6 = @p6, prize_4 = @p4, prize_3 = @p3, prize_2 = @p2 
+                    WHERE draw_date = @dDate;
+            `);
+
+        // 2. ตรวจบิล, อัปเดตยอดเงิน, จ่ายเข้า Wallets, บันทึกประวัติ
+        await pool.request().query(`
+            -- อัปเดตสถานะบิลและคำนวณเงินรางวัลที่จะได้
+            UPDATE i SET 
+                status = CASE 
+                    WHEN (i.lottery_type = '2' AND i.selected_number = '${num2}') OR
+                         (i.lottery_type = '3' AND i.selected_number = '${num3}') OR
+                         (i.lottery_type = '4' AND i.selected_number = '${num4}') OR
+                         (i.lottery_type = '6' AND i.selected_number = '${num6}') OR
+                         (i.lottery_type = '8' AND i.selected_number = '${num8}') THEN N'ถูกรางวัล'
+                    ELSE N'ไม่ถูกรางวัล'
+                END,
+                prize_amount = CASE
+                    WHEN i.lottery_type = '2' AND i.selected_number = '${num2}' THEN i.price * (SELECT multiplier FROM Lottery_Prize_Rates WHERE lottery_type = '2')
+                    WHEN i.lottery_type = '3' AND i.selected_number = '${num3}' THEN i.price * (SELECT multiplier FROM Lottery_Prize_Rates WHERE lottery_type = '3')
+                    WHEN i.lottery_type = '4' AND i.selected_number = '${num4}' THEN i.price * (SELECT multiplier FROM Lottery_Prize_Rates WHERE lottery_type = '4')
+                    WHEN i.lottery_type = '6' AND i.selected_number = '${num6}' THEN i.price * (SELECT multiplier FROM Lottery_Prize_Rates WHERE lottery_type = '6')
+                    WHEN i.lottery_type = '8' AND i.selected_number = '${num8}' THEN i.price * (SELECT multiplier FROM Lottery_Prize_Rates WHERE lottery_type = '8')
+                    ELSE 0
+                END
+            FROM Lottery_Order_Items i
+            JOIN Lottery_Orders o ON i.order_id = o.order_id
+            WHERE o.status = N'รอผลตรวจ' AND i.status = N'รอผลตรวจ';
+
+            -- โอนเงินรางวัลเข้า Wallet ของผู้ชนะ
+            UPDATE Wallets 
+            SET balance = ISNULL(balance, 0) + (
+                SELECT ISNULL(SUM(prize_amount), 0) 
+                FROM Lottery_Order_Items i 
+                JOIN Lottery_Orders o ON i.order_id = o.order_id 
+                WHERE o.user_id = Wallets.user_id AND i.status = N'ถูกรางวัล' AND o.status = N'รอผลตรวจ'
+            )
+            WHERE user_id IN (
+                SELECT DISTINCT o.user_id FROM Lottery_Order_Items i 
+                JOIN Lottery_Orders o ON i.order_id = o.order_id 
+                WHERE i.status = N'ถูกรางวัล' AND o.status = N'รอผลตรวจ'
+            );
+
+            -- บันทึกประวัติการรับเงินลงในตาราง Transactions (Statement)
+            INSERT INTO Transactions (user_id, transaction_type, title, amount, status, created_at)
+            SELECT DISTINCT o.user_id, 'Reward', N'เงินรางวัลหวย', 
+                   SUM(i.prize_amount) OVER(PARTITION BY o.user_id), 
+                   'Completed', GETDATE()
+            FROM Lottery_Order_Items i 
+            JOIN Lottery_Orders o ON i.order_id = o.order_id 
+            WHERE i.status = N'ถูกรางวัล' AND o.status = N'รอผลตรวจ';
+
+            -- เปลี่ยนสถานะบิลใหญ่เป็น "ตรวจผลแล้ว" ปิดยอดงวดนี้
+            UPDATE Lottery_Orders SET status = N'ตรวจผลแล้ว' WHERE status = N'รอผลตรวจ';
+        `);
+
+        res.json({ success: true, message: `✅ ออกรางวัลด้วยเลข ${num6} สำเร็จ และ โอนเงินเข้า Wallet ของผู้ชนะเรียบร้อยแล้ว!` });
+    } catch (err) { 
+        console.error(err);
+        res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการจ่ายเงิน' }); 
+    }
 });
 
 // ==========================================
