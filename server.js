@@ -3241,6 +3241,74 @@ app.post('/api/admin/simulate-winners', async (req, res) => {
     } catch (err) { res.status(500).json({ success: false }); }
 });
 
+// ==========================================
+// 🌟 API: ดึงข้อมูลและคำนวณค่าคอมของหน้าทีม (/api/team/:uid)
+// ==========================================
+app.get('/api/team/:uid', async (req, res) => {
+    try {
+        const pool = await sql.connect(dbConfig);
+        
+        // ดึง Username ของตัวเองก่อน
+        const userRes = await pool.request()
+            .input('userId', sql.Int, req.params.uid)
+            .query('SELECT username FROM Users WHERE user_id = @userId');
+        
+        if (userRes.recordset.length === 0) return res.json({ success: false, message: 'User not found' });
+        const myUsername = userRes.recordset[0].username;
+
+        // ดึงข้อมูลลูกทีม และคำนวณค่าคอมมิชชั่นแบบ Real-time ตามเรทในตาราง
+        const teamRes = await pool.request()
+            .input('myUsername', sql.NVarChar, myUsername)
+            .query(`
+                DECLARE @PurchPercent DECIMAL(18,2) = (SELECT TOP 1 purchase_percent FROM Commission_Settings);
+                DECLARE @WinPercent DECIMAL(18,2) = (SELECT TOP 1 win_percent FROM Commission_Settings);
+
+                SELECT 
+                    d.user_id as id,
+                    d.username as name,
+                    'https://ui-avatars.com/api/?name=' + d.username + '&background=random' as avatar,
+                    d.is_active as isActive,
+                    FORMAT(d.created_at, 'dd/MM/yyyy') as joinDate,
+                    
+                    -- ค่าคอมจากการซื้อของลูกทีม
+                    ISNULL((SELECT SUM(total_amount) FROM Lottery_Orders WHERE user_id = d.user_id), 0) * (@PurchPercent / 100.0) as purchaseComm,
+                    
+                    -- ค่าคอมจากการถูกรางวัลของลูกทีม
+                    ISNULL((
+                        SELECT SUM(i.prize_amount) 
+                        FROM Lottery_Order_Items i 
+                        JOIN Lottery_Orders o ON i.order_id = o.order_id 
+                        WHERE o.user_id = d.user_id AND i.status = N'ถูกรางวัล'
+                    ), 0) * (@WinPercent / 100.0) as winComm
+
+                FROM Users d
+                WHERE d.referrer_username = @myUsername;
+            `);
+
+        // ดึงรายได้รวมจากค่าคอมของตัวเอง (ที่โอนเข้า Wallet แล้ว) จากตาราง Transactions
+        const incomeRes = await pool.request()
+            .input('userId', sql.Int, req.params.uid)
+            .query(`
+                SELECT 
+                    ISNULL(SUM(amount), 0) as totalIncome,
+                    ISNULL(SUM(CASE WHEN MONTH(created_at) = MONTH(GETDATE()) AND YEAR(created_at) = YEAR(GETDATE()) THEN amount ELSE 0 END), 0) as incomeThisMonth
+                FROM Transactions
+                WHERE user_id = @userId AND transaction_type IN ('Commission', 'Bonus') AND status = 'Completed';
+            `);
+
+        res.json({
+            success: true,
+            teamMembers: teamRes.recordset,
+            totalIncome: incomeRes.recordset[0].totalIncome,
+            incomeThisMonth: incomeRes.recordset[0].incomeThisMonth
+        });
+
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ success: false });
+    }
+});
+
 
 app.listen(port, () => {
     console.log(`🚀 Server เปิดทำงานแล้วที่พอร์ต ${port}`);
