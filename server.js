@@ -1283,14 +1283,15 @@ app.put('/api/admin/animal-numbers/:id', async (req, res) => {
     }
 });
 // ==========================================
-// 🌟 API: สำหรับการซื้อหวย (และตัดเงิน/คำนวณวันอัตโนมัติ)
+// 🌟 API: สำหรับการซื้อหวย (ตัดเงิน/คำนวณวัน/จ่ายค่าคอม/แสตมป์ชื่อลูกทีม)
 // ==========================================
 app.post('/api/lottery/buy', async (req, res) => {
-    // 🌟 เอาแค่ user_id, cart, total_price, currency มาก็พอครับ
     const { user_id, cart, total_price, currency } = req.body;
     const pool = await sql.connect(dbConfig);
     
-    // 0. เช็คสถานะการขาย
+    // ==========================================
+    // 🌟 0. แทรกระบบเช็คสถานะการขาย
+    // ==========================================
     const statusRes = await pool.request().query("SELECT is_sales_open FROM System_Settings WHERE id = 1");
     if (!statusRes.recordset[0].is_sales_open) {
         return res.status(400).json({ success: false, message: 'ระบบปิดรับซื้อแล้วในขณะนี้ กรุณารอรอบถัดไป' });
@@ -1341,12 +1342,50 @@ app.post('/api/lottery/buy', async (req, res) => {
                     VALUES (@userId, 'Buy Lottery', @title, @amount, 'Completed', GETDATE())`);
 
         // ==========================================
+        // 🌟 แทรกระบบคำนวณ งวดวันที่ (draw_date) เข้าไปในบิล
+        // ==========================================
+        const orderRes = await request
+            .input('currency', sql.VarChar, currency)
+            .input('totalPrice', sql.Decimal(18,2), deductAmount)
+            .query(`
+                DECLARE @TargetDrawDate DATE;
+                
+                DECLARE @ThaiTime DATETIME = DATEADD(HOUR, 7, GETUTCDATE());
+                DECLARE @CurrentTime TIME = CAST(@ThaiTime AS TIME);
+                DECLARE @CurrentDate DATE = CAST(@ThaiTime AS DATE);
+                
+                DECLARE @DB_CloseTime TIME = (SELECT TOP 1 close_time FROM System_Settings);
+                
+                IF @CurrentTime >= @DB_CloseTime
+                    SET @TargetDrawDate = DATEADD(day, 1, @CurrentDate);
+                ELSE
+                    SET @TargetDrawDate = @CurrentDate;
+
+                INSERT INTO Lottery_Orders (user_id, total_amount, currency_code, status, draw_date, created_at)
+                OUTPUT INSERTED.order_id
+                VALUES (@userId, @totalPrice, @currency, N'รอผลตรวจ', @TargetDrawDate, @ThaiTime)
+            `);
+        
+        const orderId = orderRes.recordset[0].order_id;
+
+        for (const item of cart) {
+            const itemReq = new sql.Request(transaction);
+            await itemReq
+                .input('orderId', sql.Int, orderId)
+                .input('lotteryNumber', sql.VarChar, item.number)
+                .input('lotteryType', sql.VarChar, item.type)
+                .input('price', sql.Decimal(18,2), item.price)
+                .query(`INSERT INTO Lottery_Order_Items (order_id, lottery_type, selected_number, price, status)
+                        VALUES (@orderId, @lotteryType, @lotteryNumber, @price, N'รอผลตรวจ')`);
+        }
+
+        // ==========================================
         // 🌟 6. ระบบจ่ายค่าแนะนำ (ดึง % จาก Database และแสตมป์ชื่อลูกทีม)
+        // รับรองว่าแจกค่าคอมแน่นอนครับ!
         // ==========================================
         const refReq = new sql.Request(transaction);
         refReq.input('buyerId', sql.Int, user_id);
         
-        // ดึงทั้ง user_id ของผู้แนะนำ และ username ของคนซื้อ
         const referrerRes = await refReq.query(`
             SELECT u_referrer.user_id, u_buyer.username as buyer_username
             FROM Users u_buyer
@@ -1367,43 +1406,8 @@ app.post('/api/lottery/buy', async (req, res) => {
             const commReq = new sql.Request(transaction);
             commReq.input('referrerId', sql.Int, referrerId);
             commReq.input('commission', sql.Decimal(18,2), purchaseCommission);
-            // 🌟 แสตมป์ชื่อลูกทีมไว้ในวงเล็บ เพื่อใช้ดึงข้อมูลในหน้า Team
+            // แสตมป์ชื่อลูกทีมไว้ในวงเล็บ เพื่อใช้ดึงข้อมูลในหน้า Team อย่างแม่นยำ
             commReq.input('transTitle', sql.NVarChar, `รายได้ ${purchasePercent}% จากทีมงาน (${buyerUsername})`); 
-            
-            await commReq.query(`
-                UPDATE Wallets SET balance = balance + @commission WHERE user_id = @referrerId;
-                UPDATE Users SET total_purchase_comm = ISNULL(total_purchase_comm, 0) + @commission WHERE user_id = @referrerId;
-                INSERT INTO Transactions (user_id, transaction_type, title, amount, status, created_at)
-                VALUES (@referrerId, 'Affiliate Purchase', @transTitle, @commission, 'Completed', GETDATE());
-            `);
-        }
-
-        // ==========================================
-        // 🌟 7. ระบบจ่ายค่าแนะนำ ทันทีที่ทีมงานซื้อ (ดึง % จาก Database)
-        // ==========================================
-        const refReq = new sql.Request(transaction);
-        refReq.input('buyerId', sql.Int, user_id);
-        
-        const referrerRes = await refReq.query(`
-            SELECT u_referrer.user_id 
-            FROM Users u_buyer
-            JOIN Users u_referrer ON u_buyer.referrer_username = u_referrer.username
-            WHERE u_buyer.user_id = @buyerId
-        `);
-
-        if (referrerRes.recordset.length > 0) {
-            const referrerId = referrerRes.recordset[0].user_id;
-            
-            const settingReq = new sql.Request(transaction);
-            const settingRes = await settingReq.query("SELECT purchase_percent FROM Commission_Settings WHERE id = 1");
-            const purchasePercent = settingRes.recordset.length > 0 ? settingRes.recordset[0].purchase_percent : 2.00; 
-            
-            const purchaseCommission = deductAmount * (purchasePercent / 100); 
-
-            const commReq = new sql.Request(transaction);
-            commReq.input('referrerId', sql.Int, referrerId);
-            commReq.input('commission', sql.Decimal(18,2), purchaseCommission);
-            commReq.input('transTitle', sql.NVarChar, `รายได้ ${purchasePercent}% จากการซื้อของทีมงาน`); 
             
             await commReq.query(`
                 UPDATE Wallets SET balance = balance + @commission WHERE user_id = @referrerId;
