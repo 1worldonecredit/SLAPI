@@ -2997,15 +2997,42 @@ app.post('/api/admin/suggest-draw', async (req, res) => {
 });
 
 // ==========================================
-// 🌟 API 3: ค้นหาคนซื้อจากเลข (แม่นยำขึ้น ดึงจากบิลรอตรวจ)
+// 🌟 API 3: ค้นหาคนซื้อจากเลข (อิงจากเวลา เปิด-ปิด บิลเป๊ะๆ)
 // ==========================================
 app.post('/api/admin/search-buyers', async (req, res) => {
     const { number } = req.body;
     try {
         const pool = await sql.connect(dbConfig);
+        
+        // ใช้ SQL คัดกรองเวลาเปิด-ปิด (รองรับกรณีตั้งค่าข้ามวัน เช่น เปิด 18:00 ปิด 17:00 วันถัดไป)
         const result = await pool.request()
             .input('num', sql.VarChar, number)
             .query(`
+                DECLARE @OpenTime TIME = (SELECT TOP 1 open_time FROM System_Settings);
+                DECLARE @CloseTime TIME = (SELECT TOP 1 close_time FROM System_Settings);
+                DECLARE @CurrentTime DATETIME = GETDATE();
+                DECLARE @StartDateTime DATETIME;
+                DECLARE @EndDateTime DATETIME;
+
+                IF @OpenTime > @CloseTime
+                BEGIN
+                    IF CAST(@CurrentTime AS TIME) >= @OpenTime
+                    BEGIN
+                        SET @StartDateTime = CAST(CAST(@CurrentTime AS DATE) AS DATETIME) + CAST(@OpenTime AS DATETIME);
+                        SET @EndDateTime = DATEADD(DAY, 1, CAST(CAST(@CurrentTime AS DATE) AS DATETIME)) + CAST(@CloseTime AS DATETIME);
+                    END
+                    ELSE
+                    BEGIN
+                        SET @StartDateTime = DATEADD(DAY, -1, CAST(CAST(@CurrentTime AS DATE) AS DATETIME)) + CAST(@OpenTime AS DATETIME);
+                        SET @EndDateTime = CAST(CAST(@CurrentTime AS DATE) AS DATETIME) + CAST(@CloseTime AS DATETIME);
+                    END
+                END
+                ELSE
+                BEGIN
+                    SET @StartDateTime = CAST(CAST(@CurrentTime AS DATE) AS DATETIME) + CAST(@OpenTime AS DATETIME);
+                    SET @EndDateTime = CAST(CAST(@CurrentTime AS DATE) AS DATETIME) + CAST(@CloseTime AS DATETIME);
+                END
+
                 SELECT 
                     u.username, o.currency_code, i.price, CAST(i.lottery_type AS VARCHAR) as lottery_type, i.selected_number, i.created_at,
                     (i.price * r.multiplier) as estimated_prize
@@ -3013,13 +3040,18 @@ app.post('/api/admin/search-buyers', async (req, res) => {
                 JOIN Lottery_Orders o ON i.order_id = o.order_id
                 JOIN Users u ON o.user_id = u.user_id
                 LEFT JOIN Lottery_Prize_Rates r ON CAST(i.lottery_type AS INT) = CAST(r.lottery_type AS INT)
-                WHERE o.status = N'รอผลตรวจ' AND i.status = N'รอผลตรวจ'
-                  AND i.selected_number = @num
+                WHERE i.selected_number = @num
+                  AND i.created_at >= @StartDateTime 
+                  AND i.created_at <= @EndDateTime
                 ORDER BY i.price DESC
             `);
         res.json({ success: true, buyers: result.recordset });
-    } catch (err) { res.status(500).json({ success: false }); }
+    } catch (err) { 
+        console.error(err);
+        res.status(500).json({ success: false }); 
+    }
 });
+
 
 // ==========================================
 // 🌟 API 4: [ใหม่!] ยืนยันออกผลรางวัลด้วยเลขที่เลือกทันที
