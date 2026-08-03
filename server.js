@@ -1286,18 +1286,15 @@ app.put('/api/admin/animal-numbers/:id', async (req, res) => {
 // 🌟 API: สำหรับการซื้อหวย (และตัดเงิน/คำนวณวันอัตโนมัติ)
 // ==========================================
 app.post('/api/lottery/buy', async (req, res) => {
+    // 🌟 เอาแค่ user_id, cart, total_price, currency มาก็พอครับ
     const { user_id, cart, total_price, currency } = req.body;
     const pool = await sql.connect(dbConfig);
     
-    // ==========================================
-    // 🌟 0. แทรกระบบเช็คสถานะการขาย (ทำก่อนเริ่ม Transaction เพื่อความปลอดภัย)
-    // ==========================================
+    // 0. เช็คสถานะการขาย
     const statusRes = await pool.request().query("SELECT is_sales_open FROM System_Settings WHERE id = 1");
     if (!statusRes.recordset[0].is_sales_open) {
         return res.status(400).json({ success: false, message: 'ระบบปิดรับซื้อแล้วในขณะนี้ กรุณารอรอบถัดไป' });
     }
-    // ไม่ต้องดึง close_time ออกมาแล้วครับ เดี๋ยวให้ SQL จัดการเองด้านล่าง
-    // ==========================================
 
     const transaction = new sql.Transaction(pool);
 
@@ -1314,13 +1311,13 @@ app.post('/api/lottery/buy', async (req, res) => {
             }
         }
 
-        // 2. เข้าสมการแปลงยอดซื้อให้เป็น THB เพื่อใช้เป็นฐาน
+        // 2. แปลงยอดซื้อให้เป็น THB เพื่อใช้เป็นฐาน
         const baseTHBAmount = total_price / exchangeRate;
 
         // 3. คำนวณยอดที่จะหักเงิน (แปลงกลับเป็นสกุลเงินกระเป๋าลูกค้า)
         const deductAmount = baseTHBAmount * exchangeRate; 
 
-        // 4. เช็คยอดเงินและหักเงินในกระเป๋า (เช็คจากตาราง Wallets)
+        // 4. เช็คยอดเงินและหักเงินในกระเป๋า
         const userRes = await request
             .input('userId', sql.Int, user_id)
             .query('SELECT balance FROM Wallets WHERE user_id = @userId'); 
@@ -1332,12 +1329,11 @@ app.post('/api/lottery/buy', async (req, res) => {
 
         request.input('deductAmount', sql.Decimal(18,2), deductAmount);
         await request.query(`
-            -- เพิ่ม ISNULL กันเหนียว กรณีตาราง Users เป็นค่าว่าง จะได้ไม่ Error
             UPDATE Users SET wallet_balance = ISNULL(wallet_balance, 0) - @deductAmount WHERE user_id = @userId;
             UPDATE Wallets SET balance = balance - @deductAmount WHERE user_id = @userId;
         `);
 
-        // 5. บันทึกประวัติและสร้างบิล
+        // 5. บันทึกประวัติ
         await request
             .input('title', sql.NVarChar, 'ซื้อหวยเวียดนาม')
             .input('amount', sql.Decimal(18,2), -deductAmount) 
@@ -1345,8 +1341,7 @@ app.post('/api/lottery/buy', async (req, res) => {
                     VALUES (@userId, 'Buy Lottery', @title, @amount, 'Completed', GETDATE())`);
 
         // ==========================================
-        // 🌟 แทรกระบบคำนวณ งวดวันที่ (draw_date) เข้าไปในบิล Lottery_Orders
-        // 🌟 [แก้ปัญหา Invalid String]: ให้ SQL ดึง CloseTime มาคำนวณเองเลย ไม่ต้องส่งเข้าไป!
+        // 🌟 6. สร้างบิล (คำนวณวันซื้อโดยให้ SQL ทำงานเอง ไม่ต้องโยนเวลาเข้ามา)
         // ==========================================
         const orderRes = await request
             .input('currency', sql.VarChar, currency)
@@ -1354,9 +1349,10 @@ app.post('/api/lottery/buy', async (req, res) => {
             .query(`
                 DECLARE @TargetDrawDate DATE;
                 
-                -- ดึงเวลาเซิร์ฟเวอร์แบบเป๊ะๆ มาคำนวณ
-                DECLARE @CurrentTime TIME = CAST(GETDATE() AS TIME);
-                DECLARE @CurrentDate DATE = CAST(GETDATE() AS DATE);
+                -- ดึงเวลาประเทศไทย (UTC+7)
+                DECLARE @ThaiTime DATETIME = DATEADD(HOUR, 7, GETUTCDATE());
+                DECLARE @CurrentTime TIME = CAST(@ThaiTime AS TIME);
+                DECLARE @CurrentDate DATE = CAST(@ThaiTime AS DATE);
                 
                 -- ดึงเวลาปิดจาก Database โดยตรง
                 DECLARE @DB_CloseTime TIME = (SELECT TOP 1 close_time FROM System_Settings);
@@ -1369,9 +1365,8 @@ app.post('/api/lottery/buy', async (req, res) => {
 
                 INSERT INTO Lottery_Orders (user_id, total_amount, currency_code, status, draw_date, created_at)
                 OUTPUT INSERTED.order_id
-                VALUES (@userId, @totalPrice, @currency, N'รอผลตรวจ', @TargetDrawDate, GETDATE())
+                VALUES (@userId, @totalPrice, @currency, N'รอผลตรวจ', @TargetDrawDate, @ThaiTime)
             `);
-        // ==========================================
 
         const orderId = orderRes.recordset[0].order_id;
 
@@ -1387,7 +1382,7 @@ app.post('/api/lottery/buy', async (req, res) => {
         }
 
         // ==========================================
-        // 🌟 6. ระบบจ่ายค่าแนะนำ ทันทีที่ทีมงานซื้อ (ดึง % จาก Database)
+        // 🌟 7. ระบบจ่ายค่าแนะนำ ทันทีที่ทีมงานซื้อ (ดึง % จาก Database)
         // ==========================================
         const refReq = new sql.Request(transaction);
         refReq.input('buyerId', sql.Int, user_id);
@@ -1402,33 +1397,24 @@ app.post('/api/lottery/buy', async (req, res) => {
         if (referrerRes.recordset.length > 0) {
             const referrerId = referrerRes.recordset[0].user_id;
             
-            // ดึง % การซื้อ จากตารางตั้งค่า (ถ้าไม่มีให้ใช้ 2.00)
             const settingReq = new sql.Request(transaction);
             const settingRes = await settingReq.query("SELECT purchase_percent FROM Commission_Settings WHERE id = 1");
             const purchasePercent = settingRes.recordset.length > 0 ? settingRes.recordset[0].purchase_percent : 2.00; 
             
-            // คำนวณเงินค่าคอมมิชชัน
             const purchaseCommission = deductAmount * (purchasePercent / 100); 
 
-            // จ่ายเงินให้ผู้แนะนำ
             const commReq = new sql.Request(transaction);
             commReq.input('referrerId', sql.Int, referrerId);
             commReq.input('commission', sql.Decimal(18,2), purchaseCommission);
             commReq.input('transTitle', sql.NVarChar, `รายได้ ${purchasePercent}% จากการซื้อของทีมงาน`); 
             
             await commReq.query(`
-                -- เติมเงินเข้ากระเป๋า (Wallets)
                 UPDATE Wallets SET balance = balance + @commission WHERE user_id = @referrerId;
-                
-                -- เก็บสถิติรายได้สะสม
                 UPDATE Users SET total_purchase_comm = ISNULL(total_purchase_comm, 0) + @commission WHERE user_id = @referrerId;
-
-                -- สร้างรายการ Transaction
                 INSERT INTO Transactions (user_id, transaction_type, title, amount, status, created_at)
                 VALUES (@referrerId, 'Affiliate Purchase', @transTitle, @commission, 'Completed', GETDATE());
             `);
         }
-        // ==========================================
 
         await transaction.commit();
         res.status(200).json({ success: true, message: 'ชำระเงินสำเร็จ', order_id: orderId });
