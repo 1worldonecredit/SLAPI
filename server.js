@@ -3206,7 +3206,6 @@ app.post('/api/admin/execute-draw', async (req, res) => {
             -- ==========================================
             DECLARE @WinPercent DECIMAL(18,2) = (SELECT TOP 1 win_percent FROM Commission_Settings);
 
-            -- เติมเงินค่าคอมเข้า Wallet ของผู้แนะนำทันที
             UPDATE w
             SET w.balance = ISNULL(w.balance, 0) + t.comm_amount
             FROM Wallets w
@@ -3223,17 +3222,17 @@ app.post('/api/admin/execute-draw', async (req, res) => {
                 HAVING SUM(i.prize_amount) > 0
             ) t ON w.user_id = t.referrer_id;
 
-            -- บันทึกประวัติ (Transaction) ให้ผู้แนะนำ ว่าได้รับเงินก้อนนี้มาจากค่าคอมลูกทีมถูกหวย
+            -- 🌟 แสตมป์ชื่อลูกทีม (+ d.username +) ลงไปในประวัติด้วย
             INSERT INTO Transactions (user_id, transaction_type, title, amount, status, created_at)
             SELECT 
-                u.user_id, 'Commission', N'ค่าคอมฯ ลูกทีมถูกรางวัล', 
+                u.user_id, 'Commission', N'ค่าคอมฯ ลูกทีมถูกรางวัล (' + d.username + ')', 
                 SUM(i.prize_amount) * (@WinPercent / 100.0), 'Completed', GETDATE()
             FROM Lottery_Order_Items i 
             JOIN Lottery_Orders o ON i.order_id = o.order_id 
             JOIN Users d ON o.user_id = d.user_id
             JOIN Users u ON d.referrer_username = u.username
             WHERE i.status = N'ถูกรางวัล' AND o.status = N'รอผลตรวจ'
-            GROUP BY u.user_id
+            GROUP BY u.user_id, d.username
             HAVING SUM(i.prize_amount) > 0;
             -- ==========================================
 
@@ -3285,13 +3284,12 @@ app.post('/api/admin/simulate-winners', async (req, res) => {
 });
 
 // ==========================================
-// 🌟 API: ดึงข้อมูลและคำนวณค่าคอมของหน้าทีม (/api/team/:uid)
+// 🌟 API: ดึงข้อมูลหน้าทีม (ดึงจากตาราง Transactions โดยตรงเพื่อความแม่นยำ 100%)
 // ==========================================
 app.get('/api/team/:uid', async (req, res) => {
     try {
         const pool = await sql.connect(dbConfig);
         
-        // 1. ดึง Username ของตัวเองก่อน
         const userRes = await pool.request()
             .input('userId', sql.Int, req.params.uid)
             .query('SELECT username FROM Users WHERE user_id = @userId');
@@ -3299,13 +3297,11 @@ app.get('/api/team/:uid', async (req, res) => {
         if (userRes.recordset.length === 0) return res.json({ success: false, message: 'User not found' });
         const myUsername = userRes.recordset[0].username;
 
-        // 2. ดึงข้อมูลลูกทีม พร้อมคำนวณค่าคอมมิชชัน
+        // 🌟 ดึงข้อมูลจาก Transactions โดยตรง โดยหาชื่อลูกทีมจากในวงเล็บ '(Username)'
         const teamRes = await pool.request()
             .input('myUsername', sql.NVarChar, myUsername)
+            .input('userId', sql.Int, req.params.uid)
             .query(`
-                DECLARE @PurchPercent DECIMAL(18,2) = (SELECT TOP 1 ISNULL(purchase_percent, 0) FROM Commission_Settings);
-                DECLARE @WinPercent DECIMAL(18,2) = (SELECT TOP 1 ISNULL(win_percent, 0) FROM Commission_Settings);
-
                 SELECT 
                     d.user_id as id,
                     d.username as name,
@@ -3313,23 +3309,26 @@ app.get('/api/team/:uid', async (req, res) => {
                     d.is_active as isActive,
                     FORMAT(d.created_at, 'dd/MM/yyyy') as joinDate,
                     
-                    -- คำนวณค่าคอมจากการซื้อของลูกทีม (ดึงจากยอดบิลทั้งหมดของคนๆ นี้)
-                    CAST(ISNULL((SELECT SUM(total_amount) FROM Lottery_Orders WHERE user_id = d.user_id), 0) * (@PurchPercent / 100.0) AS DECIMAL(18,2)) as purchaseComm,
+                    -- ดึงค่าคอมจากการซื้อ (หาชื่อในวงเล็บ)
+                    ISNULL((
+                        SELECT SUM(amount) FROM Transactions 
+                        WHERE user_id = @userId 
+                          AND transaction_type = 'Affiliate Purchase' 
+                          AND title LIKE N'%(' + d.username + ')%'
+                    ), 0) as purchaseComm,
                     
-                    -- คำนวณค่าคอมจากการถูกรางวัลของลูกทีม (ดึงจากยอดถูกรางวัลทั้งหมดของคนๆ นี้)
-                    CAST(ISNULL((
-                        SELECT SUM(i.prize_amount) 
-                        FROM Lottery_Order_Items i 
-                        JOIN Lottery_Orders o ON i.order_id = o.order_id 
-                        WHERE o.user_id = d.user_id AND i.status = N'ถูกรางวัล'
-                    ), 0) * (@WinPercent / 100.0) AS DECIMAL(18,2)) as winComm
+                    -- ดึงค่าคอมถูกรางวัล (หาชื่อในวงเล็บ)
+                    ISNULL((
+                        SELECT SUM(amount) FROM Transactions 
+                        WHERE user_id = @userId 
+                          AND transaction_type = 'Commission' 
+                          AND title LIKE N'%(' + d.username + ')%'
+                    ), 0) as winComm
 
                 FROM Users d
                 WHERE d.referrer_username = @myUsername;
             `);
 
-        // 3. 🌟 อัปเกรด: ดึงรายได้รวมของตัวเองแบบ "ดักจับคำสำคัญ (Keyword)"
-        // จับคำว่า "รายได้", "ค่าคอม", "โบนัส" เพื่อให้มั่นใจว่าดึงยอดมาครบแน่นอน 100%
         const incomeRes = await pool.request()
             .input('userId', sql.Int, req.params.uid)
             .query(`
