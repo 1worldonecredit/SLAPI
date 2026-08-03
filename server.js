@@ -3578,6 +3578,105 @@ app.post('/api/admin/toggle-block-ip', async (req, res) => {
     }
 });
 
+// ==========================================
+// 🏢 API: ระบบจัดการข้อมูลองค์กร (HRM Master Data)
+// ==========================================
+
+// 1. ดึงข้อมูลทั้งหมด (Branches, Departments, Positions)
+app.get('/api/hrm/master-data', async (req, res) => {
+    try {
+        const pool = await sql.connect(dbConfig);
+        const branchRes = await pool.request().query('SELECT * FROM Emp_Branches');
+        const deptRes = await pool.request().query('SELECT * FROM Emp_Departments');
+        const posRes = await pool.request().query('SELECT * FROM Emp_Positions');
+
+        res.json({
+            success: true,
+            branches: branchRes.recordset,
+            departments: deptRes.recordset,
+            positions: posRes.recordset
+        });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ success: false, message: 'Server Error' });
+    }
+});
+
+// 2. เพิ่ม สาขา (Branch)
+app.post('/api/hrm/branch', async (req, res) => {
+    const { branch_code, branch_name, country_code } = req.body;
+    if(!branch_code || !branch_name) return res.status(400).json({success: false, message: 'กรุณากรอกข้อมูลให้ครบถ้วน'});
+    
+    try {
+        const pool = await sql.connect(dbConfig);
+        await pool.request()
+            .input('code', sql.VarChar, branch_code)
+            .input('name', sql.NVarChar, branch_name)
+            .input('country', sql.VarChar, country_code)
+            .query(`INSERT INTO Emp_Branches (branch_code, branch_name, country_code) VALUES (@code, @name, @country)`);
+        res.json({ success: true });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ success: false, message: 'รหัสสาขาซ้ำ หรือ เกิดข้อผิดพลาด' });
+    }
+});
+
+// 3. เพิ่ม แผนก (Department)
+app.post('/api/hrm/department', async (req, res) => {
+    const { dept_code, dept_name } = req.body;
+    if(!dept_code || !dept_name) return res.status(400).json({success: false, message: 'กรุณากรอกข้อมูลให้ครบถ้วน'});
+
+    try {
+        const pool = await sql.connect(dbConfig);
+        await pool.request()
+            .input('code', sql.VarChar, dept_code)
+            .input('name', sql.NVarChar, dept_name)
+            .query(`INSERT INTO Emp_Departments (dept_code, dept_name) VALUES (@code, @name)`);
+        res.json({ success: true });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ success: false, message: 'รหัสแผนกซ้ำ หรือ เกิดข้อผิดพลาด' });
+    }
+});
+
+// 4. เพิ่ม ตำแหน่ง (Position)
+app.post('/api/hrm/position', async (req, res) => {
+    const { position_code, position_name, dept_code, base_salary, hourly_rate, ot_multiplier } = req.body;
+    if(!position_code || !position_name || !dept_code) return res.status(400).json({success: false, message: 'กรุณากรอกข้อมูลให้ครบถ้วน'});
+
+    try {
+        const pool = await sql.connect(dbConfig);
+        await pool.request()
+            .input('code', sql.VarChar, position_code)
+            .input('name', sql.NVarChar, position_name)
+            .input('dept', sql.VarChar, dept_code)
+            .input('salary', sql.Decimal(18,2), base_salary || 0)
+            .input('hourly', sql.Decimal(18,2), hourly_rate || 0)
+            .input('ot', sql.Decimal(4,2), ot_multiplier || 1.5)
+            .query(`INSERT INTO Emp_Positions (position_code, position_name, dept_code, base_salary, hourly_rate, ot_multiplier) 
+                    VALUES (@code, @name, @dept, @salary, @hourly, @ot)`);
+        res.json({ success: true });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ success: false, message: 'รหัสตำแหน่งซ้ำ หรือ เกิดข้อผิดพลาด' });
+    }
+});
+
+// 5. ลบข้อมูล (Delete)
+app.delete('/api/hrm/:type/:code', async (req, res) => {
+    const { type, code } = req.params;
+    try {
+        const pool = await sql.connect(dbConfig);
+        if (type === 'branch') await pool.request().input('code', sql.VarChar, code).query('DELETE FROM Emp_Branches WHERE branch_code = @code');
+        if (type === 'dept') await pool.request().input('code', sql.VarChar, code).query('DELETE FROM Emp_Departments WHERE dept_code = @code');
+        if (type === 'position') await pool.request().input('code', sql.VarChar, code).query('DELETE FROM Emp_Positions WHERE position_code = @code');
+        res.json({ success: true });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ success: false, message: 'ไม่สามารถลบได้ เนื่องจากมีการผูกข้อมูลนี้ไว้ในระบบแล้ว' });
+    }
+});
+
 app.listen(port, () => {
     console.log(`🚀 Server เปิดทำงานแล้วที่พอร์ต ${port}`);
 });
