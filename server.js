@@ -3282,9 +3282,8 @@ app.post('/api/admin/simulate-winners', async (req, res) => {
         res.status(500).json({ success: false });
     }
 });
-
 // ==========================================
-// 🌟 API: ดึงข้อมูลหน้าทีม (สรุปยอดรวม และยอดแยกรายบุคคล)
+// 🌟 API: ดึงข้อมูลหน้าทีม (เวอร์ชันดักจับทุกยอด ป้องกันยอดหาย 100%)
 // ==========================================
 app.get('/api/team/:uid', async (req, res) => {
     try {
@@ -3298,7 +3297,7 @@ app.get('/api/team/:uid', async (req, res) => {
         if (userRes.recordset.length === 0) return res.json({ success: false, message: 'User not found' });
         const myUsername = userRes.recordset[0].username;
 
-        // 2. ดึงข้อมูลลูกทีม และหาค่าคอมรายบุคคล (อิงจากชื่อในวงเล็บ)
+        // 2. ดึงข้อมูลลูกทีม และหาค่าคอมรายบุคคล (จับชื่อลูกทีมจาก Title แบบยืดหยุ่น)
         const teamRes = await pool.request()
             .input('myUsername', sql.NVarChar, myUsername)
             .input('userId', sql.Int, req.params.uid)
@@ -3310,25 +3309,27 @@ app.get('/api/team/:uid', async (req, res) => {
                     d.is_active as isActive,
                     FORMAT(d.created_at, 'dd/MM/yyyy') as joinDate,
                     
+                    -- ดักจับทุกยอดเงินเข้าที่มี "ชื่อลูกทีม" อยู่ในประวัติ (ค่าคอมซื้อ)
                     ISNULL((
                         SELECT SUM(amount) FROM Transactions 
                         WHERE user_id = @userId 
-                          AND transaction_type = 'Affiliate Purchase' 
-                          AND title LIKE N'%(' + d.username + ')%'
+                          AND amount > 0 
+                          AND (title LIKE N'%' + LTRIM(RTRIM(d.username)) + '%' AND title LIKE N'%ซื้อ%')
                     ), 0) as purchaseComm,
                     
+                    -- ดักจับทุกยอดเงินเข้าที่มี "ชื่อลูกทีม" อยู่ในประวัติ (ค่าคอมถูกรางวัล)
                     ISNULL((
                         SELECT SUM(amount) FROM Transactions 
                         WHERE user_id = @userId 
-                          AND transaction_type = 'Commission' 
-                          AND title LIKE N'%(' + d.username + ')%'
+                          AND amount > 0 
+                          AND (title LIKE N'%' + LTRIM(RTRIM(d.username)) + '%' AND title LIKE N'%ถูกรางวัล%')
                     ), 0) as winComm
 
                 FROM Users d
                 WHERE d.referrer_username = @myUsername;
             `);
 
-        // 3. ดึงยอดรวมกระเป๋าด้านบนสุด (รวมทุกช่องทางแบบเป๊ะๆ)
+        // 3. ดึงยอดรวมกระเป๋าด้านบนสุด (รวมยอดรายได้ทั้งหมดที่ไม่ใช่การฝากเงิน)
         const incomeRes = await pool.request()
             .input('userId', sql.Int, req.params.uid)
             .query(`
@@ -3338,12 +3339,7 @@ app.get('/api/team/:uid', async (req, res) => {
                 FROM Transactions
                 WHERE user_id = @userId 
                   AND amount > 0 
-                  AND (
-                      transaction_type IN ('Commission', 'Bonus', 'Affiliate Purchase') 
-                      OR title LIKE N'%รายได้%' 
-                      OR title LIKE N'%ค่าคอม%' 
-                      OR title LIKE N'%โบนัส%'
-                  );
+                  AND transaction_type NOT IN ('Deposit', 'Reward') -- ไม่เอายอดฝาก และ ไม่เอายอดถูกหวยของตัวเอง (เอาเฉพาะค่าคอมและโบนัส)
             `);
 
         res.json({
@@ -3358,7 +3354,6 @@ app.get('/api/team/:uid', async (req, res) => {
         res.status(500).json({ success: false });
     }
 });
-
 // ==========================================
 // 🌟 API: รายงานโอนเงินรางวัลและสรุปกำไร (Prize Transfer Report)
 // ==========================================
