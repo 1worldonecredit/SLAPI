@@ -3362,7 +3362,7 @@ app.post('/api/admin/simulate-winners', async (req, res) => {
     }
 });
 // ==========================================
-// 🌟 API: ดึงข้อมูลหน้าทีม (เวอร์ชันดักจับทุกยอด ป้องกันยอดหาย 100%)
+// 🌟 API: ดึงข้อมูลหน้าทีม (คำนวณสดจาก % ใน Commission_Settings)
 // ==========================================
 app.get('/api/team/:uid', async (req, res) => {
     try {
@@ -3376,11 +3376,15 @@ app.get('/api/team/:uid', async (req, res) => {
         if (userRes.recordset.length === 0) return res.json({ success: false, message: 'User not found' });
         const myUsername = userRes.recordset[0].username;
 
-        // 2. ดึงข้อมูลลูกทีม และหาค่าคอมรายบุคคล (จับชื่อลูกทีมจาก Title แบบยืดหยุ่น)
+        // 2. ดึงข้อมูลลูกทีม และคำนวณสดจาก % ในตาราง Commission_Settings
         const teamRes = await pool.request()
             .input('myUsername', sql.NVarChar, myUsername)
-            .input('userId', sql.Int, req.params.uid)
             .query(`
+                -- ดึงตัวเลข % จาก Database แบบ Real-time
+                DECLARE @PurchPercent DECIMAL(18,2) = (SELECT TOP 1 ISNULL(purchase_percent, 2.00) FROM Commission_Settings);
+                DECLARE @WinPercent DECIMAL(18,2) = (SELECT TOP 1 ISNULL(win_percent, 2.00) FROM Commission_Settings);
+                DECLARE @BonusPercent DECIMAL(18,2) = (SELECT TOP 1 ISNULL(daily_bonus_percent, 1.00) FROM Commission_Settings);
+
                 SELECT 
                     d.user_id as id,
                     d.username as name,
@@ -3388,37 +3392,37 @@ app.get('/api/team/:uid', async (req, res) => {
                     d.is_active as isActive,
                     FORMAT(d.created_at, 'dd/MM/yyyy') as joinDate,
                     
-                    -- ดักจับทุกยอดเงินเข้าที่มี "ชื่อลูกทีม" อยู่ในประวัติ (ค่าคอมซื้อ)
-                    ISNULL((
-                        SELECT SUM(amount) FROM Transactions 
-                        WHERE user_id = @userId 
-                          AND amount > 0 
-                          AND (title LIKE N'%' + LTRIM(RTRIM(d.username)) + '%' AND title LIKE N'%ซื้อ%')
-                    ), 0) as purchaseComm,
+                    -- ส่วนที่ 1: ค่าคอมจากการซื้อของลูกทีม (คำนวณจากยอดซื้อ x 2%)
+                    CAST(ISNULL((SELECT SUM(total_amount) FROM Lottery_Orders WHERE user_id = d.user_id), 0) * (@PurchPercent / 100.0) AS DECIMAL(18,2)) as purchaseComm,
                     
-                    -- ดักจับทุกยอดเงินเข้าที่มี "ชื่อลูกทีม" อยู่ในประวัติ (ค่าคอมถูกรางวัล)
-                    ISNULL((
-                        SELECT SUM(amount) FROM Transactions 
-                        WHERE user_id = @userId 
-                          AND amount > 0 
-                          AND (title LIKE N'%' + LTRIM(RTRIM(d.username)) + '%' AND title LIKE N'%ถูกรางวัล%')
-                    ), 0) as winComm
+                    -- ส่วนที่ 2: ค่าคอมจากการถูกรางวัลของลูกทีม (คำนวณจากยอดถูกหวย x 2%)
+                    CAST(ISNULL((
+                        SELECT SUM(i.prize_amount) 
+                        FROM Lottery_Order_Items i 
+                        JOIN Lottery_Orders o ON i.order_id = o.order_id 
+                        WHERE o.user_id = d.user_id AND i.status = N'ถูกรางวัล'
+                    ), 0) * (@WinPercent / 100.0) AS DECIMAL(18,2)) as winComm,
+                    
+                    -- ส่วนที่ 3: โบนัส 1% จากค่าคอมที่ลูกทีมทำได้ (คำนวณจาก ค่าคอมทั้งหมดของลูกทีม x 1%)
+                    CAST(
+                        (ISNULL(d.total_purchase_comm, 0) + ISNULL(d.total_win_comm, 0)) * (@BonusPercent / 100.0) 
+                    AS DECIMAL(18,2)) as teamBonusComm
 
                 FROM Users d
                 WHERE d.referrer_username = @myUsername;
             `);
 
-        // 3. ดึงยอดรวมกระเป๋าด้านบนสุด (รวมยอดรายได้ทั้งหมดที่ไม่ใช่การฝากเงิน)
+        // 3. ดึงยอดรวมกระเป๋าด้านบนสุด (ดึงจาก Transactions ที่เงินเข้าทั้งหมด)
         const incomeRes = await pool.request()
             .input('userId', sql.Int, req.params.uid)
             .query(`
                 SELECT 
-                    ISNULL(SUM(amount), 0) as totalIncome,
-                    ISNULL(SUM(CASE WHEN MONTH(created_at) = MONTH(GETDATE()) AND YEAR(created_at) = YEAR(GETDATE()) THEN amount ELSE 0 END), 0) as incomeThisMonth
+                    ISNULL(SUM(CAST(amount AS DECIMAL(18,2))), 0) as totalIncome,
+                    ISNULL(SUM(CASE WHEN MONTH(created_at) = MONTH(GETDATE()) AND YEAR(created_at) = YEAR(GETDATE()) THEN CAST(amount AS DECIMAL(18,2)) ELSE 0 END), 0) as incomeThisMonth
                 FROM Transactions
                 WHERE user_id = @userId 
-                  AND amount > 0 
-                  AND transaction_type NOT IN ('Deposit', 'Reward') -- ไม่เอายอดฝาก และ ไม่เอายอดถูกหวยของตัวเอง (เอาเฉพาะค่าคอมและโบนัส)
+                  AND CAST(amount AS DECIMAL(18,2)) > 0 
+                  AND transaction_type NOT IN ('Deposit', 'Reward', 'Withdraw')
             `);
 
         res.json({
@@ -3433,6 +3437,8 @@ app.get('/api/team/:uid', async (req, res) => {
         res.status(500).json({ success: false });
     }
 });
+
+
 // ==========================================
 // 🌟 API: รายงานโอนเงินรางวัลและสรุปกำไร (Prize Transfer Report)
 // ==========================================
