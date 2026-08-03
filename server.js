@@ -3677,6 +3677,57 @@ app.delete('/api/hrm/:type/:code', async (req, res) => {
     }
 });
 
+// ==========================================
+// 🧑‍💼 API: สำหรับลูกค้ายื่นใบสมัครงาน (Job Application)
+// ==========================================
+app.post('/api/hrm/apply-job', async (req, res) => {
+    const { username, firstname, lastname, branch_code, position_code, employment_type } = req.body;
+    
+    if(!username || !firstname || !branch_code || !position_code) {
+        return res.status(400).json({ success: false, message: 'กรุณากรอกข้อมูลที่จำเป็นให้ครบถ้วน' });
+    }
+
+    try {
+        const pool = await sql.connect(dbConfig);
+        
+        // 1. เช็คว่าลูกค้ารายนี้เคยยื่นสมัครตำแหน่งนี้ไปแล้วหรือยัง (กันส่งซ้ำ)
+        const checkExist = await pool.request()
+            .input('username', sql.VarChar, username)
+            .query(`SELECT emp_code FROM Employees WHERE username = @username AND status = 'Pending'`);
+            
+        if(checkExist.recordset.length > 0) {
+            return res.status(400).json({ success: false, message: 'คุณได้ยื่นใบสมัครไปแล้ว กรุณารอการติดต่อกลับจากทีมงานครับ' });
+        }
+
+        // 2. สร้างรหัสใบสมัครชั่วคราว (เช่น APP-20260803-0001)
+        const dateStr = new Date().toISOString().slice(0,10).replace(/-/g,'');
+        const countRes = await pool.request().query(`SELECT COUNT(emp_code) as cnt FROM Employees`);
+        const nextId = (countRes.recordset[0].cnt + 1).toString().padStart(4, '0');
+        const emp_code = `APP-${dateStr}-${nextId}`;
+
+        // 3. บันทึกลงตาราง Employees โดยให้สถานะเป็น 'Pending' (รออนุมัติ)
+        await pool.request()
+            .input('emp_code', sql.VarChar, emp_code)
+            .input('username', sql.VarChar, username)
+            .input('firstname', sql.NVarChar, firstname)
+            .input('lastname', sql.NVarChar, lastname || '')
+            .input('branch', sql.VarChar, branch_code)
+            .input('position', sql.VarChar, position_code)
+            .input('emp_type', sql.VarChar, employment_type)
+            // รหัสผ่านใส่ Dummy ไว้ก่อน เพราะเวลา Login จริง เราเช็คจากตาราง Users ตามที่คุณพี่บอกครับ
+            .query(`
+                INSERT INTO Employees (emp_code, username, password_hash, firstname, lastname, branch_code, position_code, employment_type, status, created_at)
+                VALUES (@emp_code, @username, 'USE_MAIN_LOGIN', @firstname, @lastname, @branch, @position, @emp_type, 'Pending', GETDATE())
+            `);
+            
+        res.json({ success: true, message: 'ส่งใบสมัครเรียบร้อยแล้ว! ทีมงานจะติดต่อกลับไปทางช่องทางติดต่อของคุณครับ' });
+    } catch (err) {
+        console.error("Apply Job Error:", err);
+        res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการส่งใบสมัคร' });
+    }
+});
+
+
 app.listen(port, () => {
     console.log(`🚀 Server เปิดทำงานแล้วที่พอร์ต ${port}`);
 });
