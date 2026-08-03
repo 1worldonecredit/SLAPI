@@ -2952,26 +2952,26 @@ app.post('/api/admin/exchange-rates', async (req, res) => {
 
 
 // ==========================================
-// 🌟 API 1: วิเคราะห์ความเสี่ยง (แก้ไข SQL ให้ดึงจากบิลรอตรวจได้แม่นยำขึ้น 100%)
+// 🌟 API 3: เช็คยอดวิเคราะห์ความเสี่ยง (Analyze Draw)
 // ==========================================
 app.post('/api/admin/analyze-draw', async (req, res) => {
     const { number } = req.body; 
     try {
         const pool = await sql.connect(dbConfig);
+        
+        // ดึงเรทแลกเปลี่ยนสดๆ ทุกครั้งที่กดปุ่ม
         const rateRes = await pool.request().query("SELECT rate FROM ExchangeRates WHERE currency_pair = 'THB_LAK'");
-        const exchangeRate = rateRes.recordset.length > 0 ? rateRes.recordset[0].rate : 620.0;
+        const exchangeRate = rateRes.recordset.length > 0 ? rateRes.recordset[0].rate : 500.0;
 
         const num6 = number;
         const num4 = number.slice(-4);
         const num3 = number.slice(-3);
         const num2 = number.slice(-2);
 
-        // ดึงยอดขายรวม (อิงเฉพาะบิลที่สถานะ 'รอผลตรวจ')
         const salesRes = await pool.request()
             .query(`SELECT ISNULL(SUM(CASE WHEN currency_code = 'LAK' THEN total_amount / ${exchangeRate} ELSE total_amount END), 0) as totalSalesTHB FROM Lottery_Orders WHERE status = N'รอผลตรวจ'`);
         const totalSales = salesRes.recordset[0].totalSalesTHB;
 
-        // จำลองจ่ายเงิน
         const analysisRes = await pool.request()
             .input('n6', sql.VarChar, num6).input('n4', sql.VarChar, num4)
             .input('n3', sql.VarChar, num3).input('n2', sql.VarChar, num2)
@@ -3070,50 +3070,53 @@ app.post('/api/admin/suggest-draw', async (req, res) => {
 // ==========================================
 // 🌟 API 3: ค้นหาคนซื้อจากเลข (อิงจากเวลา เปิด-ปิด บิลเป๊ะๆ)
 // ==========================================
+// ==========================================
+// 🌟 API 2: ค้นหาคนซื้อจากเลข (ด้านล่างสุด)
+// ==========================================
 app.post('/api/admin/search-buyers', async (req, res) => {
     const { number } = req.body;
     try {
         const pool = await sql.connect(dbConfig);
         
-        // ใช้ SQL คัดกรองเวลาเปิด-ปิด (รองรับกรณีตั้งค่าข้ามวัน เช่น เปิด 18:00 ปิด 17:00 วันถัดไป)
+        // ดึงเรทแลกเปลี่ยนปัจจุบัน
+        const rateRes = await pool.request().query("SELECT rate FROM ExchangeRates WHERE currency_pair = 'THB_LAK'");
+        const exchangeRate = rateRes.recordset.length > 0 ? rateRes.recordset[0].rate : 500.0;
+
         const result = await pool.request()
             .input('num', sql.VarChar, number)
             .query(`
                 DECLARE @OpenTime TIME = (SELECT TOP 1 open_time FROM System_Settings);
                 DECLARE @CloseTime TIME = (SELECT TOP 1 close_time FROM System_Settings);
-                DECLARE @CurrentTime DATETIME = GETDATE();
+                DECLARE @ThaiNow DATETIME = DATEADD(HOUR, 7, GETUTCDATE());
+                DECLARE @CurrentDate DATE = CAST(@ThaiNow AS DATE);
                 DECLARE @StartDateTime DATETIME;
                 DECLARE @EndDateTime DATETIME;
 
                 IF @OpenTime > @CloseTime
                 BEGIN
-                    IF CAST(@CurrentTime AS TIME) >= @OpenTime
-                    BEGIN
-                        SET @StartDateTime = CAST(CAST(@CurrentTime AS DATE) AS DATETIME) + CAST(@OpenTime AS DATETIME);
-                        SET @EndDateTime = DATEADD(DAY, 1, CAST(CAST(@CurrentTime AS DATE) AS DATETIME)) + CAST(@CloseTime AS DATETIME);
-                    END
-                    ELSE
-                    BEGIN
-                        SET @StartDateTime = DATEADD(DAY, -1, CAST(CAST(@CurrentTime AS DATE) AS DATETIME)) + CAST(@OpenTime AS DATETIME);
-                        SET @EndDateTime = CAST(CAST(@CurrentTime AS DATE) AS DATETIME) + CAST(@CloseTime AS DATETIME);
-                    END
+                    SET @StartDateTime = CAST(DATEADD(DAY, -1, @CurrentDate) AS DATETIME) + CAST(@OpenTime AS DATETIME);
+                    SET @EndDateTime = CAST(@CurrentDate AS DATETIME) + CAST(@CloseTime AS DATETIME);
                 END
                 ELSE
                 BEGIN
-                    SET @StartDateTime = CAST(CAST(@CurrentTime AS DATE) AS DATETIME) + CAST(@OpenTime AS DATETIME);
-                    SET @EndDateTime = CAST(CAST(@CurrentTime AS DATE) AS DATETIME) + CAST(@CloseTime AS DATETIME);
+                    SET @StartDateTime = CAST(@CurrentDate AS DATETIME) + CAST(@OpenTime AS DATETIME);
+                    SET @EndDateTime = CAST(@CurrentDate AS DATETIME) + CAST(@CloseTime AS DATETIME);
                 END
 
                 SELECT 
-                    u.username, o.currency_code, i.price, CAST(i.lottery_type AS VARCHAR) as lottery_type, i.selected_number, i.created_at,
-                    (i.price * r.multiplier) as estimated_prize
+                    u.username, o.currency_code, i.price, CAST(i.lottery_type AS VARCHAR) as lottery_type, i.selected_number, o.created_at,
+                    (i.price * r.multiplier) as estimated_prize,
+                    CASE 
+                        WHEN o.currency_code = 'LAK' THEN (i.price * r.multiplier) / ${exchangeRate} 
+                        ELSE (i.price * r.multiplier) 
+                    END as estimated_prize_thb
                 FROM Lottery_Order_Items i
                 JOIN Lottery_Orders o ON i.order_id = o.order_id
                 JOIN Users u ON o.user_id = u.user_id
                 LEFT JOIN Lottery_Prize_Rates r ON CAST(i.lottery_type AS INT) = CAST(r.lottery_type AS INT)
                 WHERE i.selected_number = @num
-                  AND i.created_at >= @StartDateTime 
-                  AND i.created_at <= @EndDateTime
+                  AND o.created_at >= @StartDateTime 
+                  AND o.created_at <= @EndDateTime
                 ORDER BY i.price DESC
             `);
         res.json({ success: true, buyers: result.recordset });
@@ -3249,32 +3252,41 @@ app.post('/api/admin/execute-draw', async (req, res) => {
         res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการจ่ายเงิน' }); 
     }
 });
-
 // ==========================================
-// 🌟 API: ดึงรายชื่อคนแทงเลขนั้นๆ (เพื่อความโปร่งใส)
+// 🌟 API 1: จำลองคนถูกรางวัล (แสดงใน Modal)
 // ==========================================
 app.post('/api/admin/simulate-winners', async (req, res) => {
     const { number, lottery_type } = req.body;
     try {
         const pool = await sql.connect(dbConfig);
+        
+        // ดึงเรทแลกเปลี่ยนปัจจุบัน
+        const rateRes = await pool.request().query("SELECT rate FROM ExchangeRates WHERE currency_pair = 'THB_LAK'");
+        const exchangeRate = rateRes.recordset.length > 0 ? rateRes.recordset[0].rate : 500.0;
+
         const result = await pool.request()
             .input('num', sql.VarChar, number)
             .input('type', sql.VarChar, lottery_type)
             .query(`
                 SELECT 
-                    u.username, o.currency_code, i.price, 
-                    (i.price * r.multiplier) as estimated_prize
+                    u.username, o.currency_code, i.price, CAST(i.lottery_type AS VARCHAR) as lottery_type, i.selected_number,
+                    (i.price * r.multiplier) as estimated_prize,
+                    CASE 
+                        WHEN o.currency_code = 'LAK' THEN (i.price * r.multiplier) / ${exchangeRate} 
+                        ELSE (i.price * r.multiplier) 
+                    END as estimated_prize_thb
                 FROM Lottery_Order_Items i
                 JOIN Lottery_Orders o ON i.order_id = o.order_id
                 JOIN Users u ON o.user_id = u.user_id
                 LEFT JOIN Lottery_Prize_Rates r ON CAST(i.lottery_type AS INT) = CAST(r.lottery_type AS INT)
                 WHERE o.status = N'รอผลตรวจ' AND i.status = N'รอผลตรวจ'
                   AND i.lottery_type = @type AND i.selected_number = @num
-                ORDER BY i.price DESC
             `);
-        
         res.json({ success: true, users: result.recordset });
-    } catch (err) { res.status(500).json({ success: false }); }
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ success: false });
+    }
 });
 
 // ==========================================
