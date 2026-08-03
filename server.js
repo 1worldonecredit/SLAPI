@@ -3302,7 +3302,6 @@ app.get('/api/team/:uid', async (req, res) => {
         const teamRes = await pool.request()
             .input('myUsername', sql.NVarChar, myUsername)
             .query(`
-                -- ดึงเรทเปอร์เซ็นต์แบบป้องกันค่าว่าง
                 DECLARE @PurchPercent DECIMAL(18,2) = (SELECT TOP 1 ISNULL(purchase_percent, 0) FROM Commission_Settings);
                 DECLARE @WinPercent DECIMAL(18,2) = (SELECT TOP 1 ISNULL(win_percent, 0) FROM Commission_Settings);
 
@@ -3313,10 +3312,10 @@ app.get('/api/team/:uid', async (req, res) => {
                     d.is_active as isActive,
                     FORMAT(d.created_at, 'dd/MM/yyyy') as joinDate,
                     
-                    -- คำนวณค่าคอมจากการซื้อของลูกทีม
+                    -- คำนวณค่าคอมจากการซื้อของลูกทีม (ดึงจากยอดบิลทั้งหมดของคนๆ นี้)
                     CAST(ISNULL((SELECT SUM(total_amount) FROM Lottery_Orders WHERE user_id = d.user_id), 0) * (@PurchPercent / 100.0) AS DECIMAL(18,2)) as purchaseComm,
                     
-                    -- คำนวณค่าคอมจากการถูกรางวัลของลูกทีม
+                    -- คำนวณค่าคอมจากการถูกรางวัลของลูกทีม (ดึงจากยอดถูกรางวัลทั้งหมดของคนๆ นี้)
                     CAST(ISNULL((
                         SELECT SUM(i.prize_amount) 
                         FROM Lottery_Order_Items i 
@@ -3328,7 +3327,8 @@ app.get('/api/team/:uid', async (req, res) => {
                 WHERE d.referrer_username = @myUsername;
             `);
 
-        // 3. ดึงรายได้รวมของตัวเอง (เพิ่ม Affiliate Purchase ให้แล้วครับ 🌟)
+        // 3. 🌟 อัปเกรด: ดึงรายได้รวมของตัวเองแบบ "ดักจับคำสำคัญ (Keyword)"
+        // จับคำว่า "รายได้", "ค่าคอม", "โบนัส" เพื่อให้มั่นใจว่าดึงยอดมาครบแน่นอน 100%
         const incomeRes = await pool.request()
             .input('userId', sql.Int, req.params.uid)
             .query(`
@@ -3337,8 +3337,13 @@ app.get('/api/team/:uid', async (req, res) => {
                     ISNULL(SUM(CASE WHEN MONTH(created_at) = MONTH(GETDATE()) AND YEAR(created_at) = YEAR(GETDATE()) THEN amount ELSE 0 END), 0) as incomeThisMonth
                 FROM Transactions
                 WHERE user_id = @userId 
-                  AND transaction_type IN ('Commission', 'Bonus', 'Affiliate Purchase') 
-                  AND status = 'Completed';
+                  AND amount > 0 
+                  AND (
+                      transaction_type IN ('Commission', 'Bonus', 'Affiliate Purchase') 
+                      OR title LIKE N'%รายได้%' 
+                      OR title LIKE N'%ค่าคอม%' 
+                      OR title LIKE N'%โบนัส%'
+                  );
             `);
 
         res.json({
