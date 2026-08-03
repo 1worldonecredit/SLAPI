@@ -3124,9 +3124,9 @@ app.post('/api/admin/search-buyers', async (req, res) => {
 });
 
 
-// ==========================================
+/// ==========================================
 // 🌟 API: ยืนยันผลรางวัลด้วยมือ (Manual Execute Draw)
-// กดปุ่มเดียวตรวจบิล เปลี่ยนสถานะ และโอนเงินเข้า Wallet ทันที!
+// กดปุ่มเดียวตรวจบิล เปลี่ยนสถานะ โอนเงินรางวัลให้ผู้ชนะ และ จ่ายค่าคอมให้ผู้แนะนำ ทันที!
 // ==========================================
 app.post('/api/admin/execute-draw', async (req, res) => {
     const { number6 } = req.body;
@@ -3156,9 +3156,9 @@ app.post('/api/admin/execute-draw', async (req, res) => {
                     WHERE draw_date = @dDate;
             `);
 
-        // 2. ตรวจบิล, อัปเดตยอดเงิน, จ่ายเข้า Wallets, บันทึกประวัติ
+        // 2. ตรวจบิล, อัปเดตยอดเงิน, จ่ายเข้า Wallets, จ่ายค่าคอมผู้แนะนำ, บันทึกประวัติ
         await pool.request().query(`
-            -- อัปเดตสถานะบิลและคำนวณเงินรางวัลที่จะได้
+            -- 2.1 อัปเดตสถานะบิลและคำนวณเงินรางวัลที่จะได้
             UPDATE i SET 
                 status = CASE 
                     WHEN (i.lottery_type = '2' AND i.selected_number = '${num2}') OR
@@ -3180,7 +3180,7 @@ app.post('/api/admin/execute-draw', async (req, res) => {
             JOIN Lottery_Orders o ON i.order_id = o.order_id
             WHERE o.status = N'รอผลตรวจ' AND i.status = N'รอผลตรวจ';
 
-            -- โอนเงินรางวัลเข้า Wallet ของผู้ชนะ
+            -- 2.2 โอนเงินรางวัลเข้า Wallet ของผู้ชนะ
             UPDATE Wallets 
             SET balance = ISNULL(balance, 0) + (
                 SELECT ISNULL(SUM(prize_amount), 0) 
@@ -3194,7 +3194,7 @@ app.post('/api/admin/execute-draw', async (req, res) => {
                 WHERE i.status = N'ถูกรางวัล' AND o.status = N'รอผลตรวจ'
             );
 
-            -- บันทึกประวัติการรับเงินลงในตาราง Transactions (Statement)
+            -- 2.3 บันทึกประวัติการรับเงินลงในตาราง Transactions (Statement ของผู้ชนะ)
             INSERT INTO Transactions (user_id, transaction_type, title, amount, status, created_at)
             SELECT DISTINCT o.user_id, 'Reward', N'เงินรางวัลหวย', 
                    SUM(i.prize_amount) OVER(PARTITION BY o.user_id), 
@@ -3203,11 +3203,47 @@ app.post('/api/admin/execute-draw', async (req, res) => {
             JOIN Lottery_Orders o ON i.order_id = o.order_id 
             WHERE i.status = N'ถูกรางวัล' AND o.status = N'รอผลตรวจ';
 
-            -- เปลี่ยนสถานะบิลใหญ่เป็น "ตรวจผลแล้ว" ปิดยอดงวดนี้
+            -- ==========================================
+            -- 🌟 2.4 ระบบแจกค่าคอมมิชชั่นจากการ "ลูกทีมถูกรางวัล" (ให้ผู้แนะนำ)
+            -- ==========================================
+            DECLARE @WinPercent DECIMAL(18,2) = (SELECT TOP 1 win_percent FROM Commission_Settings);
+
+            -- เติมเงินค่าคอมเข้า Wallet ของผู้แนะนำทันที
+            UPDATE w
+            SET w.balance = ISNULL(w.balance, 0) + t.comm_amount
+            FROM Wallets w
+            JOIN (
+                SELECT 
+                    u.user_id as referrer_id, 
+                    SUM(i.prize_amount) * (@WinPercent / 100.0) as comm_amount
+                FROM Lottery_Order_Items i 
+                JOIN Lottery_Orders o ON i.order_id = o.order_id 
+                JOIN Users d ON o.user_id = d.user_id
+                JOIN Users u ON d.referrer_username = u.username
+                WHERE i.status = N'ถูกรางวัล' AND o.status = N'รอผลตรวจ'
+                GROUP BY u.user_id
+                HAVING SUM(i.prize_amount) > 0
+            ) t ON w.user_id = t.referrer_id;
+
+            -- บันทึกประวัติ (Transaction) ให้ผู้แนะนำ ว่าได้รับเงินก้อนนี้มาจากค่าคอมลูกทีมถูกหวย
+            INSERT INTO Transactions (user_id, transaction_type, title, amount, status, created_at)
+            SELECT 
+                u.user_id, 'Commission', N'ค่าคอมฯ ลูกทีมถูกรางวัล', 
+                SUM(i.prize_amount) * (@WinPercent / 100.0), 'Completed', GETDATE()
+            FROM Lottery_Order_Items i 
+            JOIN Lottery_Orders o ON i.order_id = o.order_id 
+            JOIN Users d ON o.user_id = d.user_id
+            JOIN Users u ON d.referrer_username = u.username
+            WHERE i.status = N'ถูกรางวัล' AND o.status = N'รอผลตรวจ'
+            GROUP BY u.user_id
+            HAVING SUM(i.prize_amount) > 0;
+            -- ==========================================
+
+            -- 2.5 เปลี่ยนสถานะบิลใหญ่เป็น "ตรวจผลแล้ว" ปิดยอดงวดนี้
             UPDATE Lottery_Orders SET status = N'ตรวจผลแล้ว' WHERE status = N'รอผลตรวจ';
         `);
 
-        res.json({ success: true, message: `✅ ออกรางวัลด้วยเลข ${num6} สำเร็จ และ โอนเงินเข้า Wallet ของผู้ชนะเรียบร้อยแล้ว!` });
+        res.json({ success: true, message: `✅ ออกรางวัลด้วยเลข ${num6} สำเร็จ! \n💰 จ่ายเงินให้ผู้ชนะ และผู้แนะนำเรียบร้อยแล้ว!` });
     } catch (err) { 
         console.error(err);
         res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการจ่ายเงิน' }); 
