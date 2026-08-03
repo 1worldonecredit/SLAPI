@@ -6,7 +6,30 @@ const cron = require('node-cron');
 
 const app = express();
 const port = process.env.PORT || 5000;
-
+// ==========================================
+// 🛡️ Middleware: สกัดกั้น IP ที่ถูกบล็อกไม่ให้ใช้ API ได้
+// ==========================================
+app.use(async (req, res, next) => {
+    // ดึง IP ของคนที่เรียก API
+    const clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
+    
+    try {
+        const pool = await sql.connect(dbConfig);
+        const blockCheck = await pool.request()
+            .input('ip', sql.VarChar, clientIp)
+            .query(`SELECT is_blocked FROM Blocked_IPs WHERE ip_address = @ip AND is_blocked = 1`);
+            
+        if (blockCheck.recordset.length > 0) {
+            return res.status(403).json({ 
+                success: false, 
+                message: 'Access Denied: Your IP address has been blocked due to suspicious activity.' 
+            });
+        }
+        next(); // ถ้าไม่ถูกบล็อก ให้ทำงาน API ถัดไปได้ปกติ
+    } catch (err) {
+        next();
+    }
+});
 // อนุญาตให้หน้าเว็บจากโดเมนของคุณเรียกใช้ API ได้
 // กำหนด URL ที่อนุญาตให้เข้าถึง API ได้ (ลบช่องว่างส่วนเกินออก และปรับเป็นตัวเล็กเพื่อความชัวร์)
 const allowedOrigins = [
@@ -553,19 +576,60 @@ app.post('/api/deposit', async (req, res) => {
     res.status(500).json({ success: false, message: 'ทำรายการไม่สำเร็จ' });
   }
 });
-
 // ==========================================
-// 1. API สำหรับ Login (อัปเดตดึงข้อมูลครบถ้วน)
+// 1. API สำหรับ Login (อัปเดตดึงข้อมูลครบถ้วน + 🛡️ ระบบเฝ้าระวัง IP)
 // ==========================================
 app.post('/api/login', async (req, res) => {
-  // รับข้อมูล username และ password ที่ Frontend ส่งมา
   const { username, password } = req.body;
+  
+  // 🛡️ [เพิ่มใหม่ระบบ IP]: ดึง IP Address ของคนที่พยายาม Login
+  let clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'Unknown';
+  if (clientIp.includes(',')) clientIp = clientIp.split(',')[0].trim(); // ป้องกันกรณีดึงได้หลาย IP ซ้อนกัน
 
   try {
-    // เชื่อมต่อฐานข้อมูล
     const pool = await sql.connect(dbConfig);
     
-    // 🌟 ดึงข้อมูล User พร้อมกับ Role, Level, ชื่อ-นามสกุล, ประเทศ และ สกุลเงิน
+    // 🛡️ [เพิ่มใหม่ระบบ IP]: 1. เช็คก่อนเลยว่า IP นี้ติดแบล็คลิสต์ (บล็อก) อยู่หรือไม่
+    const blockCheck = await pool.request()
+        .input('ip', sql.VarChar, clientIp)
+        .query(`SELECT is_blocked FROM Blocked_IPs WHERE ip_address = @ip AND is_blocked = 1`);
+        
+    if (blockCheck.recordset.length > 0) {
+        return res.status(403).json({ success: false, message: 'IP ของคุณถูกบล็อก เนื่องจากพยายามเข้าระบบผิดพลาดหลายครั้ง' });
+    }
+
+    // 🛡️ [เพิ่มใหม่ระบบ IP]: ฟังก์ชันย่อยสำหรับนับจำนวนครั้งที่เข้าสู่ระบบผิดพลาด
+    const handleFailedLogin = async () => {
+        // บันทึกประวัติว่า IP นี้ใส่รหัสผิด
+        await pool.request()
+            .input('ip', sql.VarChar, clientIp)
+            .query(`INSERT INTO Login_Failed_Attempts (ip_address) VALUES (@ip)`);
+
+        // นับดูว่าใน 1 นาทีที่ผ่านมา IP นี้ผิดไปกี่ครั้งแล้ว
+        const failCheck = await pool.request()
+            .input('ip', sql.VarChar, clientIp)
+            .query(`
+                SELECT COUNT(id) as fail_count 
+                FROM Login_Failed_Attempts 
+                WHERE ip_address = @ip AND attempt_time >= DATEADD(MINUTE, -1, GETDATE())
+            `);
+
+        // ถ้าผิดตั้งแต่ 10 ครั้งขึ้นไป ให้จับบล็อกทันที
+        if (failCheck.recordset[0].fail_count >= 10) {
+            await pool.request()
+                .input('ip', sql.VarChar, clientIp)
+                .query(`
+                    IF NOT EXISTS (SELECT 1 FROM Blocked_IPs WHERE ip_address = @ip)
+                        INSERT INTO Blocked_IPs (ip_address, reason, is_blocked) VALUES (@ip, 'Brute Force Login Attempt (>10 fails/min)', 1);
+                    ELSE
+                        UPDATE Blocked_IPs SET is_blocked = 1, reason = 'Brute Force Login Attempt (>10 fails/min)', updated_at = GETDATE() WHERE ip_address = @ip;
+                `);
+            return true; // แจ้งว่าโดนบล็อกแล้ว
+        }
+        return false; // ยังไม่โดนบล็อก
+    };
+    
+    // 🌟 ดึงข้อมูล User พร้อมกับ Role, Level, ชื่อ-นามสกุล, ประเทศ และ สกุลเงิน (โค้ดเดิม)
     const userResult = await pool.request()
       .input('username', sql.VarChar, username)
       .query(`
@@ -584,6 +648,11 @@ app.post('/api/login', async (req, res) => {
 
     // ถ้าไม่เจอ Username ในระบบ
     if (userResult.recordset.length === 0) {
+      // 🛡️ [เพิ่มใหม่ระบบ IP]: บันทึกว่าใส่ข้อมูลผิด
+      const isBlockedNow = await handleFailedLogin();
+      if (isBlockedNow) {
+          return res.status(403).json({ message: 'IP ของคุณถูกบล็อก เนื่องจากพยายามเข้าระบบผิดพลาดหลายครั้ง' });
+      }
       return res.status(401).json({ message: 'ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง' });
     }
 
@@ -605,25 +674,35 @@ app.post('/api/login', async (req, res) => {
     
     // ถ้ารหัสผ่านไม่ตรง
     if (!validPassword) {
+      // 🛡️ [เพิ่มใหม่ระบบ IP]: บันทึกว่าใส่ข้อมูลผิด
+      const isBlockedNow = await handleFailedLogin();
+      if (isBlockedNow) {
+          return res.status(403).json({ message: 'IP ของคุณถูกบล็อก เนื่องจากพยายามเข้าระบบผิดพลาดหลายครั้ง' });
+      }
       return res.status(401).json({ message: 'ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง' });
     }
 
-    // 🌟 ส่งข้อมูลกลับไปให้ Frontend แบบจัดเต็ม (ชื่อ key ต้องตรงกับที่ Dashboard ใช้)
+    // 🛡️ [เพิ่มใหม่ระบบ IP]: 🌟 ล้างประวัติการใส่รหัสผิดทั้งหมด ถ้า Login สำเร็จ
+    await pool.request()
+        .input('ip', sql.VarChar, clientIp)
+        .query(`DELETE FROM Login_Failed_Attempts WHERE ip_address = @ip`);
+
+    // 🌟 ส่งข้อมูลกลับไปให้ Frontend แบบจัดเต็ม (โค้ดเดิม ไม่มีการเปลี่ยนแปลงข้อมูลส่วนนี้)
     res.json({
-      success: true, // 🌟 เพิ่ม success: true เผื่อให้ Frontend เช็กง่ายขึ้น
+      success: true, 
       message: 'เข้าสู่ระบบสำเร็จ',
       user: {
-        id: user.user_id, // Frontend บางจุดใช้ id
-        user_id: user.user_id, // Frontend บางจุดใช้ user_id
+        id: user.user_id, 
+        user_id: user.user_id, 
         username: user.username,
         firstname: user.firstname || 'ผู้ใช้',
         lastname: user.lastname || '',
-        country: user.country || 'Thailand',           // 🌟 ส่งประเทศกลับไป
-        currency_code: user.currency_code || 'THB',    // 🌟 ส่งสกุลเงินกลับไป
+        country: user.country || 'Thailand',          
+        currency_code: user.currency_code || 'THB',    
         role_id: user.role_id,
-        role_name: user.role_name || 'User',           // 🌟 ส่ง Role กลับไป
+        role_name: user.role_name || 'User',          
         level_id: user.level_id,
-        level_name: user.level_name || 'ลูกค้าใหม่',       // 🌟 ส่ง Level กลับไป
+        level_name: user.level_name || 'ลูกค้าใหม่',      
         wallet: user.wallet_balance || 0.00,
         point: 0 
       }
