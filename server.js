@@ -1282,6 +1282,9 @@ app.put('/api/admin/animal-numbers/:id', async (req, res) => {
         res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการ UPDATE Database', error: error.message });
     }
 });
+// ==========================================
+// 🌟 API: สำหรับการซื้อหวย (และตัดเงิน/คำนวณวันอัตโนมัติ)
+// ==========================================
 app.post('/api/lottery/buy', async (req, res) => {
     const { user_id, cart, total_price, currency } = req.body;
     const pool = await sql.connect(dbConfig);
@@ -1289,11 +1292,11 @@ app.post('/api/lottery/buy', async (req, res) => {
     // ==========================================
     // 🌟 0. แทรกระบบเช็คสถานะการขาย (ทำก่อนเริ่ม Transaction เพื่อความปลอดภัย)
     // ==========================================
-    const statusRes = await pool.request().query("SELECT is_sales_open, close_time FROM System_Settings WHERE id = 1");
+    const statusRes = await pool.request().query("SELECT is_sales_open FROM System_Settings WHERE id = 1");
     if (!statusRes.recordset[0].is_sales_open) {
         return res.status(400).json({ success: false, message: 'ระบบปิดรับซื้อแล้วในขณะนี้ กรุณารอรอบถัดไป' });
     }
-    const closeTimeStr = statusRes.recordset[0].close_time; // ดึงเวลาปิดเก็บไว้คำนวณบิล
+    // ไม่ต้องดึง close_time ออกมาแล้วครับ เดี๋ยวให้ SQL จัดการเองด้านล่าง
     // ==========================================
 
     const transaction = new sql.Transaction(pool);
@@ -1343,18 +1346,23 @@ app.post('/api/lottery/buy', async (req, res) => {
 
         // ==========================================
         // 🌟 แทรกระบบคำนวณ งวดวันที่ (draw_date) เข้าไปในบิล Lottery_Orders
+        // 🌟 [แก้ปัญหา Invalid String]: ให้ SQL ดึง CloseTime มาคำนวณเองเลย ไม่ต้องส่งเข้าไป!
         // ==========================================
         const orderRes = await request
             .input('currency', sql.VarChar, currency)
             .input('totalPrice', sql.Decimal(18,2), deductAmount)
-            .input('closeTime', sql.VarChar, closeTimeStr) // โยนเวลาปิดรับซื้อเข้าไปใน SQL
             .query(`
                 DECLARE @TargetDrawDate DATE;
+                
+                -- ดึงเวลาเซิร์ฟเวอร์แบบเป๊ะๆ มาคำนวณ
                 DECLARE @CurrentTime TIME = CAST(GETDATE() AS TIME);
                 DECLARE @CurrentDate DATE = CAST(GETDATE() AS DATE);
                 
+                -- ดึงเวลาปิดจาก Database โดยตรง
+                DECLARE @DB_CloseTime TIME = (SELECT TOP 1 close_time FROM System_Settings);
+                
                 -- ถ้าซื้อหลังเวลาปิดรับ ให้ถือว่าเป็นบิลของวันพรุ่งนี้
-                IF @CurrentTime >= CAST(@closeTime AS TIME)
+                IF @CurrentTime >= @DB_CloseTime
                     SET @TargetDrawDate = DATEADD(day, 1, @CurrentDate);
                 ELSE
                     SET @TargetDrawDate = @CurrentDate;
