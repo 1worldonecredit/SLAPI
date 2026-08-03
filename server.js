@@ -3728,6 +3728,48 @@ app.post('/api/hrm/apply-job', async (req, res) => {
 });
 
 
+// ==========================================
+// 📢 API: ระบบป้ายประกาศรับสมัครงาน (หน้า PreLogin)
+// ==========================================
+
+// 1. ดึงข้อมูลโฆษณา (ให้หน้า PreLogin เรียกใช้)
+app.get('/api/hrm/job-ad', async (req, res) => {
+    try {
+        const pool = await sql.connect(dbConfig);
+        const result = await pool.request().query('SELECT * FROM Job_Ads_Settings WHERE id = 1');
+        if(result.recordset.length > 0) {
+            res.json({ success: true, ad: result.recordset[0] });
+        } else {
+            res.json({ success: false });
+        }
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ success: false });
+    }
+});
+
+// 2. อัปเดตโฆษณา (แอดมินกดบันทึกจากหลังบ้าน)
+app.post('/api/hrm/job-ad', async (req, res) => {
+    const { is_active, ad_title, ad_description, end_time } = req.body;
+    try {
+        const pool = await sql.connect(dbConfig);
+        await pool.request()
+            .input('is_active', sql.Bit, is_active ? 1 : 0)
+            .input('title', sql.NVarChar, ad_title)
+            .input('desc', sql.NVarChar, ad_description)
+            .input('end', sql.DateTime, end_time)
+            .query(`
+                UPDATE Job_Ads_Settings 
+                SET is_active = @is_active, ad_title = @title, ad_description = @desc, end_time = @end
+                WHERE id = 1
+            `);
+        res.json({ success: true });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ success: false });
+    }
+});
+
 app.listen(port, () => {
     console.log(`🚀 Server เปิดทำงานแล้วที่พอร์ต ${port}`);
 });
