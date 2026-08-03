@@ -3284,12 +3284,13 @@ app.post('/api/admin/simulate-winners', async (req, res) => {
 });
 
 // ==========================================
-// 🌟 API: ดึงข้อมูลหน้าทีม (ดึงจากตาราง Transactions โดยตรงเพื่อความแม่นยำ 100%)
+// 🌟 API: ดึงข้อมูลหน้าทีม (สรุปยอดรวม และยอดแยกรายบุคคล)
 // ==========================================
 app.get('/api/team/:uid', async (req, res) => {
     try {
         const pool = await sql.connect(dbConfig);
         
+        // 1. หา Username ตัวเอง
         const userRes = await pool.request()
             .input('userId', sql.Int, req.params.uid)
             .query('SELECT username FROM Users WHERE user_id = @userId');
@@ -3297,7 +3298,7 @@ app.get('/api/team/:uid', async (req, res) => {
         if (userRes.recordset.length === 0) return res.json({ success: false, message: 'User not found' });
         const myUsername = userRes.recordset[0].username;
 
-        // 🌟 ดึงข้อมูลจาก Transactions โดยตรง โดยหาชื่อลูกทีมจากในวงเล็บ '(Username)'
+        // 2. ดึงข้อมูลลูกทีม และหาค่าคอมรายบุคคล (อิงจากชื่อในวงเล็บ)
         const teamRes = await pool.request()
             .input('myUsername', sql.NVarChar, myUsername)
             .input('userId', sql.Int, req.params.uid)
@@ -3309,7 +3310,6 @@ app.get('/api/team/:uid', async (req, res) => {
                     d.is_active as isActive,
                     FORMAT(d.created_at, 'dd/MM/yyyy') as joinDate,
                     
-                    -- ดึงค่าคอมจากการซื้อ (หาชื่อในวงเล็บ)
                     ISNULL((
                         SELECT SUM(amount) FROM Transactions 
                         WHERE user_id = @userId 
@@ -3317,7 +3317,6 @@ app.get('/api/team/:uid', async (req, res) => {
                           AND title LIKE N'%(' + d.username + ')%'
                     ), 0) as purchaseComm,
                     
-                    -- ดึงค่าคอมถูกรางวัล (หาชื่อในวงเล็บ)
                     ISNULL((
                         SELECT SUM(amount) FROM Transactions 
                         WHERE user_id = @userId 
@@ -3329,6 +3328,7 @@ app.get('/api/team/:uid', async (req, res) => {
                 WHERE d.referrer_username = @myUsername;
             `);
 
+        // 3. ดึงยอดรวมกระเป๋าด้านบนสุด (รวมทุกช่องทางแบบเป๊ะๆ)
         const incomeRes = await pool.request()
             .input('userId', sql.Int, req.params.uid)
             .query(`
