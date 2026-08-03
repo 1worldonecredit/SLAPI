@@ -3290,7 +3290,7 @@ app.get('/api/team/:uid', async (req, res) => {
     try {
         const pool = await sql.connect(dbConfig);
         
-        // ดึง Username ของตัวเองก่อน
+        // 1. ดึง Username ของตัวเองก่อน
         const userRes = await pool.request()
             .input('userId', sql.Int, req.params.uid)
             .query('SELECT username FROM Users WHERE user_id = @userId');
@@ -3298,12 +3298,13 @@ app.get('/api/team/:uid', async (req, res) => {
         if (userRes.recordset.length === 0) return res.json({ success: false, message: 'User not found' });
         const myUsername = userRes.recordset[0].username;
 
-        // ดึงข้อมูลลูกทีม และคำนวณค่าคอมมิชชั่นแบบ Real-time ตามเรทในตาราง
+        // 2. ดึงข้อมูลลูกทีม พร้อมคำนวณค่าคอมมิชชัน
         const teamRes = await pool.request()
             .input('myUsername', sql.NVarChar, myUsername)
             .query(`
-                DECLARE @PurchPercent DECIMAL(18,2) = (SELECT TOP 1 purchase_percent FROM Commission_Settings);
-                DECLARE @WinPercent DECIMAL(18,2) = (SELECT TOP 1 win_percent FROM Commission_Settings);
+                -- ดึงเรทเปอร์เซ็นต์แบบป้องกันค่าว่าง
+                DECLARE @PurchPercent DECIMAL(18,2) = (SELECT TOP 1 ISNULL(purchase_percent, 0) FROM Commission_Settings);
+                DECLARE @WinPercent DECIMAL(18,2) = (SELECT TOP 1 ISNULL(win_percent, 0) FROM Commission_Settings);
 
                 SELECT 
                     d.user_id as id,
@@ -3312,22 +3313,22 @@ app.get('/api/team/:uid', async (req, res) => {
                     d.is_active as isActive,
                     FORMAT(d.created_at, 'dd/MM/yyyy') as joinDate,
                     
-                    -- ค่าคอมจากการซื้อของลูกทีม
-                    ISNULL((SELECT SUM(total_amount) FROM Lottery_Orders WHERE user_id = d.user_id), 0) * (@PurchPercent / 100.0) as purchaseComm,
+                    -- คำนวณค่าคอมจากการซื้อของลูกทีม
+                    CAST(ISNULL((SELECT SUM(total_amount) FROM Lottery_Orders WHERE user_id = d.user_id), 0) * (@PurchPercent / 100.0) AS DECIMAL(18,2)) as purchaseComm,
                     
-                    -- ค่าคอมจากการถูกรางวัลของลูกทีม
-                    ISNULL((
+                    -- คำนวณค่าคอมจากการถูกรางวัลของลูกทีม
+                    CAST(ISNULL((
                         SELECT SUM(i.prize_amount) 
                         FROM Lottery_Order_Items i 
                         JOIN Lottery_Orders o ON i.order_id = o.order_id 
                         WHERE o.user_id = d.user_id AND i.status = N'ถูกรางวัล'
-                    ), 0) * (@WinPercent / 100.0) as winComm
+                    ), 0) * (@WinPercent / 100.0) AS DECIMAL(18,2)) as winComm
 
                 FROM Users d
                 WHERE d.referrer_username = @myUsername;
             `);
 
-        // ดึงรายได้รวมจากค่าคอมของตัวเอง (ที่โอนเข้า Wallet แล้ว) จากตาราง Transactions
+        // 3. ดึงรายได้รวมของตัวเอง (เพิ่ม Affiliate Purchase ให้แล้วครับ 🌟)
         const incomeRes = await pool.request()
             .input('userId', sql.Int, req.params.uid)
             .query(`
@@ -3335,7 +3336,9 @@ app.get('/api/team/:uid', async (req, res) => {
                     ISNULL(SUM(amount), 0) as totalIncome,
                     ISNULL(SUM(CASE WHEN MONTH(created_at) = MONTH(GETDATE()) AND YEAR(created_at) = YEAR(GETDATE()) THEN amount ELSE 0 END), 0) as incomeThisMonth
                 FROM Transactions
-                WHERE user_id = @userId AND transaction_type IN ('Commission', 'Bonus') AND status = 'Completed';
+                WHERE user_id = @userId 
+                  AND transaction_type IN ('Commission', 'Bonus', 'Affiliate Purchase') 
+                  AND status = 'Completed';
             `);
 
         res.json({
