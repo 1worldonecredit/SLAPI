@@ -70,17 +70,19 @@ cron.schedule('* * * * *', async () => {
     try {
         const pool = await sql.connect(dbConfig);
         
-        // 1. ดึงเวลาเปิด/ปิด และ เพิ่มการดึงเวลาออกเลข (draw_time) จาก Database
+        // 1. ดึงข้อมูลจาก System_Settings
         const res = await pool.request().query(`
             SELECT 
                 CONVERT(varchar(5), close_time, 108) as close_time,
                 CONVERT(varchar(5), open_time, 108) as open_time,
-                CONVERT(varchar(5), draw_time, 108) as draw_time
+                CONVERT(varchar(5), draw_time, 108) as draw_time,
+                is_auto_draw,
+                auto_draw_percent
             FROM System_Settings WHERE id = 1
         `);
         
         if (res.recordset.length > 0) {
-            const { close_time, open_time, draw_time } = res.recordset[0];
+            const { close_time, open_time, draw_time, is_auto_draw, auto_draw_percent } = res.recordset[0];
             
             // 2. ดึงเวลาปัจจุบันของ Server (ล็อกเป็นเวลาไทย HH:mm)
             const currentTime = new Date().toLocaleTimeString('en-US', { 
@@ -103,36 +105,79 @@ cron.schedule('* * * * *', async () => {
             }
 
             // ==========================================
-            // 🌟 5. ส่วนที่วางต่อ: ถ้าถึงเวลาออกเลข ให้ออกรางวัลอัตโนมัติ!
+            // 🌟 5. ถ้าถึงเวลาออกเลข ให้ออกรางวัลอัตโนมัติ! (อัปเกรดระบบคุมกำไร)
             // ==========================================
             if (currentTime === draw_time) {
-                console.log(`🎰 [${currentTime}] กำลังสุ่มออกรางวัลและตรวจบิลอัตโนมัติ...`);
+                // เช็คก่อนว่าแอดมินติ๊กปุ่ม "เปิดระบบออโต้" ไว้หรือไม่?
+                if (!is_auto_draw) {
+                    console.log(`⏰ [${currentTime}] ถึงเวลาออกรางวัล แต่แอดมินไม่ได้เปิดระบบออโต้ไว้ (รอแอดมินกดเอง)`);
+                    return; 
+                }
+
+                console.log(`🎰 [${currentTime}] เริ่มระบบออโต้! กำลังสุ่มเลขแบบคุมกำไรเป้าหมายที่ ${auto_draw_percent}%...`);
                 
-                const num8 = Math.floor(10000000 + Math.random() * 90000000).toString();
-                const num6 = Math.floor(100000 + Math.random() * 900000).toString();
+                // หาวันที่ปัจจุบัน (ล็อกเป็นเวลาไทย)
+                const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Bangkok' });
+
+                // --- 5.1 ระบบหาเลขที่ยอดจ่ายไม่เกินเป้าหมาย (จำลองจากบิลที่รอตรวจ) ---
+                const rateRes = await pool.request().query("SELECT rate FROM ExchangeRates WHERE currency_pair = 'THB_LAK'");
+                const exchangeRate = rateRes.recordset.length > 0 ? rateRes.recordset[0].rate : 620.0;
+                
+                const salesRes = await pool.request().query(`SELECT ISNULL(SUM(CASE WHEN currency_code = 'LAK' THEN total_amount / ${exchangeRate} ELSE total_amount END), 0) as totalSalesTHB FROM Lottery_Orders WHERE status = N'รอผลตรวจ'`);
+                const maxPayoutTHB = (salesRes.recordset[0].totalSalesTHB || 0) * (auto_draw_percent / 100);
+
+                const itemsRes = await pool.request().query(`
+                    SELECT CAST(i.lottery_type AS VARCHAR) as lottery_type, i.selected_number, 
+                    CASE WHEN o.currency_code = 'LAK' THEN i.price / ${exchangeRate} ELSE i.price END as price_thb, r.multiplier
+                    FROM Lottery_Order_Items i JOIN Lottery_Orders o ON i.order_id = o.order_id
+                    LEFT JOIN Lottery_Prize_Rates r ON CAST(i.lottery_type AS INT) = CAST(r.lottery_type AS INT)
+                    WHERE o.status = N'รอผลตรวจ' AND i.status = N'รอผลตรวจ' AND i.lottery_type IN ('2','3','4','6')
+                `);
+                
+                let bestNumber6 = null, bestPayout = -1;
+                // สุ่ม 500 ครั้ง หาเลขที่ยอดจ่ายไม่เกินเป้า
+                for (let i = 0; i < 500; i++) {
+                    const random6 = Math.floor(100000 + Math.random() * 900000).toString();
+                    const n4 = random6.slice(-4), n3 = random6.slice(-3), n2 = random6.slice(-2);
+                    let currentPayout = 0;
+                    for (const item of itemsRes.recordset) {
+                        let isWin = false;
+                        if (item.lottery_type === '6' && item.selected_number === random6) isWin = true;
+                        else if (item.lottery_type === '4' && item.selected_number === n4) isWin = true;
+                        else if (item.lottery_type === '3' && item.selected_number === n3) isWin = true;
+                        else if (item.lottery_type === '2' && item.selected_number === n2) isWin = true;
+                        if (isWin) currentPayout += item.price_thb * (item.multiplier || 0);
+                    }
+                    if (currentPayout <= maxPayoutTHB && currentPayout > bestPayout) {
+                        bestPayout = currentPayout; bestNumber6 = random6;
+                    }
+                }
+                
+                // ถ้าสุ่มแล้วไม่ได้เลขตามเป้า ให้แรนด้อมเลขใหม่ทั้งหมด
+                if (!bestNumber6) bestNumber6 = Math.floor(100000 + Math.random() * 900000).toString();
+
+                const num8 = Math.floor(10000000 + Math.random() * 90000000).toString(); // เลขซูเปอร์ 8
+                const num6 = bestNumber6;
                 const num4 = num6.slice(-4);
                 const num3 = num6.slice(-3);
                 const num2 = num6.slice(-2);
-                
-                // หาวันที่ปัจจุบัน (ล็อกเป็นเวลาไทย เพื่อความแม่นยำในการเก็บงวด ค.ศ.)
-                const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Bangkok' });
-                
-                // 5.1 บันทึกผลลงตาราง Draw_Results
+
+                console.log(`🎯 สุ่มได้เลขที่ 1: ${num6} (ยอดจ่ายจำลอง: ${bestPayout.toFixed(2)} บาท)`);
+
+                // --- 5.2 บันทึกผลลงตาราง Draw_Results ---
                 await pool.request()
-                    .input('dDate', sql.Date, today)
-                    .input('p8', sql.VarChar, num8)
-                    .input('p6', sql.VarChar, num6)
-                    .input('p4', sql.VarChar, num4)
-                    .input('p3', sql.VarChar, num3)
-                    .input('p2', sql.VarChar, num2)
+                    .input('dDate', sql.Date, today).input('p8', sql.VarChar, num8)
+                    .input('p6', sql.VarChar, num6).input('p4', sql.VarChar, num4)
+                    .input('p3', sql.VarChar, num3).input('p2', sql.VarChar, num2)
                     .query(`
                         IF NOT EXISTS (SELECT 1 FROM Draw_Results WHERE draw_date = @dDate)
                             INSERT INTO Draw_Results (draw_date, prize_8, prize_6, prize_4, prize_3, prize_2) 
                             VALUES (@dDate, @p8, @p6, @p4, @p3, @p2);
                     `);
 
-                // 5.2 ตรวจบิลและจ่ายเงินอัตโนมัติ
-                await pool.request().input('dDate', sql.Date, today).query(`
+                // --- 5.3 ตรวจบิลและแจกเงินเข้า Wallet ให้ผู้ชนะอัตโนมัติ ---
+                // ใช้ตัวคูณ (Multiplier) จากตาราง Lottery_Prize_Rates เพื่อความถูกต้อง
+                await pool.request().query(`
                     UPDATE i SET 
                         status = CASE 
                             WHEN (i.lottery_type = '2' AND i.selected_number = '${num2}') OR
@@ -143,19 +188,45 @@ cron.schedule('* * * * *', async () => {
                             ELSE N'ไม่ถูกรางวัล'
                         END,
                         prize_amount = CASE
-                            WHEN i.lottery_type = '2' AND i.selected_number = '${num2}' THEN i.price * 90
-                            WHEN i.lottery_type = '3' AND i.selected_number = '${num3}' THEN i.price * 900
-                            WHEN i.lottery_type = '4' AND i.selected_number = '${num4}' THEN i.price * 7000
-                            WHEN i.lottery_type = '6' AND i.selected_number = '${num6}' THEN i.price * 400000
-                            WHEN i.lottery_type = '8' AND i.selected_number = '${num8}' THEN i.price * 1000000
+                            WHEN i.lottery_type = '2' AND i.selected_number = '${num2}' THEN i.price * (SELECT multiplier FROM Lottery_Prize_Rates WHERE lottery_type = '2')
+                            WHEN i.lottery_type = '3' AND i.selected_number = '${num3}' THEN i.price * (SELECT multiplier FROM Lottery_Prize_Rates WHERE lottery_type = '3')
+                            WHEN i.lottery_type = '4' AND i.selected_number = '${num4}' THEN i.price * (SELECT multiplier FROM Lottery_Prize_Rates WHERE lottery_type = '4')
+                            WHEN i.lottery_type = '6' AND i.selected_number = '${num6}' THEN i.price * (SELECT multiplier FROM Lottery_Prize_Rates WHERE lottery_type = '6')
+                            WHEN i.lottery_type = '8' AND i.selected_number = '${num8}' THEN i.price * (SELECT multiplier FROM Lottery_Prize_Rates WHERE lottery_type = '8')
                             ELSE 0
                         END
                     FROM Lottery_Order_Items i
                     JOIN Lottery_Orders o ON i.order_id = o.order_id
-                    WHERE o.draw_date = @dDate AND i.status = N'รอผลตรวจ';
+                    WHERE o.status = N'รอผลตรวจ' AND i.status = N'รอผลตรวจ';
+
+                    -- จ่ายเงินเข้า Wallet
+                    UPDATE Wallets 
+                    SET balance = balance + (
+                        SELECT ISNULL(SUM(prize_amount), 0) 
+                        FROM Lottery_Order_Items i 
+                        JOIN Lottery_Orders o ON i.order_id = o.order_id 
+                        WHERE o.user_id = Wallets.user_id AND i.status = N'ถูกรางวัล' AND o.status = N'รอผลตรวจ'
+                    )
+                    WHERE user_id IN (
+                        SELECT DISTINCT o.user_id FROM Lottery_Order_Items i 
+                        JOIN Lottery_Orders o ON i.order_id = o.order_id 
+                        WHERE i.status = N'ถูกรางวัล' AND o.status = N'รอผลตรวจ'
+                    );
+
+                    -- บันทึกประวัติการรับเงินรางวัลลง Transactions (หากต้องการ)
+                    INSERT INTO Transactions (user_id, transaction_type, title, amount, status, created_at)
+                    SELECT DISTINCT o.user_id, 'Reward', N'ถูกรางวัล', 
+                           SUM(i.prize_amount) OVER(PARTITION BY o.user_id), 
+                           'Completed', GETDATE()
+                    FROM Lottery_Order_Items i 
+                    JOIN Lottery_Orders o ON i.order_id = o.order_id 
+                    WHERE i.status = N'ถูกรางวัล' AND o.status = N'รอผลตรวจ';
+
+                    -- ปิดบิลที่ตรวจแล้ว
+                    UPDATE Lottery_Orders SET status = N'ตรวจผลแล้ว' WHERE status = N'รอผลตรวจ';
                 `);
                 
-                console.log(`✅ ออกรางวัลเสร็จสิ้น! (ผล 2 ตัวท้ายคือ: ${num2})`);
+                console.log(`✅ [AUTO-DRAW] ออกรางวัลและจ่ายเงินสำเร็จเรียบร้อย!`);
             }
             // ==========================================
         }
