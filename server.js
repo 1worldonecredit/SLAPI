@@ -2506,49 +2506,49 @@ app.get('/api/team/:userId', async (req, res) => {
 
 
 // ... (API อื่นๆ ของคุณที่อยู่ด้านบน) ...
-
 // ==========================================
-// 🌟 วางโค้ด Cron Job ไว้ตรงนี้เลยครับ (ก่อน app.listen)
+// 🚀 Cron Job: แจกโบนัสทีมรายวัน (รันอัตโนมัติทุกวันเวลา 05:00 น.)
 // ==========================================
-// รันทุกวันเวลา 05:00 น. เพื่อจ่ายโบนัสรายยอดรวมทีม
 cron.schedule('0 5 * * *', async () => {
-    console.log('⏰ รันระบบโบนัสทีมประจำวัน...');
     try {
         const pool = await sql.connect(dbConfig);
+        console.log('⏰ [5:00 AM] กำลังคำนวณและแจกโบนัสรายวันให้ผู้แนะนำ...');
         
-        // ดึง % จากฐานข้อมูล
-        const settingRes = await pool.request().query("SELECT daily_bonus_percent FROM Commission_Settings WHERE id = 1");
-        const bonusPercent = settingRes.recordset.length > 0 ? settingRes.recordset[0].daily_bonus_percent : 1.00;
+        await pool.request().query(`
+            DECLARE @DailyPercent DECIMAL(18,2) = (SELECT TOP 1 daily_bonus_percent FROM Commission_Settings);
 
-        const bonusRes = await pool.request().query(`
+            -- 1. บันทึกประวัติ (Transactions) ว่าได้รับโบนัส
+            INSERT INTO Transactions (user_id, transaction_type, title, amount, status, created_at)
             SELECT 
-                u_referrer.user_id as referrer_id,
-                SUM(t.amount) * (${bonusPercent} / 100.0) as daily_bonus 
-            FROM Users u_buyer
-            JOIN Users u_referrer ON u_buyer.referrer_username = u_referrer.username
-            JOIN Transactions t ON t.user_id = u_buyer.user_id
-            WHERE t.transaction_type IN ('Buy Lottery', 'Win Lottery') 
-              AND CAST(t.created_at AS DATE) = CAST(DATEADD(day, -1, GETDATE()) AS DATE)
-            GROUP BY u_referrer.user_id
-            HAVING SUM(t.amount) > 0
-        `);
+                u.user_id, 'Bonus', N'โบนัสรายวันจากยอดรวมทีม', 
+                SUM(o.total_amount) * (@DailyPercent / 100.0), 'Completed', GETDATE()
+            FROM Lottery_Orders o
+            JOIN Users d ON o.user_id = d.user_id
+            JOIN Users u ON d.referrer_username = u.username
+            -- คิดจากยอดบิลของเมื่อวาน (เพราะรันตี 5 ของวันนี้)
+            WHERE CAST(o.created_at AS DATE) = CAST(DATEADD(DAY, -1, GETDATE()) AS DATE)
+            GROUP BY u.user_id
+            HAVING SUM(o.total_amount) > 0;
 
-        for (const record of bonusRes.recordset) {
-            const req = pool.request();
-            req.input('refId', sql.Int, record.referrer_id);
-            req.input('bonusAmt', sql.Decimal(18,2), record.daily_bonus);
-            req.input('title', sql.NVarChar, `โบนัสทีมงานรายวัน ${bonusPercent}%`);
-            
-            await req.query(`
-                UPDATE Wallets SET balance = balance + @bonusAmt WHERE user_id = @refId;
-                UPDATE Users SET total_daily_bonus = ISNULL(total_daily_bonus, 0) + @bonusAmt WHERE user_id = @refId;
-                INSERT INTO Transactions (user_id, transaction_type, title, amount, status, created_at)
-                VALUES (@refId, 'Daily Team Bonus', @title, @bonusAmt, 'Completed', GETDATE());
-            `);
-        }
-        console.log('✅ แจกโบนัสรายวันสำเร็จ!');
-    } catch (error) {
-        console.error('❌ Error Cron Job:', error);
+            -- 2. เติมเงินโบนัสเข้า Wallets ของคนที่เป็นผู้แนะนำทั้งหมด
+            UPDATE w
+            SET w.balance = ISNULL(w.balance, 0) + t.bonus_amount
+            FROM Wallets w
+            JOIN (
+                SELECT 
+                    u.user_id, 
+                    SUM(o.total_amount) * ((SELECT TOP 1 daily_bonus_percent FROM Commission_Settings) / 100.0) as bonus_amount
+                FROM Lottery_Orders o
+                JOIN Users d ON o.user_id = d.user_id
+                JOIN Users u ON d.referrer_username = u.username
+                WHERE CAST(o.created_at AS DATE) = CAST(DATEADD(DAY, -1, GETDATE()) AS DATE)
+                GROUP BY u.user_id
+                HAVING SUM(o.total_amount) > 0
+            ) t ON w.user_id = t.user_id;
+        `);
+        console.log('✅ [5:00 AM] แจกโบนัสรายวันสำเร็จเรียบร้อย!');
+    } catch (err) {
+        console.error('❌ เกิดข้อผิดพลาดในการแจกโบนัสรายวัน (Cron 5AM):', err);
     }
 });
 // ==========================================
