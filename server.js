@@ -3410,7 +3410,7 @@ app.put('/api/admin/commission-settings', async (req, res) => {
 });
 
 // ==========================================
-// 🌟 API: ดึงข้อมูลหน้าทีม (เวอร์ชันรองรับ Multi-Currency ข้ามสกุลเงิน)
+// 🌟 API: ดึงข้อมูลหน้าทีม (ส่งค่า % จาก Admin ไปให้หน้าบ้านแสดงผล)
 // ==========================================
 app.get('/api/my-team/:uid', async (req, res) => {
     try {
@@ -3423,7 +3423,7 @@ app.get('/api/my-team/:uid', async (req, res) => {
         const myUsername = userRes.recordset[0].username.trim();
         const myCurrency = userRes.recordset[0].currency_code || 'THB';
 
-        // 2. ดึงข้อมูลลูกทีม พร้อมสกุลเงินของแต่ละคน
+        // 2. ดึงข้อมูลลูกทีม
         const teamRes = await pool.request().input('myUsername', sql.NVarChar, myUsername).query(`
             SELECT 
                 user_id, username, created_at, is_active, ISNULL(currency_code, 'THB') as currency_code,
@@ -3437,11 +3437,11 @@ app.get('/api/my-team/:uid', async (req, res) => {
             SELECT amount, title, created_at FROM Transactions WHERE user_id = @userId
         `);
         
-        // 4. ดึงเรทโบนัส 1%
-        const setRes = await pool.request().query('SELECT TOP 1 daily_bonus_percent FROM Commission_Settings');
-        const bonusPercent = setRes.recordset.length > 0 ? setRes.recordset[0].daily_bonus_percent : 1;
+        // 🌟 4. ดึงเรทการตั้งค่าทั้งหมด (เพื่อส่งไปแสดงผล % ที่หน้าบ้านให้ตรงกับที่ Admin ตั้ง)
+        const setRes = await pool.request().query('SELECT TOP 1 purchase_percent, win_percent, daily_bonus_percent FROM Commission_Settings');
+        const commSettings = setRes.recordset.length > 0 ? setRes.recordset[0] : { purchase_percent: 2, win_percent: 2, daily_bonus_percent: 1 };
 
-        // 5. ดึงตารางอัตราแลกเปลี่ยนทั้งหมดส่งไปให้หน้าบ้าน
+        // 5. ดึงตารางอัตราแลกเปลี่ยนทั้งหมด
         const exRes = await pool.request().query('SELECT currency_pair, rate FROM ExchangeRates');
         const exchangeRates = {};
         exRes.recordset.forEach(r => {
@@ -3454,8 +3454,9 @@ app.get('/api/my-team/:uid', async (req, res) => {
             myCurrency: myCurrency,
             teamMembers: teamRes.recordset,
             transactions: transRes.recordset,
-            bonusPercent: bonusPercent,
-            exchangeRates: exchangeRates // ส่งเรทคู่เงินทั้งหมดไปให้
+            bonusPercent: commSettings.daily_bonus_percent, // ใช้คำนวณ
+            commSettings: commSettings, // 🌟 ส่งข้อมูลเรททั้งหมดไปโชว์ที่หน้าจอ
+            exchangeRates: exchangeRates
         });
     } catch (err) {
         console.error('API My-Team Error:', err);
