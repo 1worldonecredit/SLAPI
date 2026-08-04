@@ -3361,29 +3361,31 @@ app.post('/api/admin/simulate-winners', async (req, res) => {
         res.status(500).json({ success: false });
     }
 });
+
 // ==========================================
-// 🌟 API: ดึงข้อมูลหน้าทีม (เวอร์ชันให้ Frontend บวกเลขเอง ชัวร์ 100%)
+// 🌟 API: ดึงข้อมูลหน้าทีม (เวอร์ชันรองรับ Multi-Currency ข้ามสกุลเงิน)
 // ==========================================
 app.get('/api/my-team/:uid', async (req, res) => {
     try {
         const pool = await sql.connect(dbConfig);
         const userId = req.params.uid;
         
-        // 1. ดึงชื่อตัวเอง
-        const userRes = await pool.request().input('userId', sql.Int, userId).query('SELECT username FROM Users WHERE user_id = @userId');
+        // 1. ดึงชื่อและสกุลเงินตัวเอง (ผู้แนะนำ)
+        const userRes = await pool.request().input('userId', sql.Int, userId).query('SELECT username, currency_code FROM Users WHERE user_id = @userId');
         if (userRes.recordset.length === 0) return res.json({ success: false, message: 'User not found' });
         const myUsername = userRes.recordset[0].username.trim();
+        const myCurrency = userRes.recordset[0].currency_code || 'THB';
 
-        // 2. ดึงข้อมูลลูกทีม พร้อมยอดสะสมของพวกเขา
+        // 2. ดึงข้อมูลลูกทีม พร้อมสกุลเงินของแต่ละคน
         const teamRes = await pool.request().input('myUsername', sql.NVarChar, myUsername).query(`
             SELECT 
-                user_id, username, created_at, is_active, 
+                user_id, username, created_at, is_active, ISNULL(currency_code, 'THB') as currency_code,
                 ISNULL(total_purchase_comm, 0) as total_purchase_comm, 
                 ISNULL(total_win_comm, 0) as total_win_comm 
             FROM Users WHERE referrer_username = @myUsername
         `);
 
-        // 3. ดึงประวัติการเงินทั้งหมดของเรา (เพื่อเอาไปให้หน้าบ้านคัดกรองและบวกเลขเอง)
+        // 3. ดึงประวัติการเงินทั้งหมดของเรา
         const transRes = await pool.request().input('userId', sql.Int, userId).query(`
             SELECT amount, title, created_at FROM Transactions WHERE user_id = @userId
         `);
@@ -3392,12 +3394,21 @@ app.get('/api/my-team/:uid', async (req, res) => {
         const setRes = await pool.request().query('SELECT TOP 1 daily_bonus_percent FROM Commission_Settings');
         const bonusPercent = setRes.recordset.length > 0 ? setRes.recordset[0].daily_bonus_percent : 1;
 
+        // 5. ดึงตารางอัตราแลกเปลี่ยนทั้งหมดส่งไปให้หน้าบ้าน
+        const exRes = await pool.request().query('SELECT currency_pair, rate FROM ExchangeRates');
+        const exchangeRates = {};
+        exRes.recordset.forEach(r => {
+            exchangeRates[r.currency_pair] = r.rate;
+        });
+
         res.json({
             success: true,
             myUsername: myUsername,
+            myCurrency: myCurrency,
             teamMembers: teamRes.recordset,
             transactions: transRes.recordset,
-            bonusPercent: bonusPercent
+            bonusPercent: bonusPercent,
+            exchangeRates: exchangeRates // ส่งเรทคู่เงินทั้งหมดไปให้
         });
     } catch (err) {
         console.error('API My-Team Error:', err);
