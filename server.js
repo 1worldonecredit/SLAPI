@@ -1361,11 +1361,13 @@ app.put('/api/admin/animal-numbers/:id', async (req, res) => {
         res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการ UPDATE Database', error: error.message });
     }
 });
+
 // ==========================================
 // 🌟 API: สำหรับการซื้อหวย (ตัดเงิน/คำนวณวัน/จ่ายค่าคอม/แสตมป์ชื่อลูกทีม)
 // ==========================================
 app.post('/api/lottery/buy', async (req, res) => {
-    const { user_id, cart, total_price, currency } = req.body;
+    // 🌟 อัปเกรด 1: รับค่า note เข้ามาจากฝั่งหน้าบ้าน
+    const { user_id, cart, total_price, currency, note } = req.body;
     const pool = await sql.connect(dbConfig);
     
     // ==========================================
@@ -1426,6 +1428,7 @@ app.post('/api/lottery/buy', async (req, res) => {
         const orderRes = await request
             .input('currency', sql.VarChar, currency)
             .input('totalPrice', sql.Decimal(18,2), deductAmount)
+            .input('note', sql.NVarChar, note || null) // 🌟 อัปเกรด 2: เตรียมค่า note ลงตัวแปร SQL
             .query(`
                 DECLARE @TargetDrawDate DATE;
                 
@@ -1440,9 +1443,10 @@ app.post('/api/lottery/buy', async (req, res) => {
                 ELSE
                     SET @TargetDrawDate = @CurrentDate;
 
-                INSERT INTO Lottery_Orders (user_id, total_amount, currency_code, status, draw_date, created_at)
+                -- 🌟 อัปเกรด 3: เพิ่มคอลัมน์ order_note ลงไปตอน INSERT
+                INSERT INTO Lottery_Orders (user_id, total_amount, currency_code, status, draw_date, created_at, order_note)
                 OUTPUT INSERTED.order_id
-                VALUES (@userId, @totalPrice, @currency, N'รอผลตรวจ', @TargetDrawDate, @ThaiTime)
+                VALUES (@userId, @totalPrice, @currency, N'รอผลตรวจ', @TargetDrawDate, @ThaiTime, @note)
             `);
         
         const orderId = orderRes.recordset[0].order_id;
@@ -1459,14 +1463,16 @@ app.post('/api/lottery/buy', async (req, res) => {
         }
 
         // ==========================================
-        // 🌟 6. ระบบจ่ายค่าแนะนำ (ดึง % จาก Database และแสตมป์ชื่อลูกทีม)
-        // รับรองว่าแจกค่าคอมแน่นอนครับ!
+        // 🌟 6. ระบบจ่ายค่าแนะนำ (ดึง % จาก Database, แสตมป์ชื่อลูกทีม และแปลงสกุลเงินอัตโนมัติ!)
         // ==========================================
         const refReq = new sql.Request(transaction);
         refReq.input('buyerId', sql.Int, user_id);
         
+        // 🌟 อัปเกรด 4: เพิ่มการดึงสกุลเงินของลูกทีมและคนแนะนำขึ้นมาเทียบกัน
         const referrerRes = await refReq.query(`
-            SELECT u_referrer.user_id, u_buyer.username as buyer_username
+            SELECT u_referrer.user_id, u_buyer.username as buyer_username,
+                   ISNULL(u_buyer.currency_code, 'THB') as buyer_currency,
+                   ISNULL(u_referrer.currency_code, 'THB') as referrer_currency
             FROM Users u_buyer
             JOIN Users u_referrer ON u_buyer.referrer_username = u_referrer.username
             WHERE u_buyer.user_id = @buyerId
@@ -1475,17 +1481,42 @@ app.post('/api/lottery/buy', async (req, res) => {
         if (referrerRes.recordset.length > 0) {
             const referrerId = referrerRes.recordset[0].user_id;
             const buyerUsername = referrerRes.recordset[0].buyer_username;
+            const buyerCurrency = referrerRes.recordset[0].buyer_currency;
+            const referrerCurrency = referrerRes.recordset[0].referrer_currency;
             
             const settingReq = new sql.Request(transaction);
             const settingRes = await settingReq.query("SELECT purchase_percent FROM Commission_Settings WHERE id = 1");
             const purchasePercent = settingRes.recordset.length > 0 ? settingRes.recordset[0].purchase_percent : 2.00; 
             
-            const purchaseCommission = deductAmount * (purchasePercent / 100); 
+            // คำนวณค่าคอมตั้งต้น (ตามสกุลเงินที่ใช้ซื้อ)
+            const rawCommission = deductAmount * (purchasePercent / 100); 
+            let finalCommission = rawCommission;
+
+            // 🌟 อัปเกรด 5: ระบบ Cross-Currency แปลงค่าคอมเข้ากระเป๋าผู้แนะนำ
+            if (buyerCurrency !== referrerCurrency) {
+                const pair = `${buyerCurrency}_${referrerCurrency}`; 
+                
+                const rateReq = new sql.Request(transaction);
+                rateReq.input('pair', sql.VarChar, pair);
+                const rateRes = await rateReq.query(`SELECT rate FROM ExchangeRates WHERE currency_pair = @pair`);
+                    
+                if (rateRes.recordset.length > 0) {
+                    finalCommission = finalCommission * rateRes.recordset[0].rate;
+                } else {
+                    const reversePair = `${referrerCurrency}_${buyerCurrency}`;
+                    const reverseRateReq = new sql.Request(transaction);
+                    reverseRateReq.input('revPair', sql.VarChar, reversePair);
+                    const reverseRateRes = await reverseRateReq.query(`SELECT rate FROM ExchangeRates WHERE currency_pair = @revPair`);
+                    
+                    if (reverseRateRes.recordset.length > 0) {
+                        finalCommission = finalCommission / reverseRateRes.recordset[0].rate;
+                    }
+                }
+            }
 
             const commReq = new sql.Request(transaction);
             commReq.input('referrerId', sql.Int, referrerId);
-            commReq.input('commission', sql.Decimal(18,2), purchaseCommission);
-            // แสตมป์ชื่อลูกทีมไว้ในวงเล็บ เพื่อใช้ดึงข้อมูลในหน้า Team อย่างแม่นยำ
+            commReq.input('commission', sql.Decimal(18,2), finalCommission); // 🌟 ใช้ยอดที่แปลงเสร็จแล้ว!
             commReq.input('transTitle', sql.NVarChar, `รายได้ ${purchasePercent}% จากทีมงาน (${buyerUsername})`); 
             
             await commReq.query(`
