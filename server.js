@@ -3362,8 +3362,8 @@ app.post('/api/admin/simulate-winners', async (req, res) => {
     }
 });
 
-// ==========================================
-// 🌟 API: ดึงข้อมูลหน้าทีม (เวอร์ชันดักจับแบบครอบจักรวาล ป้องกันยอดหาย 100%)
+/// ==========================================
+// 🌟 API: ดึงข้อมูลหน้าทีม (เวอร์ชันสแกนดิบด้วย CHARINDEX ชัวร์ 100%)
 // ==========================================
 app.get('/api/team/:uid', async (req, res) => {
     try {
@@ -3376,21 +3376,21 @@ app.get('/api/team/:uid', async (req, res) => {
         if (userRes.recordset.length === 0) return res.json({ success: false, message: 'User not found' });
         const myUsername = userRes.recordset[0].username.trim();
 
-        // 🌟 1. ยอดรวมหัวกระดาษ: เอาเงินเข้าทุกรายการ ที่ไม่ใช่ฝาก/ถอน
+        // 🌟 1. หัวกระดาษ: ยอดรวมเงินเข้าทั้งหมด ที่ไม่ใช่คำว่า ฝาก หรือ ถอน
         const incomeRes = await pool.request()
             .input('userId', sql.Int, req.params.uid)
             .query(`
                 SELECT 
-                    ISNULL(SUM(CAST(amount AS DECIMAL(18,2))), 0) as totalIncome,
-                    ISNULL(SUM(CASE WHEN MONTH(created_at) = MONTH(GETDATE()) AND YEAR(created_at) = YEAR(GETDATE()) THEN CAST(amount AS DECIMAL(18,2)) ELSE 0 END), 0) as incomeThisMonth
+                    ISNULL(SUM(amount), 0) as totalIncome,
+                    ISNULL(SUM(CASE WHEN MONTH(created_at) = MONTH(GETDATE()) AND YEAR(created_at) = YEAR(GETDATE()) THEN amount ELSE 0 END), 0) as incomeThisMonth
                 FROM Transactions
                 WHERE user_id = @userId 
-                  AND CAST(amount AS DECIMAL(18,2)) > 0 
-                  AND title NOT LIKE N'%ฝาก%' 
-                  AND title NOT LIKE N'%ถอน%'
+                  AND amount > 0 
+                  AND CHARINDEX(N'ฝาก', title) = 0 
+                  AND CHARINDEX(N'ถอน', title) = 0
             `);
 
-        // 🌟 2. ยอดรายบุคคล: ค้นหาแค่ "ชื่อลูกทีม" ล้วนๆ ไม่สนวงเล็บ
+        // 🌟 2. ยอดรายบุคคล: สแกนดิบ หาชื่อลูกทีมที่อยู่ในวงเล็บจาก Transactions
         const teamRes = await pool.request()
             .input('myUsername', sql.NVarChar, myUsername)
             .input('userId', sql.Int, req.params.uid)
@@ -3404,29 +3404,26 @@ app.get('/api/team/:uid', async (req, res) => {
                     d.is_active as isActive,
                     FORMAT(d.created_at, 'dd/MM/yyyy') as joinDate,
                     
-                    -- ค่าคอมซื้อ: จับแค่ชื่อลูกทีม และต้องไม่ใช่ถูกรางวัล
+                    -- ค่าคอมซื้อ: สแกนหาชื่อลูกทีมในประวัติ และต้องไม่มีคำว่าถูกรางวัล
                     ISNULL((
-                        SELECT SUM(CAST(amount AS DECIMAL(18,2))) FROM Transactions 
+                        SELECT SUM(amount) FROM Transactions 
                         WHERE user_id = @userId 
-                          AND CAST(amount AS DECIMAL(18,2)) > 0 
-                          AND title LIKE N'%' + LTRIM(RTRIM(d.username)) + N'%'
-                          AND title NOT LIKE N'%ถูกรางวัล%'
+                          AND amount > 0 
+                          AND CHARINDEX(LTRIM(RTRIM(d.username)), title) > 0
+                          AND CHARINDEX(N'ถูกรางวัล', title) = 0
                     ), 0) as purchaseComm,
                     
-                    -- ค่าคอมถูกรางวัล: จับแค่ชื่อลูกทีม และต้องมีคำว่าถูกรางวัล
+                    -- ค่าคอมถูกรางวัล: สแกนหาชื่อลูกทีม และต้องมีคำว่าถูกรางวัล
                     ISNULL((
-                        SELECT SUM(CAST(amount AS DECIMAL(18,2))) FROM Transactions 
+                        SELECT SUM(amount) FROM Transactions 
                         WHERE user_id = @userId 
-                          AND CAST(amount AS DECIMAL(18,2)) > 0 
-                          AND title LIKE N'%' + LTRIM(RTRIM(d.username)) + N'%'
-                          AND title LIKE N'%ถูกรางวัล%'
+                          AND amount > 0 
+                          AND CHARINDEX(LTRIM(RTRIM(d.username)), title) > 0
+                          AND CHARINDEX(N'ถูกรางวัล', title) > 0
                     ), 0) as winComm,
                     
-                    -- โบนัส 1%
-                    CAST(
-                        (ISNULL(d.total_purchase_comm, 0) + ISNULL(d.total_win_comm, 0)) * 
-                        (@BonusPercent / 100.0) 
-                    AS DECIMAL(18,2)) as teamBonusComm
+                    -- โบนัส 1% จากยอดรวมที่ลูกทีมทำได้
+                    CAST((ISNULL(d.total_purchase_comm, 0) + ISNULL(d.total_win_comm, 0)) * (@BonusPercent / 100.0) AS DECIMAL(18,2)) as teamBonusComm
 
                 FROM Users d
                 WHERE d.referrer_username = @myUsername;
