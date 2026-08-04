@@ -3361,85 +3361,47 @@ app.post('/api/admin/simulate-winners', async (req, res) => {
         res.status(500).json({ success: false });
     }
 });
-
 // ==========================================
-// 🌟 API: ดึงข้อมูลหน้าทีม (เวอร์ชันสแกนดิบด้วย CHARINDEX ชัวร์ 100%)
+// 🌟 API: ดึงข้อมูลหน้าทีม (เวอร์ชันให้ Frontend บวกเลขเอง ชัวร์ 100%)
 // ==========================================
-app.get('/api/team/:uid', async (req, res) => {
+app.get('/api/my-team/:uid', async (req, res) => {
     try {
         const pool = await sql.connect(dbConfig);
+        const userId = req.params.uid;
         
-        const userRes = await pool.request()
-            .input('userId', sql.Int, req.params.uid)
-            .query('SELECT username FROM Users WHERE user_id = @userId');
-        
+        // 1. ดึงชื่อตัวเอง
+        const userRes = await pool.request().input('userId', sql.Int, userId).query('SELECT username FROM Users WHERE user_id = @userId');
         if (userRes.recordset.length === 0) return res.json({ success: false, message: 'User not found' });
         const myUsername = userRes.recordset[0].username.trim();
 
-        // 🌟 1. หัวกระดาษ: ยอดรวมเงินเข้าทั้งหมด ที่ไม่ใช่คำว่า ฝาก หรือ ถอน
-        const incomeRes = await pool.request()
-            .input('userId', sql.Int, req.params.uid)
-            .query(`
-                SELECT 
-                    ISNULL(SUM(amount), 0) as totalIncome,
-                    ISNULL(SUM(CASE WHEN MONTH(created_at) = MONTH(GETDATE()) AND YEAR(created_at) = YEAR(GETDATE()) THEN amount ELSE 0 END), 0) as incomeThisMonth
-                FROM Transactions
-                WHERE user_id = @userId 
-                  AND amount > 0 
-                  AND CHARINDEX(N'ฝาก', title) = 0 
-                  AND CHARINDEX(N'ถอน', title) = 0
-            `);
+        // 2. ดึงข้อมูลลูกทีม พร้อมยอดสะสมของพวกเขา
+        const teamRes = await pool.request().input('myUsername', sql.NVarChar, myUsername).query(`
+            SELECT 
+                user_id, username, created_at, is_active, 
+                ISNULL(total_purchase_comm, 0) as total_purchase_comm, 
+                ISNULL(total_win_comm, 0) as total_win_comm 
+            FROM Users WHERE referrer_username = @myUsername
+        `);
 
-        // 🌟 2. ยอดรายบุคคล: สแกนดิบ หาชื่อลูกทีมที่อยู่ในวงเล็บจาก Transactions
-        const teamRes = await pool.request()
-            .input('myUsername', sql.NVarChar, myUsername)
-            .input('userId', sql.Int, req.params.uid)
-            .query(`
-                DECLARE @BonusPercent DECIMAL(18,2) = (SELECT TOP 1 ISNULL(daily_bonus_percent, 1.00) FROM Commission_Settings);
-
-                SELECT 
-                    d.user_id as id,
-                    d.username as name,
-                    'https://ui-avatars.com/api/?name=' + LTRIM(RTRIM(d.username)) + '&background=random' as avatar,
-                    d.is_active as isActive,
-                    FORMAT(d.created_at, 'dd/MM/yyyy') as joinDate,
-                    
-                    -- ค่าคอมซื้อ: สแกนหาชื่อลูกทีมในประวัติ และต้องไม่มีคำว่าถูกรางวัล
-                    ISNULL((
-                        SELECT SUM(amount) FROM Transactions 
-                        WHERE user_id = @userId 
-                          AND amount > 0 
-                          AND CHARINDEX(LTRIM(RTRIM(d.username)), title) > 0
-                          AND CHARINDEX(N'ถูกรางวัล', title) = 0
-                    ), 0) as purchaseComm,
-                    
-                    -- ค่าคอมถูกรางวัล: สแกนหาชื่อลูกทีม และต้องมีคำว่าถูกรางวัล
-                    ISNULL((
-                        SELECT SUM(amount) FROM Transactions 
-                        WHERE user_id = @userId 
-                          AND amount > 0 
-                          AND CHARINDEX(LTRIM(RTRIM(d.username)), title) > 0
-                          AND CHARINDEX(N'ถูกรางวัล', title) > 0
-                    ), 0) as winComm,
-                    
-                    -- โบนัส 1% จากยอดรวมที่ลูกทีมทำได้
-                    CAST((ISNULL(d.total_purchase_comm, 0) + ISNULL(d.total_win_comm, 0)) * (@BonusPercent / 100.0) AS DECIMAL(18,2)) as teamBonusComm
-
-                FROM Users d
-                WHERE d.referrer_username = @myUsername;
-            `);
+        // 3. ดึงประวัติการเงินทั้งหมดของเรา (เพื่อเอาไปให้หน้าบ้านคัดกรองและบวกเลขเอง)
+        const transRes = await pool.request().input('userId', sql.Int, userId).query(`
+            SELECT amount, title, created_at FROM Transactions WHERE user_id = @userId
+        `);
+        
+        // 4. ดึงเรทโบนัส 1%
+        const setRes = await pool.request().query('SELECT TOP 1 daily_bonus_percent FROM Commission_Settings');
+        const bonusPercent = setRes.recordset.length > 0 ? setRes.recordset[0].daily_bonus_percent : 1;
 
         res.json({
             success: true,
-            myUsername: myUsername, // 👈 บรรทัดนี้ที่เพิ่มเข้ามาเพื่อทดสอบ
+            myUsername: myUsername,
             teamMembers: teamRes.recordset,
-            totalIncome: incomeRes.recordset[0].totalIncome,
-            incomeThisMonth: incomeRes.recordset[0].incomeThisMonth
+            transactions: transRes.recordset,
+            bonusPercent: bonusPercent
         });
-
-    } catch (error) {
-        console.error('API Team Error:', error);
-        res.status(500).json({ success: false, message: error.message });
+    } catch (err) {
+        console.error('API My-Team Error:', err);
+        res.status(500).json({ success: false });
     }
 });
 
