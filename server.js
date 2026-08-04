@@ -3363,71 +3363,68 @@ app.post('/api/admin/simulate-winners', async (req, res) => {
 });
 
 // ==========================================
-// 🌟 API: ดึงข้อมูลหน้าทีม (เวอร์ชันดักจับจาก Text จริง ทะลุทะลวง 100%)
+// 🌟 API: ดึงข้อมูลหน้าทีม (เวอร์ชันเกราะเหล็ก เลิกค้นหาด้วยภาษาไทย)
 // ==========================================
 app.get('/api/team/:uid', async (req, res) => {
     try {
         const pool = await sql.connect(dbConfig);
         
-        // 1. หา Username ตัวเอง
+        // 1. หา Username ตัวเอง (ตัดช่องว่างที่อาจซ่อนอยู่ออกให้หมด)
         const userRes = await pool.request()
             .input('userId', sql.Int, req.params.uid)
             .query('SELECT username FROM Users WHERE user_id = @userId');
         
         if (userRes.recordset.length === 0) return res.json({ success: false, message: 'User not found' });
-        const myUsername = userRes.recordset[0].username;
+        const myUsername = userRes.recordset[0].username.trim();
 
-        // 2. ดึงยอดรวมกระเป๋าด้านบนสุด (จับจากคำว่า รายได้, ค่าคอม, โบนัส รับรองว่ายอดมาครบ!)
+        // 2. ดึงยอดรวมกระเป๋าด้านบนสุด 
+        // 🌟 เปลี่ยนมาจับจาก Tag ของระบบแทน ('Affiliate Purchase', 'Commission', 'Bonus') หมดปัญหาภาษาไทยเพี้ยน 100%
         const incomeRes = await pool.request()
             .input('userId', sql.Int, req.params.uid)
             .query(`
                 SELECT 
-                    ISNULL(SUM(CAST(amount AS DECIMAL(18,2))), 0) as totalIncome,
-                    ISNULL(SUM(CASE WHEN MONTH(created_at) = MONTH(GETDATE()) AND YEAR(created_at) = YEAR(GETDATE()) THEN CAST(amount AS DECIMAL(18,2)) ELSE 0 END), 0) as incomeThisMonth
+                    ISNULL(SUM(amount), 0) as totalIncome,
+                    ISNULL(SUM(CASE WHEN MONTH(created_at) = MONTH(GETDATE()) AND YEAR(created_at) = YEAR(GETDATE()) THEN amount ELSE 0 END), 0) as incomeThisMonth
                 FROM Transactions
                 WHERE user_id = @userId 
-                  AND CAST(amount AS DECIMAL(18,2)) > 0 
-                  AND (
-                      title LIKE N'%รายได้%' OR 
-                      title LIKE N'%ค่าคอม%' OR 
-                      title LIKE N'%โบนัส%'
-                  )
+                  AND amount > 0 
+                  AND transaction_type IN ('Affiliate Purchase', 'Commission', 'Bonus')
             `);
 
-        // 3. ดึงข้อมูลลูกทีมรายบุคคล (จับคู่ชื่อลูกทีมในวงเล็บกับประวัติ)
+        // 3. ดึงข้อมูลลูกทีมรายบุคคล
         const teamRes = await pool.request()
             .input('myUsername', sql.NVarChar, myUsername)
             .input('userId', sql.Int, req.params.uid)
             .query(`
+                DECLARE @BonusPercent DECIMAL(18,2) = (SELECT TOP 1 ISNULL(daily_bonus_percent, 1.00) FROM Commission_Settings);
+
                 SELECT 
                     d.user_id as id,
-                    d.username as name,
-                    'https://ui-avatars.com/api/?name=' + d.username + '&background=random' as avatar,
+                    LTRIM(RTRIM(d.username)) as name,
+                    'https://ui-avatars.com/api/?name=' + LTRIM(RTRIM(d.username)) + '&background=random' as avatar,
                     d.is_active as isActive,
                     FORMAT(d.created_at, 'dd/MM/yyyy') as joinDate,
                     
-                    -- ส่วนที่ 1: รายได้ 2% (ดึงจากประวัติที่มีคำว่า "รายได้" และมีชื่อลูกทีม)
+                    -- ส่วนที่ 1: รายได้ซื้อ 2% (จับคู่จากประเภท Affiliate Purchase และ ชื่อลูกทีมในวงเล็บ)
                     ISNULL((
-                        SELECT SUM(CAST(amount AS DECIMAL(18,2))) FROM Transactions 
+                        SELECT SUM(amount) FROM Transactions 
                         WHERE user_id = @userId 
-                          AND CAST(amount AS DECIMAL(18,2)) > 0 
-                          AND title LIKE N'%รายได้%' 
-                          AND title LIKE N'%' + d.username + '%'
+                          AND transaction_type = 'Affiliate Purchase' 
+                          AND title LIKE N'%(' + LTRIM(RTRIM(d.username)) + N')%'
                     ), 0) as purchaseComm,
                     
-                    -- ส่วนที่ 2: ถูกรางวัล 2% (ดึงจากประวัติที่มีคำว่า "ถูกรางวัล" และมีชื่อลูกทีม)
+                    -- ส่วนที่ 2: ถูกรางวัล 2% (จับคู่จากประเภท Commission และ ชื่อลูกทีมในวงเล็บ)
                     ISNULL((
-                        SELECT SUM(CAST(amount AS DECIMAL(18,2))) FROM Transactions 
+                        SELECT SUM(amount) FROM Transactions 
                         WHERE user_id = @userId 
-                          AND CAST(amount AS DECIMAL(18,2)) > 0 
-                          AND title LIKE N'%ถูกรางวัล%' 
-                          AND title LIKE N'%' + d.username + '%'
+                          AND transaction_type = 'Commission' 
+                          AND title LIKE N'%(' + LTRIM(RTRIM(d.username)) + N')%'
                     ), 0) as winComm,
                     
                     -- ส่วนที่ 3: โบนัสทีม 1% (คำนวณสดจากยอดคอมมิชชั่นสะสมที่ลูกทีมทำได้)
                     CAST(
                         (ISNULL(d.total_purchase_comm, 0) + ISNULL(d.total_win_comm, 0)) * 
-                        (ISNULL((SELECT TOP 1 daily_bonus_percent FROM Commission_Settings), 1.00) / 100.0) 
+                        (@BonusPercent / 100.0) 
                     AS DECIMAL(18,2)) as teamBonusComm
 
                 FROM Users d
@@ -3442,8 +3439,8 @@ app.get('/api/team/:uid', async (req, res) => {
         });
 
     } catch (error) {
-        console.error(error);
-        res.status(500).json({ success: false });
+        console.error('API Team Error:', error);
+        res.status(500).json({ success: false, message: error.message });
     }
 });
 
