@@ -3362,6 +3362,53 @@ app.post('/api/admin/simulate-winners', async (req, res) => {
     }
 });
 
+
+// ==========================================
+// 🌟 API: จัดการตั้งค่า % Commission
+// ==========================================
+
+// 1. ดึงข้อมูลการตั้งค่า Commission ปัจจุบัน
+app.get('/api/admin/commission-settings', async (req, res) => {
+    try {
+        const pool = await sql.connect(dbConfig);
+        const result = await pool.request().query('SELECT * FROM Commission_Settings WHERE id = 1');
+        
+        if (result.recordset.length > 0) {
+            res.json({ success: true, data: result.recordset[0] });
+        } else {
+            res.json({ success: false, message: 'ไม่พบข้อมูลตั้งค่า' });
+        }
+    } catch (err) {
+        console.error('Fetch Commission Settings Error:', err);
+        res.status(500).json({ success: false, message: 'Server Error' });
+    }
+});
+
+// 2. บันทึก/อัปเดต % Commission ใหม่
+app.put('/api/admin/commission-settings', async (req, res) => {
+    const { purchase_percent, win_percent, daily_bonus_percent } = req.body;
+    try {
+        const pool = await sql.connect(dbConfig);
+        await pool.request()
+            .input('purchase', sql.Decimal(18,2), purchase_percent)
+            .input('win', sql.Decimal(18,2), win_percent)
+            .input('bonus', sql.Decimal(18,2), daily_bonus_percent)
+            .query(`
+                UPDATE Commission_Settings 
+                SET purchase_percent = @purchase, 
+                    win_percent = @win, 
+                    daily_bonus_percent = @bonus,
+                    updated_at = GETDATE()
+                WHERE id = 1
+            `);
+            
+        res.json({ success: true, message: 'อัปเดตอัตรา Commission สำเร็จ' });
+    } catch (err) {
+        console.error('Update Commission Settings Error:', err);
+        res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการอัปเดต' });
+    }
+});
+
 // ==========================================
 // 🌟 API: ดึงข้อมูลหน้าทีม (เวอร์ชันรองรับ Multi-Currency ข้ามสกุลเงิน)
 // ==========================================
