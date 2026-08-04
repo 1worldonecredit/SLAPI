@@ -3431,6 +3431,7 @@ app.get('/api/team/:uid', async (req, res) => {
 
         res.json({
             success: true,
+            myUsername: myUsername, // 👈 บรรทัดนี้ที่เพิ่มเข้ามาเพื่อทดสอบ
             teamMembers: teamRes.recordset,
             totalIncome: incomeRes.recordset[0].totalIncome,
             incomeThisMonth: incomeRes.recordset[0].incomeThisMonth
