@@ -3773,7 +3773,6 @@ app.post('/api/hrm/job-ad', async (req, res) => {
 app.get('/api/yeeki/rounds', async (req, res) => {
     try {
         const pool = await poolPromise;
-        // ดึงเฉพาะรอบของวันนี้ตามเวลา Server จริง
         const result = await pool.request().query(`
             SELECT * FROM Yeeki_Rounds 
             WHERE CAST(draw_date AS DATE) = CAST(GETDATE() AS DATE) 
