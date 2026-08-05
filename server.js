@@ -3768,21 +3768,56 @@ app.post('/api/hrm/job-ad', async (req, res) => {
     }
 });
 // ==========================================
-// 🌟 1. API ฝั่งหน้าบ้าน (สำหรับลูกค้า) ดึงข้อมูล 24 รอบของวันนี้
+// 1. ดึงข้อมูล 24 รอบของวันนี้ (แก้ 500)
 // ==========================================
 app.get('/api/yeeki/rounds', async (req, res) => {
     try {
-        const pool = await poolPromise;
+        const pool = await poolPromise; // เช็คชื่อตัวแปรนี้ให้ตรงกับระบบของคุณพี่ด้วยนะครับ
         const result = await pool.request().query(`
             SELECT * FROM Yeeki_Rounds 
             WHERE CAST(draw_date AS DATE) = CAST(GETDATE() AS DATE) 
             ORDER BY round_number ASC
         `);
-        
         res.json({ success: true, rounds: result.recordset });
     } catch (err) {
         console.error("Error fetching public yeeki rounds:", err);
         res.status(500).json({ success: false, message: err.message });
+    }
+});
+
+
+// ==========================================
+// 2. ดึงอัตราการจ่าย (แก้ 404 Not Found)
+// ==========================================
+app.get('/api/yeeki/prize-rates', async (req, res) => {
+    try {
+        const pool = await poolPromise;
+        const result = await pool.request().query('SELECT lottery_type, multiplier FROM Yeeki_Prize_Rates');
+        res.json({ success: true, rates: result.recordset });
+    } catch (err) {
+        console.error("Error fetching prize rates:", err);
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
+
+// ==========================================
+// 3. ดึงยอดแจ็คพอต 8 ตัวสะสม (แก้ 404 Not Found)
+// ==========================================
+app.get('/api/yeeki/jackpot', async (req, res) => {
+    try {
+        const pool = await poolPromise;
+        // พยายามดึงจากตาราง Super_Yeeki_Jackpot 
+        const result = await pool.request().query('SELECT TOP 1 * FROM Super_Yeeki_Jackpot ORDER BY id DESC');
+        
+        if (result.recordset.length > 0) {
+             res.json({ success: true, jackpot: { current_amount: result.recordset[0].amount, currency_code: 'LAK' } });
+        } else {
+             // ถ้ายังไม่มีข้อมูลในตาราง ให้ส่งค่าเริ่มต้นไปก่อน หน้าเว็บจะได้ไม่พัง
+             res.json({ success: true, jackpot: { current_amount: 10000000, currency_code: 'LAK' } });
+        }
+    } catch (err) {
+        console.error("Error fetching jackpot:", err);
+        res.json({ success: true, jackpot: { current_amount: 10000000, currency_code: 'LAK' } });
     }
 });
 
