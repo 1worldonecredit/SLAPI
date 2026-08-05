@@ -3,7 +3,7 @@ const express = require('express');
 const cors = require('cors');
 const sql = require('mssql');
 const cron = require('node-cron');
-const pool = await sql.connect(dbConfig);
+
 
 const app = express();
 const port = process.env.PORT || 5000;
@@ -3769,11 +3769,11 @@ app.post('/api/hrm/job-ad', async (req, res) => {
 });
 
 // ==========================================
-// 1. ดึงข้อมูล 24 รอบของวันนี้ (แก้ 500)
+// 1. ดึงข้อมูล 24 รอบของวันนี้ (หวยยี่กี)
 // ==========================================
 app.get('/api/yeeki/rounds', async (req, res) => {
     try {
-        const pool = await sql.connect(dbConfig); // 🌟 แก้ให้ตรงกับระบบคุณพี่แล้ว
+        const pool = await sql.connect(dbConfig); // ใช้โครงสร้างตามที่คุณพี่มี
         const result = await pool.request().query(`
             SELECT * FROM Yeeki_Rounds 
             WHERE CAST(draw_date AS DATE) = CAST(GETDATE() AS DATE) 
@@ -3786,13 +3786,12 @@ app.get('/api/yeeki/rounds', async (req, res) => {
     }
 });
 
-
 // ==========================================
-// 2. ดึงอัตราการจ่าย (แก้ 404/500)
+// 2. ดึงอัตราการจ่าย (หวยยี่กี)
 // ==========================================
 app.get('/api/yeeki/prize-rates', async (req, res) => {
     try {
-        const pool = await sql.connect(dbConfig); // 🌟 แก้ให้ตรงกับระบบคุณพี่แล้ว
+        const pool = await sql.connect(dbConfig); 
         const result = await pool.request().query('SELECT lottery_type, multiplier FROM Yeeki_Prize_Rates');
         res.json({ success: true, rates: result.recordset });
     } catch (err) {
@@ -3801,13 +3800,12 @@ app.get('/api/yeeki/prize-rates', async (req, res) => {
     }
 });
 
-
 // ==========================================
-// 3. ดึงยอดแจ็คพอต 8 ตัวสะสม (แก้ 404/500)
+// 3. ดึงยอดแจ็คพอต 8 ตัวสะสม (หวยยี่กี)
 // ==========================================
 app.get('/api/yeeki/jackpot', async (req, res) => {
     try {
-        const pool = await sql.connect(dbConfig); // 🌟 แก้ให้ตรงกับระบบคุณพี่แล้ว
+        const pool = await sql.connect(dbConfig); 
         const result = await pool.request().query('SELECT TOP 1 * FROM Super_Yeeki_Jackpot ORDER BY id DESC');
         
         if (result.recordset.length > 0) {
