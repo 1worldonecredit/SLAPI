@@ -3831,43 +3831,69 @@ app.post('/api/hrm/job-ad', async (req, res) => {
         res.status(500).json({ success: false });
     }
 });
-
-// 🌟 1. ดึงข้อมูล 24 รอบ (GET)
-app.get('/api/admin/yeeki-rounds', async (req, res) => {
+// ==========================================
+// 🌟 1. API ฝั่งหน้าบ้าน (สำหรับลูกค้า) ดึงข้อมูล 24 รอบของวันนี้
+// ==========================================
+app.get('/api/yeeki/rounds', async (req, res) => {
     try {
-        const { date } = req.query; // รับค่า YYYY-MM-DD
-        const pool = await poolPromise; // ใช้ pool connect db เดิมของคุณพี่
-        const result = await pool.request()
-            .input('draw_date', sql.Date, date)
-            .query(`SELECT * FROM Yeeki_Rounds WHERE draw_date = @draw_date ORDER BY round_number ASC`);
+        const pool = await poolPromise;
+        // ดึงเฉพาะรอบของวันนี้ตามเวลา Server จริง
+        const result = await pool.request().query(`
+            SELECT * FROM Yeeki_Rounds 
+            WHERE CAST(draw_date AS DATE) = CAST(GETDATE() AS DATE) 
+            ORDER BY round_number ASC
+        `);
         
         res.json({ success: true, rounds: result.recordset });
     } catch (err) {
-        console.error(err);
+        console.error("Error fetching public yeeki rounds:", err);
         res.status(500).json({ success: false, message: err.message });
     }
 });
 
-// 🌟 2. อัปเดตตารางรอบ 24 รอบรวดเดียว (POST Bulk)
+// ==========================================
+// 🌟 2. API ฝั่งหลังบ้าน (Admin) ดึงข้อมูลตามวันที่เลือก [✅ แก้บั๊ก Timezone แล้ว]
+// ==========================================
+app.get('/api/admin/yeeki-rounds', async (req, res) => {
+    try {
+        const { date } = req.query; // รับค่า YYYY-MM-DD
+        const pool = await poolPromise; 
+        const result = await pool.request()
+            // 🌟 แก้ไข: ใช้ sql.VarChar แทน sql.Date เพื่อป้องกันวันที่เลื่อน (Timezone Bug)
+            .input('draw_date_str', sql.VarChar, date) 
+            .query(`
+                SELECT * FROM Yeeki_Rounds 
+                WHERE CAST(draw_date AS DATE) = CAST(@draw_date_str AS DATE) 
+                ORDER BY round_number ASC
+            `);
+        
+        res.json({ success: true, rounds: result.recordset });
+    } catch (err) {
+        console.error("Error admin fetch rounds:", err);
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
+
+// ==========================================
+// 🌟 3. อัปเดตตารางรอบ 24 รอบรวดเดียว (POST Bulk)
+// ==========================================
 app.post('/api/admin/yeeki-rounds/bulk', async (req, res) => {
     try {
         const { date, rounds } = req.body;
         const pool = await poolPromise;
         
         for (const round of rounds) {
-            // แปลงเวลาให้เป็นโครงสร้างที่ SQL Server อ่านง่าย (YYYY-MM-DD HH:mm:ss)
             const openTime = `${date} ${round.open_time}:00`;
             const closeTime = `${date} ${round.close_time}:00`;
             const drawTime = `${date} ${round.draw_time}:00`;
 
-            // เช็คว่ามีรอบนี้ของวันนี้ใน DB หรือยัง
             const check = await pool.request()
-                .input('draw_date', sql.Date, date)
+                .input('draw_date_str', sql.VarChar, date)
                 .input('round_number', sql.Int, round.round_number)
-                .query(`SELECT round_id FROM Yeeki_Rounds WHERE draw_date = @draw_date AND round_number = @round_number`);
+                .query(`SELECT round_id FROM Yeeki_Rounds WHERE CAST(draw_date AS DATE) = CAST(@draw_date_str AS DATE) AND round_number = @round_number`);
             
             if (check.recordset.length > 0) {
-                // มีแล้ว -> Update ทับ
+                // มีแล้ว -> Update
                 await pool.request()
                     .input('id', sql.Int, check.recordset[0].round_id)
                     .input('open', sql.DateTime, openTime)
@@ -3875,26 +3901,28 @@ app.post('/api/admin/yeeki-rounds/bulk', async (req, res) => {
                     .input('draw', sql.DateTime, drawTime)
                     .query(`UPDATE Yeeki_Rounds SET open_time = @open, close_time = @close, draw_time = @draw WHERE round_id = @id`);
             } else {
-                // ยังไม่มี -> Insert สร้างใหม่
+                // ยังไม่มี -> Insert
                 await pool.request()
-                    .input('date', sql.Date, date)
+                    .input('date_str', sql.VarChar, date)
                     .input('num', sql.Int, round.round_number)
                     .input('open', sql.DateTime, openTime)
                     .input('close', sql.DateTime, closeTime)
                     .input('draw', sql.DateTime, drawTime)
                     .input('status', sql.VarChar, 'Pending')
                     .query(`INSERT INTO Yeeki_Rounds (draw_date, round_number, open_time, close_time, draw_time, status) 
-                            VALUES (@date, @num, @open, @close, @draw, @status)`);
+                            VALUES (CAST(@date_str AS DATE), @num, @open, @close, @draw, @status)`);
             }
         }
         res.json({ success: true, message: "บันทึกข้อมูลตารางเวลาสำเร็จ!" });
     } catch (err) {
-        console.error(err);
+        console.error("Error bulk save:", err);
         res.status(500).json({ success: false, message: err.message });
     }
 });
 
-// 🌟 3. อัปเดตทีละแถว จากการกดปุ่มแก้ไข (PUT)
+// ==========================================
+// 🌟 4. อัปเดตทีละแถว จากการกดปุ่มแก้ไข (PUT)
+// ==========================================
 app.put('/api/admin/yeeki-rounds/:id', async (req, res) => {
     try {
         const { id } = req.params;
@@ -3914,7 +3942,7 @@ app.put('/api/admin/yeeki-rounds/:id', async (req, res) => {
             
         res.json({ success: true });
     } catch (err) {
-        console.error(err);
+        console.error("Error update single round:", err);
         res.status(500).json({ success: false, message: err.message });
     }
 });
