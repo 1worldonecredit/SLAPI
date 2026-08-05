@@ -3851,16 +3851,13 @@ app.get('/api/yeeki/rounds', async (req, res) => {
         res.status(500).json({ success: false, message: err.message });
     }
 });
-
-// ==========================================
-// 🌟 2. API ฝั่งหลังบ้าน (Admin) ดึงข้อมูลตามวันที่เลือก [✅ แก้บั๊ก Timezone แล้ว]
+// 🌟 2. API ฝั่งหลังบ้าน (Admin) ดึงข้อมูลตามวันที่เลือก [แก้บั๊ก Timezone แล้ว]
 // ==========================================
 app.get('/api/admin/yeeki-rounds', async (req, res) => {
     try {
-        const { date } = req.query; // รับค่า YYYY-MM-DD
+        const { date } = req.query; 
         const pool = await poolPromise; 
         const result = await pool.request()
-            // 🌟 แก้ไข: ใช้ sql.VarChar แทน sql.Date เพื่อป้องกันวันที่เลื่อน (Timezone Bug)
             .input('draw_date_str', sql.VarChar, date) 
             .query(`
                 SELECT * FROM Yeeki_Rounds 
