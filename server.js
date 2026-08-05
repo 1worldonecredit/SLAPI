@@ -3769,16 +3769,27 @@ app.post('/api/hrm/job-ad', async (req, res) => {
 });
 
 // ==========================================
-// 1. ดึงข้อมูล 24 รอบของวันนี้ (หวยยี่กี)
+// 1. ดึงข้อมูล 24 รอบของวันนี้ (หวยยี่กี) - แก้ไขเวลาไทย 100%
 // ==========================================
 app.get('/api/yeeki/rounds', async (req, res) => {
     try {
-        const pool = await sql.connect(dbConfig); // ใช้โครงสร้างตามที่คุณพี่มี
+        const pool = await sql.connect(dbConfig); 
+        
+        // 🌟 1. ใช้ DATEADD(hour, 7, GETUTCDATE()) เพื่อดึงวันที่ของไทยเสมอ
+        // 🌟 2. ใช้ CONVERT(varchar, ..., 120) เพื่อล็อคเวลาไม่ให้เบราว์เซอร์แอบบวกเพิ่ม 7 ชม.
         const result = await pool.request().query(`
-            SELECT * FROM Yeeki_Rounds 
-            WHERE CAST(draw_date AS DATE) = CAST(GETDATE() AS DATE) 
+            SELECT 
+                round_id, 
+                round_number,
+                CONVERT(varchar, open_time, 120) as open_time,
+                CONVERT(varchar, close_time, 120) as close_time,
+                CONVERT(varchar, draw_time, 120) as draw_time,
+                status
+            FROM Yeeki_Rounds 
+            WHERE CAST(draw_date AS DATE) = CAST(DATEADD(hour, 7, GETUTCDATE()) AS DATE) 
             ORDER BY round_number ASC
         `);
+        
         res.json({ success: true, rounds: result.recordset });
     } catch (err) {
         console.error("Error fetching public yeeki rounds:", err);
