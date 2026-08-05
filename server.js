@@ -3832,6 +3832,94 @@ app.post('/api/hrm/job-ad', async (req, res) => {
     }
 });
 
+// 🌟 1. ดึงข้อมูล 24 รอบ (GET)
+app.get('/api/admin/yeeki-rounds', async (req, res) => {
+    try {
+        const { date } = req.query; // รับค่า YYYY-MM-DD
+        const pool = await poolPromise; // ใช้ pool connect db เดิมของคุณพี่
+        const result = await pool.request()
+            .input('draw_date', sql.Date, date)
+            .query(`SELECT * FROM Yeeki_Rounds WHERE draw_date = @draw_date ORDER BY round_number ASC`);
+        
+        res.json({ success: true, rounds: result.recordset });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
+
+// 🌟 2. อัปเดตตารางรอบ 24 รอบรวดเดียว (POST Bulk)
+app.post('/api/admin/yeeki-rounds/bulk', async (req, res) => {
+    try {
+        const { date, rounds } = req.body;
+        const pool = await poolPromise;
+        
+        for (const round of rounds) {
+            // แปลงเวลาให้เป็นโครงสร้างที่ SQL Server อ่านง่าย (YYYY-MM-DD HH:mm:ss)
+            const openTime = `${date} ${round.open_time}:00`;
+            const closeTime = `${date} ${round.close_time}:00`;
+            const drawTime = `${date} ${round.draw_time}:00`;
+
+            // เช็คว่ามีรอบนี้ของวันนี้ใน DB หรือยัง
+            const check = await pool.request()
+                .input('draw_date', sql.Date, date)
+                .input('round_number', sql.Int, round.round_number)
+                .query(`SELECT round_id FROM Yeeki_Rounds WHERE draw_date = @draw_date AND round_number = @round_number`);
+            
+            if (check.recordset.length > 0) {
+                // มีแล้ว -> Update ทับ
+                await pool.request()
+                    .input('id', sql.Int, check.recordset[0].round_id)
+                    .input('open', sql.DateTime, openTime)
+                    .input('close', sql.DateTime, closeTime)
+                    .input('draw', sql.DateTime, drawTime)
+                    .query(`UPDATE Yeeki_Rounds SET open_time = @open, close_time = @close, draw_time = @draw WHERE round_id = @id`);
+            } else {
+                // ยังไม่มี -> Insert สร้างใหม่
+                await pool.request()
+                    .input('date', sql.Date, date)
+                    .input('num', sql.Int, round.round_number)
+                    .input('open', sql.DateTime, openTime)
+                    .input('close', sql.DateTime, closeTime)
+                    .input('draw', sql.DateTime, drawTime)
+                    .input('status', sql.VarChar, 'Pending')
+                    .query(`INSERT INTO Yeeki_Rounds (draw_date, round_number, open_time, close_time, draw_time, status) 
+                            VALUES (@date, @num, @open, @close, @draw, @status)`);
+            }
+        }
+        res.json({ success: true, message: "บันทึกข้อมูลตารางเวลาสำเร็จ!" });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
+
+// 🌟 3. อัปเดตทีละแถว จากการกดปุ่มแก้ไข (PUT)
+app.put('/api/admin/yeeki-rounds/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { draw_date, open_time, close_time, draw_time } = req.body;
+        
+        const openTime = `${draw_date} ${open_time}:00`;
+        const closeTime = `${draw_date} ${close_time}:00`;
+        const drawTime = `${draw_date} ${draw_time}:00`;
+
+        const pool = await poolPromise;
+        await pool.request()
+            .input('id', sql.Int, id)
+            .input('open', sql.DateTime, openTime)
+            .input('close', sql.DateTime, closeTime)
+            .input('draw', sql.DateTime, drawTime)
+            .query(`UPDATE Yeeki_Rounds SET open_time = @open, close_time = @close, draw_time = @draw WHERE round_id = @id`);
+            
+        res.json({ success: true });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
+
+
 app.listen(port, () => {
     console.log(`🚀 Server เปิดทำงานแล้วที่พอร์ต ${port}`);
 });
