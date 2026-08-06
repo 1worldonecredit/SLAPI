@@ -4217,13 +4217,12 @@ app.post('/api/yeeki/buy', async (req, res) => {
 });
 
 // ==========================================
-// 🌟 1. ดึง/อัปเดต การตั้งค่าหวยยี่กี (เปอร์เซ็นต์ออโต้)
+// 🌟 1. ดึง/อัปเดต การตั้งค่าหวยยี่กีออโต้
 // ==========================================
 app.get('/api/yeeki/settings', async (req, res) => {
     try {
         const pool = await sql.connect(dbConfig);
-        const result = await pool.request().query('SELECT TOP 1 is_auto_draw, auto_draw_percent FROM System_Settings');
-        
+        const result = await pool.request().query('SELECT TOP 1 is_auto_draw, auto_draw_percent FROM Yeeki_Settings');
         if (result.recordset.length > 0) {
             res.json({ success: true, data: result.recordset[0] });
         } else {
@@ -4239,23 +4238,139 @@ app.post('/api/yeeki/settings', async (req, res) => {
     try {
         const { is_auto_draw, auto_draw_percent } = req.body;
         const pool = await sql.connect(dbConfig);
-        
-        // เช็คก่อนว่ามีข้อมูลในตารางไหม ถ้าไม่มีให้ Insert ถ้ามีให้ Update
-        const check = await pool.request().query('SELECT COUNT(*) as count FROM System_Settings');
-        if (check.recordset[0].count > 0) {
-            await pool.request()
-                .input('is_auto', sql.Bit, is_auto_draw ? 1 : 0)
-                .input('percent', sql.Int, auto_draw_percent || 50)
-                .query('UPDATE System_Settings SET is_auto_draw = @is_auto, auto_draw_percent = @percent');
-        } else {
-            await pool.request()
-                .input('is_auto', sql.Bit, is_auto_draw ? 1 : 0)
-                .input('percent', sql.Int, auto_draw_percent || 50)
-                .query('INSERT INTO System_Settings (is_auto_draw, auto_draw_percent) VALUES (@is_auto, @percent)');
-        }
+        await pool.request()
+            .input('is_auto', sql.Bit, is_auto_draw ? 1 : 0)
+            .input('percent', sql.Int, auto_draw_percent || 50)
+            .query('UPDATE Yeeki_Settings SET is_auto_draw = @is_auto, auto_draw_percent = @percent');
         res.json({ success: true, message: 'บันทึกการตั้งค่าสำเร็จ' });
     } catch (err) {
         console.error("Error saving Yeeki settings:", err);
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
+
+// ==========================================
+// 🌟 2. ดึงประวัติการออกรางวัล (ดึงเฉพาะรอบที่ออกผลแล้ว)
+// ==========================================
+app.get('/api/admin/yeeki-draw-history', async (req, res) => {
+    try {
+        const { date } = req.query;
+        const pool = await sql.connect(dbConfig);
+        
+        const result = await pool.request()
+            .input('date', sql.VarChar, date)
+            .query(`
+                SELECT TOP 1 round_number, result_8_super, result_4_top, result_3_top, result_2_bottom
+                FROM Yeeki_Rounds
+                WHERE CAST(draw_date AS DATE) = CAST(@date AS DATE) AND status = 'Completed'
+                ORDER BY round_number DESC
+            `);
+            
+        if (result.recordset.length > 0) {
+            res.json({ success: true, results: result.recordset[0], winners: [] });
+        } else {
+            res.json({ success: true, results: null, winners: [] });
+        }
+    } catch (err) {
+        console.error("Error fetching Yeeki history:", err);
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
+
+// ==========================================
+// 🌟 3. กดยืนยันการออกรางวัลและแจกเงินเข้า Wallet!
+// ==========================================
+app.post('/api/admin/execute-yeeki-draw', async (req, res) => {
+    try {
+        const { round_id, super_number, top_number, bottom_number } = req.body;
+        const pool = await sql.connect(dbConfig);
+        const transaction = new sql.Transaction(pool);
+        await transaction.begin();
+
+        try {
+            // 1. บันทึกผลรางวัลลงตารางรอบ
+            const result3 = top_number.slice(-3);
+            await transaction.request()
+                .input('roundId', sql.Int, round_id)
+                .input('super', sql.VarChar, super_number)
+                .input('top4', sql.VarChar, top_number)
+                .input('top3', sql.VarChar, result3)
+                .input('bottom2', sql.VarChar, bottom_number)
+                .query(`
+                    UPDATE Yeeki_Rounds 
+                    SET result_8_super = @super, result_4_top = @top4, result_3_top = @top3, result_2_bottom = @bottom2, status = 'Completed'
+                    WHERE round_id = @roundId
+                `);
+
+            // 2. ดึงโพยหวยที่คนซื้อในรอบนี้มาตรวจทั้งหมด
+            const ordersRes = await transaction.request()
+                .input('roundId', sql.Int, round_id)
+                .query(`
+                    SELECT oi.item_id, oi.order_id, oi.lottery_type, oi.selected_number, oi.price, pr.multiplier, o.user_id
+                    FROM Yeeki_Order_Items oi
+                    JOIN Yeeki_Orders o ON oi.order_id = o.order_id
+                    JOIN Yeeki_Prize_Rates pr ON oi.lottery_type = pr.lottery_type
+                    WHERE o.round_id = @roundId AND oi.status = N'รอผลตรวจ'
+                `);
+
+            const orders = ordersRes.recordset;
+
+            for (let item of orders) {
+                let isWin = false;
+
+                if (item.lottery_type === '8 ตัว (Super)' && item.selected_number === super_number) isWin = true;
+                if (item.lottery_type === '4 ตัวท้าย' && item.selected_number === top_number) isWin = true;
+                if (item.lottery_type === '3 ตัวบน' && item.selected_number === result3) isWin = true;
+                if (item.lottery_type === '2 ตัวบน' && item.selected_number === top_number.slice(-2)) isWin = true;
+                if (item.lottery_type === '2 ตัวล่าง' && item.selected_number === bottom_number) isWin = true;
+                
+                if (item.lottery_type === '3 ตัวโต๊ด') {
+                    const betChars = item.selected_number.split('').sort().join('');
+                    const resultChars = result3.split('').sort().join('');
+                    if (betChars === resultChars) isWin = true;
+                }
+                if (item.lottery_type === 'วิ่งบน' && result3.includes(item.selected_number)) isWin = true;
+                if (item.lottery_type === 'วิ่งล่าง' && bottom_number.includes(item.selected_number)) isWin = true;
+
+                if (isWin) {
+                    const payout = Number(item.price) * Number(item.multiplier);
+                    // ถูกรางวัล -> จ่ายเงิน!
+                    await transaction.request()
+                        .input('itemId', sql.Int, item.item_id)
+                        .input('prize', sql.Decimal(18,2), payout)
+                        .query("UPDATE Yeeki_Order_Items SET status = N'ถูกรางวัล', prize_amount = @prize WHERE item_id = @itemId");
+                    
+                    await transaction.request()
+                        .input('userId', sql.Int, item.user_id)
+                        .input('prize', sql.Decimal(18,2), payout)
+                        .query("UPDATE User_Profile_Banks SET wallet_balance = ISNULL(wallet_balance, 0) + @prize WHERE user_id = @userId");
+                        
+                    await transaction.request()
+                        .input('userId', sql.Int, item.user_id)
+                        .input('amount', sql.Decimal(18,2), payout)
+                        .query("INSERT INTO Transactions (user_id, transaction_type, title, amount, status, created_at) VALUES (@userId, 'Reward', N'ถูกรางวัลยี่กี', @amount, 'Completed', DATEADD(hour, 7, GETUTCDATE()))");
+
+                } else {
+                    // ไม่ถูกรางวัล (แดกเรียบ)
+                    await transaction.request()
+                        .input('itemId', sql.Int, item.item_id)
+                        .query("UPDATE Yeeki_Order_Items SET status = N'ไม่ถูกรางวัล' WHERE item_id = @itemId");
+                }
+            }
+
+            // อัปเดตบิลหลักว่าตรวจแล้ว
+            await transaction.request()
+                .input('roundId', sql.Int, round_id)
+                .query("UPDATE Yeeki_Orders SET status = N'ตรวจผลแล้ว' WHERE round_id = @roundId");
+
+            await transaction.commit();
+            res.json({ success: true, message: 'ประกาศผลและแจกเงินรางวัลสำเร็จเรียบร้อย!' });
+        } catch (err) {
+            await transaction.rollback();
+            throw err;
+        }
+    } catch (err) {
+        console.error("Error executing draw:", err);
         res.status(500).json({ success: false, message: err.message });
     }
 });
