@@ -3354,8 +3354,129 @@ app.post('/api/admin/yeeki/suggest-draw', async (req, res) => {
 });
 
 // ==========================================
-// 🌟 API 3: ค้นหาคนซื้อจากเลข (อิงจากเวลา เปิด-ปิด บิลเป๊ะๆ)
+// 🌟 ระบบประกาศผล ตรวจรางวัล และจ่ายเงินจริง (Execute Draw)
 // ==========================================
+app.post('/api/admin/execute-yeeki-draw', async (req, res) => {
+    const { round_id, super_number, top_number, bottom_number } = req.body;
+
+    if (!round_id || !super_number || !top_number || !bottom_number) {
+        return res.status(400).json({ success: false, message: "กรุณาระบุเลขรางวัลให้ครบถ้วน" });
+    }
+
+    let pool;
+    try {
+        pool = await sql.connect(dbConfig);
+        
+        // 🛡️ เปิดโหมด Transaction (ถ้าพังตอนแจกเงิน ระบบจะดึงเงินกลับทั้งหมด ป้องกันแจกเงินเบิ้ล)
+        const transaction = new sql.Transaction(pool);
+        await transaction.begin();
+
+        try {
+            const reqQuery = transaction.request();
+            
+            // 1. ตัดเลขบน 3 ตัว และ 2 ตัว ออกมาจาก 4 ตัวท้าย
+            let top3 = top_number.slice(-3);
+            let top2 = top_number.slice(-2);
+
+            // 2. บันทึกผลรางวัลลงรอบนั้น และเปลี่ยนสถานะเป็น Completed
+            await reqQuery
+                .input('rid', sql.Int, round_id)
+                .input('s8', sql.VarChar, super_number)
+                .input('t4', sql.VarChar, top_number)
+                .input('t3', sql.VarChar, top3)
+                .input('b2', sql.VarChar, bottom_number)
+                .query(`
+                    UPDATE Yeeki_Rounds
+                    SET result_8_super = @s8, result_4_top = @t4, result_3_top = @t3, result_2_bottom = @b2, status = 'Completed'
+                    WHERE round_id = @rid AND status != 'Completed'
+                `);
+
+            // 3. ดึงรายการซื้อทั้งหมดของรอบนี้ ที่ยัง 'รอผลตรวจ'
+            const ordersReq = await reqQuery.query(`
+                SELECT oi.order_id, oi.lottery_type, oi.selected_number, oi.price, o.user_id, o.currency_code
+                FROM Yeeki_Order_Items oi
+                JOIN Yeeki_Orders o ON oi.order_id = o.order_id
+                WHERE o.round_id = @rid AND oi.status = N'รอผลตรวจ'
+            `);
+
+            const items = ordersReq.recordset;
+
+            // อัตราจ่ายเงินรางวัล (ตัวคูณ)
+            const rates = {
+                '8 ตัว (Super)': 1000000, '4 ตัวท้าย': 6000, '3 ตัวบน': 900,
+                '3 ตัวโต๊ด': 150, '2 ตัวบน': 90, '2 ตัวล่าง': 90,
+                'วิ่งบน': 3.2, 'วิ่งล่าง': 4.2
+            };
+
+            // เตรียมเลข 3 ตัวโต๊ด (สลับตำแหน่ง 6 แบบ)
+            let t1 = top3[0], t2 = top3[1], t3 = top3[2];
+            let toadSets = [ t1+t2+t3, t1+t3+t2, t2+t1+t3, t2+t3+t1, t3+t1+t2, t3+t2+t1 ];
+
+            // 4. วิ่งลูปตรวจบิลทีละใบ
+            for (let item of items) {
+                let isWin = false;
+                let num = item.selected_number;
+
+                // ตรวจว่าถูกรางวัลไหม
+                switch (item.lottery_type) {
+                    case '8 ตัว (Super)': if (num === super_number) isWin = true; break;
+                    case '4 ตัวท้าย': if (num === top_number) isWin = true; break;
+                    case '3 ตัวบน': if (num === top3) isWin = true; break;
+                    case '3 ตัวโต๊ด': if (toadSets.includes(num)) isWin = true; break;
+                    case '2 ตัวบน': if (num === top2) isWin = true; break;
+                    case '2 ตัวล่าง': if (num === bottom_number) isWin = true; break;
+                    case 'วิ่งบน': if (top3.includes(num)) isWin = true; break;
+                    case 'วิ่งล่าง': if (bottom_number.includes(num)) isWin = true; break;
+                }
+
+                if (isWin) {
+                    let prize = item.price * (rates[item.lottery_type] || 0);
+                    
+                    // ปรับสถานะเป็น "Win" และระบุยอดเงินที่ได้
+                    await transaction.request()
+                        .input('oid', sql.Int, item.order_id)
+                        .input('ltype', sql.NVarChar, item.lottery_type)
+                        .input('snum', sql.VarChar, item.selected_number)
+                        .input('prize', sql.Decimal(18,2), prize)
+                        .query(`UPDATE Yeeki_Order_Items SET status = 'Win', prize_amount = @prize WHERE order_id = @oid AND lottery_type = @ltype AND selected_number = @snum`);
+
+                    // 💰 เติมเงินเข้ากระเป๋า User ทันที
+                    await transaction.request()
+                        .input('uid', sql.Int, item.user_id)
+                        .input('prizeAmount', sql.Decimal(18,2), prize)
+                        .query(`UPDATE Users SET wallet_balance = wallet_balance + @prizeAmount WHERE user_id = @uid`);
+                } else {
+                    // ปรับสถานะเป็น "Lose" (ไม่ถูกรางวัล)
+                    await transaction.request()
+                        .input('oid', sql.Int, item.order_id)
+                        .input('ltype', sql.NVarChar, item.lottery_type)
+                        .input('snum', sql.VarChar, item.selected_number)
+                        .query(`UPDATE Yeeki_Order_Items SET status = 'Lose', prize_amount = 0 WHERE order_id = @oid AND lottery_type = @ltype AND selected_number = @snum`);
+                }
+            }
+
+            // 5. ปรับสถานะบิลหลัก (Yeeki_Orders) เป็น Completed
+            await transaction.request()
+                .input('ridStatus', sql.Int, round_id)
+                .query(`UPDATE Yeeki_Orders SET status = 'Completed' WHERE round_id = @ridStatus`);
+
+            // 6. ยืนยันการเปลี่ยนแปลงข้อมูลทั้งหมด (แจกเงินสำเร็จ!)
+            await transaction.commit();
+            res.json({ success: true, message: "ประกาศผล ตรวจรางวัล และโอนเงินเข้ากระเป๋าลูกค้าสำเร็จ!" });
+
+        } catch (innerErr) {
+            // ถ้าพังระหว่างแจกเงิน ให้ยกเลิกทั้งหมด เงินไม่หาย
+            await transaction.rollback();
+            throw innerErr; 
+        }
+
+    } catch (err) {
+        console.error("Execute draw error:", err);
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
+
+
 // ==========================================
 // 🌟 API 2: ค้นหาคนซื้อจากเลข (ด้านล่างสุด)
 // ==========================================
