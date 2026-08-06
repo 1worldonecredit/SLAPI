@@ -3959,17 +3959,23 @@ app.get('/api/yeeki/jackpot', async (req, res) => {
 
 
 // ==========================================
-// 🌟 2. API ฝั่งหลังบ้าน (Admin) ดึงข้อมูลตามวันที่เลือก [✅ แก้บั๊ก Timezone แล้ว]
+// 🌟 API ฝั่งหลังบ้าน (Admin) ดึงข้อมูลรอบตาม "วันที่เลือก" บนปฏิทิน
 // ==========================================
 app.get('/api/admin/yeeki-rounds', async (req, res) => {
     try {
-        const { date } = req.query; // รับค่า YYYY-MM-DD
-        const pool = await poolPromise; 
+        const { date } = req.query; // รับค่า YYYY-MM-DD จากปฏิทิน
+        const pool = await sql.connect(dbConfig); 
         const result = await pool.request()
-            // 🌟 แก้ไข: ใช้ sql.VarChar แทน sql.Date เพื่อป้องกันวันที่เลื่อน (Timezone Bug)
             .input('draw_date_str', sql.VarChar, date) 
             .query(`
-                SELECT * FROM Yeeki_Rounds 
+                SELECT 
+                    round_id, 
+                    round_number,
+                    CONVERT(varchar, open_time, 120) as open_time,
+                    CONVERT(varchar, close_time, 120) as close_time,
+                    CONVERT(varchar, draw_time, 120) as draw_time,
+                    status
+                FROM Yeeki_Rounds 
                 WHERE CAST(draw_date AS DATE) = CAST(@draw_date_str AS DATE) 
                 ORDER BY round_number ASC
             `);
