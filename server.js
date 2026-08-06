@@ -3988,12 +3988,14 @@ app.get('/api/admin/yeeki-rounds', async (req, res) => {
 });
 
 // ==========================================
-// 🌟 3. อัปเดตตารางรอบ 24 รอบรวดเดียว (POST Bulk)
+// 🌟 3. อัปเดตตารางรอบ 24 รอบรวดเดียว (POST Bulk) - แก้ไข poolPromise แล้ว!
 // ==========================================
 app.post('/api/admin/yeeki-rounds/bulk', async (req, res) => {
     try {
         const { date, rounds } = req.body;
-        const pool = await poolPromise;
+        
+        // 🌟 เปลี่ยนจาก await poolPromise มาใช้ sql.connect(dbConfig) ที่ถูกต้อง
+        const pool = await sql.connect(dbConfig); 
         
         for (const round of rounds) {
             const openTime = `${date} ${round.open_time}:00`;
@@ -4034,7 +4036,7 @@ app.post('/api/admin/yeeki-rounds/bulk', async (req, res) => {
 });
 
 // ==========================================
-// 🌟 4. อัปเดตทีละแถว จากการกดปุ่มแก้ไข (PUT)
+// 🌟 4. อัปเดตทีละแถว จากการกดปุ่มแก้ไข (PUT) - แก้ไข poolPromise แล้ว!
 // ==========================================
 app.put('/api/admin/yeeki-rounds/:id', async (req, res) => {
     try {
@@ -4045,7 +4047,9 @@ app.put('/api/admin/yeeki-rounds/:id', async (req, res) => {
         const closeTime = `${draw_date} ${close_time}:00`;
         const drawTime = `${draw_date} ${draw_time}:00`;
 
-        const pool = await poolPromise;
+        // 🌟 เปลี่ยนจาก await poolPromise
+        const pool = await sql.connect(dbConfig);
+        
         await pool.request()
             .input('id', sql.Int, id)
             .input('open', sql.DateTime, openTime)
@@ -4059,7 +4063,6 @@ app.put('/api/admin/yeeki-rounds/:id', async (req, res) => {
         res.status(500).json({ success: false, message: err.message });
     }
 });
-
 // ==========================================
 // API: รายงานยอดขายหวยยี่กีสำหรับ Admin (Real-time)
 // ==========================================
