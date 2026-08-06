@@ -3896,14 +3896,13 @@ app.post('/api/hrm/job-ad', async (req, res) => {
 });
 
 // ==========================================
-// 1. ดึงข้อมูล 24 รอบของวันนี้ (หวยยี่กี) - แก้ไขเวลาไทย 100%
+// 🌟 2. ดึงข้อมูล 24 รอบของวันนี้ (ทั้งหน้าบ้านและหลังบ้านใช้ร่วมกัน)
 // ==========================================
 app.get('/api/yeeki/rounds', async (req, res) => {
     try {
         const pool = await sql.connect(dbConfig); 
         
-        // 🌟 1. ใช้ DATEADD(hour, 7, GETUTCDATE()) เพื่อดึงวันที่ของไทยเสมอ
-        // 🌟 2. ใช้ CONVERT(varchar, ..., 120) เพื่อล็อคเวลาไม่ให้เบราว์เซอร์แอบบวกเพิ่ม 7 ชม.
+        // 🌟 ดึงข้อมูลรอบของวันนี้ (อิงเวลาไทย) และแปลงเวลาให้ JavaScript ฝั่ง Frontend อ่านได้เป๊ะๆ
         const result = await pool.request().query(`
             SELECT 
                 round_id, 
@@ -3919,10 +3918,11 @@ app.get('/api/yeeki/rounds', async (req, res) => {
         
         res.json({ success: true, rounds: result.recordset });
     } catch (err) {
-        console.error("Error fetching public yeeki rounds:", err);
+        console.error("Error fetching Yeeki rounds:", err);
         res.status(500).json({ success: false, message: err.message });
     }
 });
+
 
 // ==========================================
 // 2. ดึงอัตราการจ่าย (หวยยี่กี)
@@ -4216,7 +4216,269 @@ app.post('/api/yeeki/buy', async (req, res) => {
     }
 });
 
+// ==========================================
+// 🌟 1. ดึง/อัปเดต การตั้งค่าหวยยี่กี (เปอร์เซ็นต์ออโต้)
+// ==========================================
+app.get('/api/yeeki/settings', async (req, res) => {
+    try {
+        const pool = await sql.connect(dbConfig);
+        const result = await pool.request().query('SELECT TOP 1 is_auto_draw, auto_draw_percent FROM System_Settings');
+        
+        if (result.recordset.length > 0) {
+            res.json({ success: true, data: result.recordset[0] });
+        } else {
+            res.json({ success: true, data: { is_auto_draw: false, auto_draw_percent: 50 } });
+        }
+    } catch (err) {
+        console.error("Error fetching Yeeki settings:", err);
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
 
+app.post('/api/yeeki/settings', async (req, res) => {
+    try {
+        const { is_auto_draw, auto_draw_percent } = req.body;
+        const pool = await sql.connect(dbConfig);
+        
+        // เช็คก่อนว่ามีข้อมูลในตารางไหม ถ้าไม่มีให้ Insert ถ้ามีให้ Update
+        const check = await pool.request().query('SELECT COUNT(*) as count FROM System_Settings');
+        if (check.recordset[0].count > 0) {
+            await pool.request()
+                .input('is_auto', sql.Bit, is_auto_draw ? 1 : 0)
+                .input('percent', sql.Int, auto_draw_percent || 50)
+                .query('UPDATE System_Settings SET is_auto_draw = @is_auto, auto_draw_percent = @percent');
+        } else {
+            await pool.request()
+                .input('is_auto', sql.Bit, is_auto_draw ? 1 : 0)
+                .input('percent', sql.Int, auto_draw_percent || 50)
+                .query('INSERT INTO System_Settings (is_auto_draw, auto_draw_percent) VALUES (@is_auto, @percent)');
+        }
+        res.json({ success: true, message: 'บันทึกการตั้งค่าสำเร็จ' });
+    } catch (err) {
+        console.error("Error saving Yeeki settings:", err);
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
+
+// ==========================================
+// 🌟 2. ดึงข้อมูล 24 รอบของวันนี้ (ทั้งหน้าบ้านและหลังบ้านใช้ร่วมกัน)
+// ==========================================
+app.get('/api/yeeki/rounds', async (req, res) => {
+    try {
+        const pool = await sql.connect(dbConfig); 
+        
+        // 🌟 ดึงข้อมูลรอบของวันนี้ (อิงเวลาไทย) และแปลงเวลาให้ JavaScript ฝั่ง Frontend อ่านได้เป๊ะๆ
+        const result = await pool.request().query(`
+            SELECT 
+                round_id, 
+                round_number,
+                CONVERT(varchar, open_time, 120) as open_time,
+                CONVERT(varchar, close_time, 120) as close_time,
+                CONVERT(varchar, draw_time, 120) as draw_time,
+                status
+            FROM Yeeki_Rounds 
+            WHERE CAST(draw_date AS DATE) = CAST(DATEADD(hour, 7, GETUTCDATE()) AS DATE) 
+            ORDER BY round_number ASC
+        `);
+        
+        res.json({ success: true, rounds: result.recordset });
+    } catch (err) {
+        console.error("Error fetching Yeeki rounds:", err);
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
+
+// ==========================================
+// 🌟 3. หัวใจอัจฉริยะ: ระบบแนะนำเลขเด็ด (ให้ระบบได้กำไรตามเป้า)
+// ==========================================
+app.post('/api/admin/suggest-yeeki-draw', async (req, res) => {
+    try {
+        const { targetPercent, round_id } = req.body;
+        const pool = await sql.connect(dbConfig);
+
+        // 1. ดึงยอดซื้อทั้งหมดในรอบนี้
+        const ordersRes = await pool.request()
+            .input('roundId', sql.Int, round_id)
+            .query(`
+                SELECT oi.lottery_type, oi.selected_number, oi.price, pr.multiplier
+                FROM Yeeki_Order_Items oi
+                JOIN Yeeki_Orders o ON oi.order_id = o.order_id
+                JOIN Yeeki_Prize_Rates pr ON oi.lottery_type = pr.lottery_type
+                WHERE o.round_id = @roundId AND oi.status = N'รอผลตรวจ'
+            `);
+        
+        const orders = ordersRes.recordset;
+
+        // คำนวณยอดขายรวม
+        const totalSales = orders.reduce((sum, item) => sum + Number(item.price), 0);
+        const targetPayout = totalSales * (targetPercent / 100); // ยอดที่ยอมให้จ่ายได้สูงสุด
+
+        if (totalSales === 0) {
+            // ถ้าไม่มียอดแทงเลย สุ่มอะไรก็ได้
+            const rand = (min, max) => Math.floor(Math.random() * (max - min + 1) + min).toString();
+            return res.json({ 
+                success: true, 
+                suggestedSuper: rand(10000000, 99999999), 
+                suggestedTop: rand(1000, 9999), 
+                suggestedBottom: rand(10, 99).padStart(2, '0'),
+                totalSales: 0,
+                analysis: [] 
+            });
+        }
+
+        // ==========================================
+        // 🧠 อัลกอริทึมสุ่มตัวเลขหนียอดแทง (Smart Evasion)
+        // ==========================================
+        let bestSuper = '';
+        let bestTop = '';
+        let bestBottom = '';
+        let lowestPayout = Infinity;
+        let attempts = 0;
+        const maxAttempts = 100; // สุ่ม 100 ครั้งเพื่อหาชุดที่ปลอดภัยที่สุด
+
+        while (attempts < maxAttempts) {
+            // 1. สุ่มเลขชุดใหม่
+            const testSuper = Math.floor(Math.random() * (99999999 - 10000000 + 1) + 10000000).toString();
+            const testTop = Math.floor(Math.random() * (9999 - 1000 + 1) + 1000).toString();
+            const testBottom = Math.floor(Math.random() * (99 - 10 + 1) + 10).toString().padStart(2, '0');
+            
+            let currentPayout = 0;
+
+            // 2. คำนวณยอดจ่ายจากบิลทั้งหมดที่มีคนแทง
+            for (let item of orders) {
+                let isWin = false;
+                if (item.lottery_type === '8 ตัว (Super)' && item.selected_number === testSuper) isWin = true;
+                if (item.lottery_type === '4 ตัวท้าย' && item.selected_number === testTop) isWin = true;
+                if (item.lottery_type === '3 ตัวบน' && item.selected_number === testTop.slice(-3)) isWin = true;
+                if (item.lottery_type === '2 ตัวบน' && item.selected_number === testTop.slice(-2)) isWin = true;
+                if (item.lottery_type === '2 ตัวล่าง' && item.selected_number === testBottom) isWin = true;
+                
+                // ตรวจโต๊ด และ วิ่ง
+                if (item.lottery_type === '3 ตัวโต๊ด') {
+                    const betChars = item.selected_number.split('').sort().join('');
+                    const resultChars = testTop.slice(-3).split('').sort().join('');
+                    if (betChars === resultChars) isWin = true;
+                }
+                if (item.lottery_type === 'วิ่งบน' && testTop.slice(-3).includes(item.selected_number)) isWin = true;
+                if (item.lottery_type === 'วิ่งล่าง' && testBottom.includes(item.selected_number)) isWin = true;
+
+                if (isWin) currentPayout += Number(item.price) * Number(item.multiplier);
+            }
+
+            // 3. ถ้าได้ยอดจ่ายน้อยกว่าเป้าที่ตั้งไว้ ถือว่าเจอแล้ว หยุดหาสุ่มเลย
+            if (currentPayout <= targetPayout) {
+                bestSuper = testSuper;
+                bestTop = testTop;
+                bestBottom = testBottom;
+                lowestPayout = currentPayout;
+                break; 
+            }
+
+            // ถ้าเกินเป้า ให้จำตัวที่จ่ายน้อยที่สุดไว้เผื่อสุ่มครบ 100 ครั้งแล้วยังไม่รอด
+            if (currentPayout < lowestPayout) {
+                lowestPayout = currentPayout;
+                bestSuper = testSuper;
+                bestTop = testTop;
+                bestBottom = testBottom;
+            }
+
+            attempts++;
+        }
+
+        // ==========================================
+        // ส่งผลลัพธ์ที่ดีที่สุดกลับไปให้แผงควบคุม
+        // ==========================================
+        // (ฟังก์ชันสร้าง Analysis Data แบบคร่าวๆ เพื่อให้หน้าเว็บแสดงผลตารางได้)
+        const analysisData = [
+            { lottery_type: '8 ตัว (Super)', winner_count: 0, total_payout: 0 },
+            { lottery_type: '4 ตัวท้าย', winner_count: 0, total_payout: 0 },
+            { lottery_type: '3 ตัวบน', winner_count: 0, total_payout: 0 },
+            { lottery_type: '2 ตัวบน', winner_count: 0, total_payout: 0 },
+            { lottery_type: '2 ตัวล่าง', winner_count: 0, total_payout: 0 }
+        ];
+        
+        // (ใน API นี้เราจำลองข้อมูลใส่เพื่อความรวดเร็ว หน้าเว็บจะมีปุ่ม "กดเช็คยอดจ่าย" เพื่อคำนวณละเอียดอีกที)
+        res.json({ 
+            success: true, 
+            suggestedSuper: bestSuper, 
+            suggestedTop: bestTop, 
+            suggestedBottom: bestBottom,
+            totalSales: totalSales,
+            analysis: analysisData // คืนค่าตารางว่างๆ ไปก่อน ให้แอดมินกดเช็คละเอียดเองที่หน้าเว็บ
+        });
+
+    } catch (err) {
+        console.error("Error in Smart Suggestion:", err);
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
+
+// ==========================================
+// 🌟 4. วิเคราะห์ยอดจ่ายแบบละเอียด (เมื่อแอดมินกดปุ่มเช็ค)
+// ==========================================
+app.post('/api/admin/analyze-yeeki-draw', async (req, res) => {
+    try {
+        const { round_id, super_number, top_number, bottom_number } = req.body;
+        const pool = await sql.connect(dbConfig);
+
+        const ordersRes = await pool.request()
+            .input('roundId', sql.Int, round_id)
+            .query(`
+                SELECT oi.lottery_type, oi.selected_number, oi.price, pr.multiplier
+                FROM Yeeki_Order_Items oi
+                JOIN Yeeki_Orders o ON oi.order_id = o.order_id
+                JOIN Yeeki_Prize_Rates pr ON oi.lottery_type = pr.lottery_type
+                WHERE o.round_id = @roundId AND oi.status = N'รอผลตรวจ'
+            `);
+        
+        const orders = ordersRes.recordset;
+        let totalSales = 0;
+        let analysisMap = {};
+
+        // เริ่มต้นตารางผลลัพธ์
+        const types = ['8 ตัว (Super)', '4 ตัวท้าย', '3 ตัวบน', '3 ตัวโต๊ด', '2 ตัวบน', '2 ตัวล่าง', 'วิ่งบน', 'วิ่งล่าง'];
+        types.forEach(t => analysisMap[t] = { winner_count: 0, total_payout: 0 });
+
+        for (let item of orders) {
+            totalSales += Number(item.price);
+            let isWin = false;
+
+            if (item.lottery_type === '8 ตัว (Super)' && item.selected_number === super_number) isWin = true;
+            if (item.lottery_type === '4 ตัวท้าย' && item.selected_number === top_number) isWin = true;
+            if (item.lottery_type === '3 ตัวบน' && item.selected_number === top_number.slice(-3)) isWin = true;
+            if (item.lottery_type === '2 ตัวบน' && item.selected_number === top_number.slice(-2)) isWin = true;
+            if (item.lottery_type === '2 ตัวล่าง' && item.selected_number === bottom_number) isWin = true;
+            
+            if (item.lottery_type === '3 ตัวโต๊ด') {
+                const betChars = item.selected_number.split('').sort().join('');
+                const resultChars = top_number.slice(-3).split('').sort().join('');
+                if (betChars === resultChars) isWin = true;
+            }
+            if (item.lottery_type === 'วิ่งบน' && top_number.slice(-3).includes(item.selected_number)) isWin = true;
+            if (item.lottery_type === 'วิ่งล่าง' && bottom_number.includes(item.selected_number)) isWin = true;
+
+            if (isWin) {
+                const payout = Number(item.price) * Number(item.multiplier);
+                if(analysisMap[item.lottery_type]) {
+                   analysisMap[item.lottery_type].winner_count += 1;
+                   analysisMap[item.lottery_type].total_payout += payout;
+                }
+            }
+        }
+
+        const analysisArray = Object.keys(analysisMap).map(k => ({
+            lottery_type: k,
+            winner_count: analysisMap[k].winner_count,
+            total_payout: analysisMap[k].total_payout
+        }));
+
+        res.json({ success: true, totalSales, analysis: analysisArray });
+
+    } catch (err) {
+        console.error("Error Analyzing:", err);
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
 
 app.listen(port, () => {
     console.log(`🚀 Server เปิดทำงานแล้วที่พอร์ต ${port}`);
