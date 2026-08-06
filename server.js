@@ -3952,21 +3952,20 @@ app.get('/api/admin/yeeki/sales-report', async (req, res) => {
         
         const dbRounds = roundsResult.recordset;
 
-        // 2. ดึงรายการซื้อ (Order Items) ของวันนี้ทั้งหมด เพื่อมาสรุปยอด
+        // 🌟 2. ดึงรายการซื้อ (แก้ให้ตรงกับตาราง Yeeki_Orders และ Yeeki_Order_Items ของคุณพี่แล้ว)
         const ordersResult = await pool.request().query(`
             SELECT 
-                oi.round_id,
+                o.round_id,
                 u.username,
                 oi.lottery_type as type,
-                oi.lottery_number as number,
+                oi.selected_number as number,
                 oi.price,
-                o.currency,
+                o.currency_code as currency,
                 oi.status
-            FROM Lottery_Order_Items oi
-            JOIN Lottery_Orders o ON oi.order_id = o.order_id
+            FROM Yeeki_Order_Items oi
+            JOIN Yeeki_Orders o ON oi.order_id = o.order_id
             JOIN Users u ON o.user_id = u.id
-            WHERE o.lottery_category = 'YEEKI' 
-              AND CAST(o.created_at AS DATE) = CAST(DATEADD(hour, 7, GETUTCDATE()) AS DATE)
+            WHERE CAST(o.created_at AS DATE) = CAST(DATEADD(hour, 7, GETUTCDATE()) AS DATE)
             ORDER BY oi.created_at DESC
         `);
 
@@ -3977,9 +3976,8 @@ app.get('/api/admin/yeeki/sales-report', async (req, res) => {
         let activeThb = 0;
         let activeLak = 0;
 
-        // 3. จัดกลุ่มข้อมูล (Map Orders to Rounds)
+        // 3. จัดกลุ่มข้อมูล 
         const roundsData = dbRounds.map(round => {
-            // หารายการบิลที่อยู่ในรอบนี้
             const roundOrders = allOrders.filter(o => o.round_id === round.round_id);
             
             let total_thb = 0;
