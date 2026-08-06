@@ -3928,6 +3928,97 @@ app.put('/api/admin/yeeki-rounds/:id', async (req, res) => {
 });
 
 
+// ==========================================
+// API: รายงานยอดขายหวยยี่กีสำหรับ Admin (Real-time)
+// ==========================================
+app.get('/api/admin/yeeki/sales-report', async (req, res) => {
+    try {
+        const pool = await sql.connect(dbConfig);
+        
+        // 1. ดึงรอบของวันนี้ทั้งหมด (24 รอบ) และผลรางวัล (ถ้ามี)
+        const roundsResult = await pool.request().query(`
+            SELECT 
+                r.round_id, 
+                r.round_number, 
+                CONVERT(varchar, r.open_time, 108) as open_time, 
+                CONVERT(varchar, r.close_time, 108) as close_time, 
+                CONVERT(varchar, r.draw_time, 108) as draw_time,
+                r.status,
+                dr.result_number as winning_result
+            FROM Yeeki_Rounds r
+            LEFT JOIN Draw_Results dr ON r.round_id = dr.round_id AND dr.lottery_type = 'YEEKI'
+            WHERE CAST(r.draw_date AS DATE) = CAST(DATEADD(hour, 7, GETUTCDATE()) AS DATE)
+            ORDER BY r.round_number ASC
+        `);
+        
+        const dbRounds = roundsResult.recordset;
+
+        // 2. ดึงรายการซื้อ (Order Items) ของวันนี้ทั้งหมด เพื่อมาสรุปยอด
+        const ordersResult = await pool.request().query(`
+            SELECT 
+                oi.round_id,
+                u.username,
+                oi.lottery_type as type,
+                oi.lottery_number as number,
+                oi.price,
+                o.currency,
+                oi.status
+            FROM Lottery_Order_Items oi
+            JOIN Lottery_Orders o ON oi.order_id = o.order_id
+            JOIN Users u ON o.user_id = u.id
+            WHERE o.lottery_category = 'YEEKI' 
+              AND CAST(o.created_at AS DATE) = CAST(DATEADD(hour, 7, GETUTCDATE()) AS DATE)
+            ORDER BY oi.created_at DESC
+        `);
+
+        const allOrders = ordersResult.recordset;
+
+        let overallThb = 0;
+        let overallLak = 0;
+        let activeThb = 0;
+        let activeLak = 0;
+
+        // 3. จัดกลุ่มข้อมูล (Map Orders to Rounds)
+        const roundsData = dbRounds.map(round => {
+            // หารายการบิลที่อยู่ในรอบนี้
+            const roundOrders = allOrders.filter(o => o.round_id === round.round_id);
+            
+            let total_thb = 0;
+            let total_lak = 0;
+
+            roundOrders.forEach(order => {
+                if (order.currency === 'THB' || order.currency === '฿') {
+                    total_thb += Number(order.price);
+                    overallThb += Number(order.price);
+                    if (round.status === 'open' || round.status === 'upcoming') activeThb += Number(order.price);
+                } else {
+                    total_lak += Number(order.price);
+                    overallLak += Number(order.price);
+                    if (round.status === 'open' || round.status === 'upcoming') activeLak += Number(order.price);
+                }
+            });
+
+            return {
+                ...round,
+                total_thb,
+                total_lak,
+                orders: roundOrders
+            };
+        });
+
+        res.json({
+            success: true,
+            overallTotal: { thb: overallThb, lak: overallLak },
+            activeRoundTotal: { thb: activeThb, lak: activeLak },
+            rounds: roundsData
+        });
+
+    } catch (error) {
+        console.error('Error Yeeki Sales Report:', error);
+        res.status(500).json({ success: false, message: error.message });
+    }
+});
+
 app.listen(port, () => {
     console.log(`🚀 Server เปิดทำงานแล้วที่พอร์ต ${port}`);
 });
