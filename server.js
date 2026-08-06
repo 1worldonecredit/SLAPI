@@ -1624,9 +1624,8 @@ app.get('/api/transactions/:userId', async (req, res) => {
         res.status(500).json({ success: false, message: 'ไม่สามารถดึงข้อมูลประวัติการเงินได้' });
     }
 });
-
 // ==========================================
-// API 1: ลูกค้าแจ้งฝากเงิน (บันทึกเป็น Pending เสมอ ต้องรอคนตรวจสลิป)
+// API 1: ลูกค้าแจ้งฝากเงิน (บันทึกเป็น Pending เสมอ + ดักบิลซ้อน)
 // ==========================================
 app.post('/api/deposit-submit', async (req, res) => {
   try {
@@ -1634,6 +1633,24 @@ app.post('/api/deposit-submit', async (req, res) => {
     const cleanAmount = Math.round(parseFloat(amount) * 100) / 100; 
     const depositDatetime = `${depositDate} ${depositTime}`;
     const pool = await sql.connect(dbConfig); 
+
+    // 🛡️ [ด่านหน้าสุด]: เช็คว่ามีบิลที่ "รอตรวจ" (Pending) หรือ "รอแก้ไข" (Rejected) ค้างอยู่ไหม?
+    const checkActive = await pool.request()
+        .input('userId', sql.Int, userId)
+        .query(`
+            SELECT COUNT(*) as activeCount 
+            FROM Transactions_Deposit 
+            WHERE user_id = @userId AND status IN ('Pending', 'Rejected')
+        `);
+
+    // ถ้ามีบิลค้างอยู่เกิน 0 ให้เด้งออกทันที! ห้ามส่งคำขอใหม่เด็ดขาด
+    if (checkActive.recordset[0].activeCount > 0) {
+        return res.status(400).json({ 
+            success: false, 
+            message: 'คุณมีรายการฝากเงินที่กำลังรอดำเนินการ หรือรอแก้ไขอยู่ กรุณาจัดการบิลเดิมให้เสร็จสิ้นก่อนทำรายการใหม่ครับ' 
+        });
+    }
+    // ----------------------------------------
 
     // ดึง Username
     const userResult = await pool.request()
@@ -1659,7 +1676,6 @@ app.post('/api/deposit-submit', async (req, res) => {
         VALUES (@userId, @customerName, @bankName, @accountNumber, @amount, @currencyCode, @slipImage, 'Pending', @depositDatetime, GETDATE())
       `);
 
-    // 🌟 เอาโค้ดเช็กเติมเงินอัตโนมัติออกทั้งหมด เพื่อบังคับให้แอดมินตรวจมือ
     res.json({ success: true, message: 'ส่งคำขอฝากเงินสำเร็จ! รอแอดมินตรวจสอบสลิป' });
   } catch (error) {
     console.error('Error in deposit-submit:', error);
@@ -1715,17 +1731,17 @@ app.get('/api/admin/deposit-requests', async (req, res) => {
 });
 
 // ==========================================
-// API: แอดมินตีกลับคำขอฝากเงิน (Reject & Anti-Spam Check)
+// 🌟 API: แอดมินตีกลับคำขอฝากเงิน (แก้ไขบั๊ก Error 500 เรียบร้อย)
 // ==========================================
 app.post('/api/admin/deposit-reject', async (req, res) => {
   try {
     const { depositId, userId, rejectReasons } = req.body;
     const pool = await sql.connect(dbConfig);
 
-    // แปลง Object เหตุผลที่ติ๊กเลือก เป็น JSON String เพื่อบันทึกลงฐานข้อมูล
-    const reasonsJson = JSON.stringify(rejectReasons);
+    // แปลงเหตุผลเป็น JSON (ใส่กันเหนียวไว้เผื่อไม่มีค่าส่งมา)
+    const reasonsJson = JSON.stringify(rejectReasons || []);
 
-    // 1. อัปเดตสถานะเป็น ตีกลับ (Rejected), บันทึกเหตุผล, และบวก edit_count เพิ่มทีละ 1
+    // 1. อัปเดตสถานะเป็น ตีกลับ (Rejected) และบวก edit_count
     const updateResult = await pool.request()
       .input('depositId', sql.Int, depositId)
       .input('reasons', sql.NVarChar, reasonsJson)
@@ -1741,50 +1757,20 @@ app.post('/api/admin/deposit-reject', async (req, res) => {
       
     const currentEditCount = updateResult.recordset[0].edit_count;
 
-    // ==========================================
-    // 🛡️ ระบบตรวจจับการก่อกวน (Anti-Spam / Fraud Detection)
-    // ==========================================
-    let isSpammer = false;
-    let spamReason = '';
-
-    // กฎข้อที่ 1: รายการเดียว แต่ส่งแก้ผิดซ้ำซากเกิน 3 ครั้ง
+    // 2. 🛡️ ระบบป้องกันก่อกวน: ถ้าลูกค้ารายเดิม ส่งแก้บิลเดิมผิดเกิน 3 ครั้ง ให้ยกเลิกถาวร!
     if (currentEditCount > 3) {
-      isSpammer = true;
-      spamReason = `แก้ไขคำขอเดิมผิดพลาดเกิน 3 ครั้ง (Deposit ID: ${depositId})`;
-    }
-
-    // กฎข้อที่ 2: สแปมส่งคำขอฝากเงิน (แต่ไม่เคยจับคู่ผ่านเลย) เกิน 10 รายการในวันนี้
-    if (!isSpammer) {
-      const checkDailySpam = await pool.request()
-        .input('userId', sql.Int, userId)
-        .query(`
-          SELECT COUNT(*) as pending_count FROM Transactions_Deposit 
-          WHERE user_id = @userId 
-            AND status IN ('Pending', 'Rejected') 
-            AND CAST(created_at AS DATE) = CAST(GETDATE() AS DATE)
-        `);
-        
-      if (checkDailySpam.recordset[0].pending_count >= 10) {
-        isSpammer = true;
-        spamReason = 'ส่งคำขอฝากเงินที่ไม่สำเร็จ/ตีกลับ เกิน 10 รายการใน 1 วัน';
-      }
-    }
-
-    // หากเข้าข่ายก่อกวน ให้ขึ้น Blacklist แจ้งเตือนแอดมินทันที!
-    if (isSpammer) {
       await pool.request()
-        .input('userId', sql.Int, userId)
-        .input('reason', sql.NVarChar, spamReason)
+        .input('depositId', sql.Int, depositId)
         .query(`
-          UPDATE Users 
-          SET is_suspicious = 1, suspicious_reason = @reason 
-          WHERE user_id = @userId
+          UPDATE Transactions_Deposit 
+          SET status = 'Cancelled', 
+              reviewed_by = 'System Blocked (Spam)' 
+          WHERE deposit_id = @depositId
         `);
         
       return res.json({ 
         success: true, 
-        message: 'ส่งกลับให้ลูกค้าแก้ไขแล้ว! ⚠️ แจ้งเตือน: ระบบตรวจพบพฤติกรรมก่อกวนจากลูกค้ารายนี้ และได้ทำเครื่องหมายเฝ้าระวังแล้ว',
-        isSuspicious: true
+        message: 'ตีกลับสำเร็จ! (ระบบยกเลิกบิลนี้ถาวร เนื่องจากลูกค้าส่งแก้ไขข้อมูลผิดเกิน 3 ครั้ง)' 
       });
     }
 
@@ -1792,7 +1778,7 @@ app.post('/api/admin/deposit-reject', async (req, res) => {
 
   } catch (error) {
     console.error('Error rejecting deposit:', error);
-    res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการตีกลับรายการ' });
+    res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการตีกลับรายการ: ' + error.message });
   }
 });
 
