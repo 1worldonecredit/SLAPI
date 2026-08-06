@@ -4016,6 +4016,80 @@ app.get('/api/admin/yeeki/sales-report', async (req, res) => {
     }
 });
 
+// ==========================================
+// API: ซื้อหวยยี่กี (บันทึกลงตาราง Yeeki_Orders โดยเฉพาะ)
+// ==========================================
+app.post('/api/yeeki/buy', async (req, res) => {
+    const { user_id, cart, total_price, currency, note } = req.body;
+    
+    if (!user_id || !cart || cart.length === 0) {
+        return res.status(400).json({ success: false, message: 'ข้อมูลตะกร้าว่างเปล่า' });
+    }
+
+    try {
+        const pool = await sql.connect(dbConfig);
+        const transaction = new sql.Transaction(pool);
+        await transaction.begin();
+        
+        try {
+            // 1. ดึงรอบจากรายการแรกในตะกร้า
+            const round_id = cart[0].round_id;
+            
+            // 2. บันทึกลงตาราง Yeeki_Orders (บิลหลัก)
+            const orderResult = await transaction.request()
+                .input('user_id', sql.Int, user_id)
+                .input('round_id', sql.Int, round_id)
+                .input('total_amount', sql.Decimal(18, 2), total_price)
+                .input('currency_code', sql.VarChar(10), currency)
+                .input('status', sql.NVarChar(50), 'รอผลตรวจ')
+                .input('order_note', sql.NVarChar(sql.MAX), note || '')
+                .query(`
+                    INSERT INTO Yeeki_Orders (user_id, round_id, total_amount, currency_code, status, order_note, created_at)
+                    OUTPUT INSERTED.order_id
+                    VALUES (@user_id, @round_id, @total_amount, @currency_code, @status, @order_note, DATEADD(hour, 7, GETUTCDATE()))
+                `);
+                
+            const new_order_id = orderResult.recordset[0].order_id;
+
+            // 3. บันทึกลงตาราง Yeeki_Order_Items (รายการตัวเลข)
+            for (let item of cart) {
+                await transaction.request()
+                    .input('order_id', sql.Int, new_order_id)
+                    .input('lottery_type', sql.NVarChar(50), item.type)
+                    .input('selected_number', sql.VarChar(20), item.number)
+                    .input('price', sql.Decimal(18, 2), item.price)
+                    .input('status', sql.NVarChar(50), 'รอผลตรวจ')
+                    .input('prize_amount', sql.Decimal(18, 2), 0)
+                    .query(`
+                        INSERT INTO Yeeki_Order_Items (order_id, lottery_type, selected_number, price, status, prize_amount)
+                        VALUES (@order_id, @lottery_type, @selected_number, @price, @status, @prize_amount)
+                    `);
+            }
+
+            // 4. หักเงินในกระเป๋าลูกค้า
+            await transaction.request()
+                .input('user_id', sql.Int, user_id)
+                .input('total_price', sql.Decimal(18, 2), total_price)
+                .query(`
+                    UPDATE User_Profile_Banks 
+                    SET wallet_balance = wallet_balance - @total_price 
+                    WHERE user_id = @user_id
+                `);
+
+            await transaction.commit();
+            res.json({ success: true, order_id: new_order_id });
+
+        } catch (err) {
+            await transaction.rollback();
+            throw err;
+        }
+    } catch (error) {
+        console.error("Yeeki Buy Error:", error);
+        res.status(500).json({ success: false, message: error.message });
+    }
+});
+
+
 app.listen(port, () => {
     console.log(`🚀 Server เปิดทำงานแล้วที่พอร์ต ${port}`);
 });
