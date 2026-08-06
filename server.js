@@ -4064,94 +4064,88 @@ app.put('/api/admin/yeeki-rounds/:id', async (req, res) => {
     }
 });
 // ==========================================
-// API: รายงานยอดขายหวยยี่กีสำหรับ Admin (Real-time)
+// 🌟 รายงานยอดขายหวยยี่กี (Admin Sales Report)
 // ==========================================
 app.get('/api/admin/yeeki/sales-report', async (req, res) => {
     try {
         const pool = await sql.connect(dbConfig);
         
-        // 1. ดึงรอบของวันนี้ทั้งหมด (24 รอบ) และผลรางวัล (ถ้ามี)
+        // 1. ดึงรอบทั้งหมดของวันนี้
         const roundsResult = await pool.request().query(`
             SELECT 
-                r.round_id, 
-                r.round_number, 
-                CONVERT(varchar, r.open_time, 108) as open_time, 
-                CONVERT(varchar, r.close_time, 108) as close_time, 
-                CONVERT(varchar, r.draw_time, 108) as draw_time,
-                r.status,
-                dr.result_number as winning_result
-            FROM Yeeki_Rounds r
-            LEFT JOIN Draw_Results dr ON r.round_id = dr.round_id AND dr.lottery_type = 'YEEKI'
-            WHERE CAST(r.draw_date AS DATE) = CAST(DATEADD(hour, 7, GETUTCDATE()) AS DATE)
-            ORDER BY r.round_number ASC
+                round_id, round_number, 
+                CONVERT(varchar, open_time, 120) as open_time_str, 
+                CONVERT(varchar, close_time, 120) as close_time_str, 
+                CONVERT(varchar, draw_time, 120) as draw_time_str,
+                status as db_status,
+                result_8_super, result_4_top, result_2_bottom
+            FROM Yeeki_Rounds
+            WHERE CAST(draw_date AS DATE) = CAST(DATEADD(hour, 7, GETUTCDATE()) AS DATE)
+            ORDER BY round_number ASC
         `);
         
-        const dbRounds = roundsResult.recordset;
-
-        // 🌟 2. ดึงรายการซื้อ (แก้ให้ตรงกับตาราง Yeeki_Orders และ Yeeki_Order_Items ของคุณพี่แล้ว)
+        // 2. ดึงบิลทั้งหมดของวันนี้
         const ordersResult = await pool.request().query(`
             SELECT 
-                o.round_id,
-                u.username,
-                oi.lottery_type as type,
-                oi.selected_number as number,
-                oi.price,
-                o.currency_code as currency,
-                oi.status
-            FROM Yeeki_Order_Items oi
-            JOIN Yeeki_Orders o ON oi.order_id = o.order_id
-            JOIN Users u ON o.user_id = u.id
-            WHERE CAST(o.created_at AS DATE) = CAST(DATEADD(hour, 7, GETUTCDATE()) AS DATE)
-            ORDER BY oi.created_at DESC
+                o.round_id, u.username, oi.lottery_type as type, oi.selected_number as number,
+                oi.price, o.currency_code as currency, oi.status
+            FROM Yeeki_Orders o
+            JOIN Yeeki_Order_Items oi ON o.order_id = oi.order_id
+            JOIN Users u ON o.user_id = u.user_id
+            WHERE o.round_id IN (SELECT round_id FROM Yeeki_Rounds WHERE CAST(draw_date AS DATE) = CAST(DATEADD(hour, 7, GETUTCDATE()) AS DATE))
+            ORDER BY o.created_at DESC
         `);
-
+        
         const allOrders = ordersResult.recordset;
-
-        let overallThb = 0;
-        let overallLak = 0;
-        let activeThb = 0;
-        let activeLak = 0;
-
-        // 3. จัดกลุ่มข้อมูล 
-        const roundsData = dbRounds.map(round => {
-            const roundOrders = allOrders.filter(o => o.round_id === round.round_id);
+        let overallTotal = { thb: 0, lak: 0 };
+        let activeRoundTotal = { thb: 0, lak: 0 };
+        const jsNow = new Date(); 
+        
+        const rounds = roundsResult.recordset.map(r => {
+            const roundOrders = allOrders.filter(o => o.round_id === r.round_id);
+            let total_thb = 0; let total_lak = 0;
             
-            let total_thb = 0;
-            let total_lak = 0;
-
-            roundOrders.forEach(order => {
-                if (order.currency === 'THB' || order.currency === '฿') {
-                    total_thb += Number(order.price);
-                    overallThb += Number(order.price);
-                    if (round.status === 'open' || round.status === 'upcoming') activeThb += Number(order.price);
-                } else {
-                    total_lak += Number(order.price);
-                    overallLak += Number(order.price);
-                    if (round.status === 'open' || round.status === 'upcoming') activeLak += Number(order.price);
-                }
+            roundOrders.forEach(o => {
+                if (o.currency === 'THB' || o.currency === '฿') total_thb += Number(o.price);
+                if (o.currency === 'LAK' || o.currency === '₭') total_lak += Number(o.price);
             });
-
+            
+            overallTotal.thb += total_thb;
+            overallTotal.lak += total_lak;
+            
+            const openTimeDate = new Date(r.open_time_str.replace(' ', 'T'));
+            const closeTimeDate = new Date(r.close_time_str.replace(' ', 'T'));
+            
+            let computedStatus = 'upcoming';
+            if (r.db_status === 'Completed' || jsNow > closeTimeDate) {
+                computedStatus = 'ended';
+            } else if (jsNow >= openTimeDate && jsNow <= closeTimeDate) {
+                computedStatus = 'open';
+                activeRoundTotal.thb += total_thb;
+                activeRoundTotal.lak += total_lak;
+            }
+            
+            let winning_result = null;
+            if (r.db_status === 'Completed' && r.result_8_super) {
+                winning_result = `${r.result_8_super} / ${r.result_4_top} / ${r.result_2_bottom}`;
+            }
+            
             return {
-                ...round,
-                total_thb,
-                total_lak,
+                round_id: r.round_id, round_number: r.round_number,
+                open_time: r.open_time_str.substring(11, 16),
+                close_time: r.close_time_str.substring(11, 16),
+                draw_time: r.draw_time_str.substring(11, 16),
+                status: computedStatus, total_thb, total_lak, winning_result,
                 orders: roundOrders
             };
         });
-
-        res.json({
-            success: true,
-            overallTotal: { thb: overallThb, lak: overallLak },
-            activeRoundTotal: { thb: activeThb, lak: activeLak },
-            rounds: roundsData
-        });
-
-    } catch (error) {
-        console.error('Error Yeeki Sales Report:', error);
-        res.status(500).json({ success: false, message: error.message });
+        
+        res.json({ success: true, overallTotal, activeRoundTotal, rounds });
+    } catch (err) {
+        console.error("Error fetching sales report:", err);
+        res.status(500).json({ success: false, message: err.message });
     }
 });
-
 // ==========================================
 // API: ซื้อหวยยี่กี (บันทึกลงตาราง Yeeki_Orders โดยเฉพาะ)
 // ==========================================
