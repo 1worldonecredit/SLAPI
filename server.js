@@ -2177,6 +2177,91 @@ app.post('/api/admin/key-statement', async (req, res) => {
     res.status(500).json({ success: false, message: 'ระบบขัดข้อง: ' + error.message });
   }
 });
+
+
+// ==========================================
+// API: บัญชีแก้ไขรายการคีย์ยอด (อัปเดต + ค้นหาจับคู่แบบฉลาด 🌟)
+// ==========================================
+app.put('/api/admin/key-statement/:id', async (req, res) => {
+  try {
+    const statementId = req.params.id;
+    const { bankId, bankName, accountNumber, amount, transferDate, transferTime, adminName } = req.body;
+
+    // เคลียร์ฟอร์แมตเวลา
+    let cleanTime = transferTime.trim();
+    if (cleanTime.toLowerCase().includes('am') || cleanTime.toLowerCase().includes('pm')) {
+      const [time, modifier] = cleanTime.split(' ');
+      let [hours, minutes, seconds] = time.split(':');
+      if (hours === '12') hours = '00';
+      if (modifier.toUpperCase() === 'PM') hours = parseInt(hours, 10) + 12;
+      cleanTime = `${hours}:${minutes}:${seconds || '00'}`;
+    }
+    if (cleanTime.length === 5) cleanTime += ':00';
+    const cleanAmount = Math.round(parseFloat(amount) * 100) / 100;
+
+    const pool = await sql.connect(dbConfig);
+
+    // 1. อัปเดตข้อมูลในตาราง Bank_Statements
+    await pool.request()
+      .input('stmtId', sql.Int, statementId)
+      .input('bankId', sql.Int, bankId)
+      .input('bankName', sql.NVarChar, bankName)
+      .input('accountNumber', sql.VarChar, accountNumber)
+      .input('amount', sql.Decimal(18,2), cleanAmount)
+      .input('transferDate', sql.VarChar, transferDate)
+      .input('transferTime', sql.VarChar, cleanTime)
+      .input('recordedBy', sql.NVarChar, adminName)
+      .query(`
+        UPDATE Bank_Statements 
+        SET bank_id = @bankId, bank_name = @bankName, account_number = @accountNumber, 
+            amount = @amount, transfer_date = CAST(@transferDate AS DATE), 
+            transfer_time = CAST(@transferTime AS TIME(0)), recorded_by = @recordedBy
+        WHERE statement_id = @stmtId AND is_reconciled = 0
+      `);
+
+    // 2. 🌟 ค้นหาและจับคู่สลิปแบบฉลาด (Smart Match) อีกรอบหลังจากแก้ข้อมูล
+    const findSlip = await pool.request()
+      .input('amount', sql.Decimal(18,2), cleanAmount)
+      .input('accountNumber', sql.VarChar, accountNumber)
+      .input('transferDate', sql.VarChar, transferDate)
+      .input('transferTime', sql.VarChar, cleanTime)
+      .query(`
+        SELECT TOP 1 deposit_id, user_id FROM Transactions_Deposit 
+        WHERE status = 'Slip Verified' 
+          AND REPLACE(REPLACE(account_number, '-', ''), ' ', '') = REPLACE(REPLACE(@accountNumber, '-', ''), ' ', '')
+          AND ABS(amount - @amount) <= 0.01
+          AND CAST(deposit_datetime AS DATE) = CAST(@transferDate AS DATE)
+          AND ABS(DATEDIFF(MINUTE, CAST(deposit_datetime AS TIME(0)), CAST(@transferTime AS TIME(0)))) <= 10
+        ORDER BY ABS(DATEDIFF(MINUTE, CAST(deposit_datetime AS TIME(0)), CAST(@transferTime AS TIME(0)))) ASC
+      `);
+
+    // 3. ถ้าเจอสลิปที่ตรงกัน ให้ประมวลผลแจกเงิน!
+    if (findSlip.recordset.length > 0) {
+      const match = findSlip.recordset[0];
+
+      await pool.request().input('depositId', sql.Int, match.deposit_id)
+        .query("UPDATE Transactions_Deposit SET status = 'Approved', reviewed_by = 'Bank (Matched)' WHERE deposit_id = @depositId");
+      
+      await pool.request().input('userId', sql.Int, match.user_id).input('amount', sql.Decimal(18,2), cleanAmount)
+        .query("UPDATE Wallets SET balance = ISNULL(balance, 0) + @amount, last_updated = GETDATE() WHERE user_id = @userId");
+
+      await pool.request().input('userId', sql.Int, match.user_id).input('amount', sql.Decimal(18,2), cleanAmount).input('title', sql.NVarChar(255), 'ฝากเงิน (สำเร็จ)')
+        .query("INSERT INTO Transactions (user_id, transaction_type, title, amount, status, created_at) VALUES (@userId, 'Deposit', @title, @amount, 'Completed', GETDATE())");
+
+      await pool.request().input('stmtId', sql.Int, statementId).input('depositId', sql.Int, match.deposit_id)
+        .query("UPDATE Bank_Statements SET is_reconciled = 1, reconciled_with_deposit_id = @depositId WHERE statement_id = @stmtId");
+
+      return res.json({ success: true, message: 'อัปเดตข้อมูลสำเร็จ และระบบจับคู่ให้อัตโนมัติ! (เติมเงินให้ลูกค้าแล้ว)' });
+    }
+
+    res.json({ success: true, message: 'อัปเดตข้อมูลสำเร็จ (แต่ยังไม่พบบิลจากลูกค้าที่ตรงกัน รอการจับคู่)' });
+  } catch (error) {
+    console.error('Error:', error);
+    res.status(500).json({ success: false, message: 'ระบบขัดข้อง: ' + error.message });
+  }
+});
+
+
 // ==========================================
 // API: บัญชีคีย์ยอดโอนเข้า + กระทบยอด + แปลงสกุลเงินอัตโนมัติ (เวอร์ชันสมบูรณ์)
 // ==========================================
