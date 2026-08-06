@@ -3235,6 +3235,124 @@ app.post('/api/admin/suggest-draw', async (req, res) => {
     } catch (err) { res.status(500).json({ success: false }); }
 });
 
+
+// ==========================================
+// 🌟 ระบบ AI สุ่มหาเลขที่ปลอดภัยที่สุด (หลบยอดจ่ายเกินเป้า %)
+// ==========================================
+app.post('/api/admin/yeeki/suggest-draw', async (req, res) => {
+    try {
+        const { round_id, target_percent } = req.body;
+        const pool = await sql.connect(dbConfig);
+
+        // 1. ดึงโพยทั้งหมดของรอบนี้มาวิเคราะห์
+        const orders = await pool.request()
+            .input('round_id', sql.Int, round_id)
+            .query(`
+                SELECT oi.lottery_type, oi.selected_number, oi.price, o.currency_code
+                FROM Yeeki_Order_Items oi
+                JOIN Yeeki_Orders o ON oi.order_id = o.order_id
+                WHERE o.round_id = @round_id AND oi.status = N'รอผลตรวจ'
+            `);
+
+        const items = orders.recordset;
+
+        // 2. ถ้ายังไม่มีใครแทงเลย สุ่มเลขมั่วๆ แบบอิสระได้เลย (เพราะยังไงก็ไม่ขาดทุน)
+        if (items.length === 0) {
+            return res.json({
+                success: true,
+                super_8: String(Math.floor(Math.random() * 100000000)).padStart(8, '0'),
+                top_4: String(Math.floor(Math.random() * 10000)).padStart(4, '0'),
+                bottom_2: String(Math.floor(Math.random() * 100)).padStart(2, '0'),
+                message: "ไม่มีรายการแทง สุ่มเลขอิสระเรียบร้อย"
+            });
+        }
+
+        // 3. กำหนดอัตราจ่าย (จำลอง) *คุณพี่สามารถปรับเรทตรงนี้ให้ตรงกับระบบจริงได้ครับ*
+        const rates = {
+            '8 ตัว (Super)': 1000000,
+            '4 ตัวท้าย': 6000,
+            '3 ตัวบน': 900,
+            '3 ตัวโต๊ด': 150,
+            '2 ตัวบน': 90,
+            '2 ตัวล่าง': 90,
+            'วิ่งบน': 3.2,
+            'วิ่งล่าง': 4.2
+        };
+
+        const EXCHANGE_RATE = 620; // เรทแลกเปลี่ยน 1 THB = 620 LAK
+
+        // คำนวณยอดขายรวมทั้งหมด (แปลงเงินกีบเป็นเงินบาท เพื่อใช้คำนวณกำไร)
+        let totalSalesTHB = 0;
+        items.forEach(item => {
+            totalSalesTHB += (item.currency_code === 'LAK' || item.currency_code === '₭') ? (item.price / EXCHANGE_RATE) : item.price;
+        });
+
+        // 🎯 เป้าหมายยอดจ่ายสูงสุดที่รับได้ (เช่น ขายได้ 1000, ตั้งเป้า 25% = จ่ายได้ห้ามเกิน 250 บาท)
+        const maxPayoutTHB = totalSalesTHB * (target_percent / 100);
+
+        let bestSet = null;
+        let minPayout = Infinity;
+
+        // 4. หุ่นยนต์เริ่มวิ่งสุ่มจำลองผล 1,000 ครั้ง
+        for (let i = 0; i < 1000; i++) {
+            // สุ่มเลขจำลอง (แยกชุดอิสระ)
+            let super8 = String(Math.floor(Math.random() * 100000000)).padStart(8, '0');
+            let top4 = String(Math.floor(Math.random() * 10000)).padStart(4, '0');
+            let bottom2 = String(Math.floor(Math.random() * 100)).padStart(2, '0');
+
+            let top3 = top4.slice(-3);
+            let top2 = top4.slice(-2);
+            let t1 = top3[0], t2 = top3[1], t3 = top3[2];
+            let toadSets = [ t1+t2+t3, t1+t3+t2, t2+t1+t3, t2+t3+t1, t3+t1+t2, t3+t2+t1 ];
+
+            let currentPayoutTHB = 0;
+
+            // ตรวจบิลจำลองทีละใบ
+            for (let item of items) {
+                let priceTHB = (item.currency_code === 'LAK' || item.currency_code === '₭') ? (item.price / EXCHANGE_RATE) : item.price;
+                let isWin = false;
+                let num = item.selected_number;
+
+                switch (item.lottery_type) {
+                    case '8 ตัว (Super)': if (num === super8) isWin = true; break;
+                    case '4 ตัวท้าย': if (num === top4) isWin = true; break;
+                    case '3 ตัวบน': if (num === top3) isWin = true; break;
+                    case '3 ตัวโต๊ด': if (toadSets.includes(num)) isWin = true; break;
+                    case '2 ตัวบน': if (num === top2) isWin = true; break;
+                    case '2 ตัวล่าง': if (num === bottom2) isWin = true; break;
+                    case 'วิ่งบน': if (top3.includes(num)) isWin = true; break;
+                    case 'วิ่งล่าง': if (bottom2.includes(num)) isWin = true; break;
+                }
+
+                if (isWin) currentPayoutTHB += (priceTHB * (rates[item.lottery_type] || 0));
+            }
+
+            // ถ้าเจอชุดตัวเลขที่ยอดจ่าย "น้อยกว่าหรือเท่ากับ" เป้าหมายที่ตั้งไว้ ให้หยุดหาและใช้เลขนี้ทันที!
+            if (currentPayoutTHB <= maxPayoutTHB) {
+                bestSet = { super_8: super8, top_4: top4, bottom_2: bottom2 };
+                break;
+            }
+
+            // ถ้ายังไม่เจอ ก็เก็บเลขชุดที่เสียน้อยที่สุดไว้เป็นแผนสำรอง
+            if (currentPayoutTHB < minPayout) {
+                minPayout = currentPayoutTHB;
+                bestSet = { super_8: super8, top_4: top4, bottom_2: bottom2 };
+            }
+        }
+
+        res.json({
+            success: true,
+            super_8: bestSet.super_8,
+            top_4: bestSet.top_4,
+            bottom_2: bestSet.bottom_2
+        });
+
+    } catch (err) {
+        console.error("Error in suggest-draw:", err);
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
+
 // ==========================================
 // 🌟 API 3: ค้นหาคนซื้อจากเลข (อิงจากเวลา เปิด-ปิด บิลเป๊ะๆ)
 // ==========================================
