@@ -4385,15 +4385,15 @@ app.post('/api/admin/execute-yeeki-draw', async (req, res) => {
 });
 
 // ==========================================
-// 🌟 2. ดึงข้อมูล 24 รอบของวันนี้ (ทั้งหน้าบ้านและหลังบ้านใช้ร่วมกัน)
+// 🌟 ดึงข้อมูลรอบให้ลูกค้า (ดึง 12 รอบล่วงหน้าที่ยังไม่ปิดรับแทง ตลอดเวลา)
 // ==========================================
 app.get('/api/yeeki/rounds', async (req, res) => {
     try {
         const pool = await sql.connect(dbConfig); 
         
-        // 🌟 ดึงข้อมูลรอบของวันนี้ (อิงเวลาไทย) และแปลงเวลาให้ JavaScript ฝั่ง Frontend อ่านได้เป๊ะๆ
+        // 🌟 เปลี่ยนคำสั่ง SQL: ใช้ TOP 12 และเช็คแค่ว่า close_time ต้องมากกว่าเวลาปัจจุบัน
         const result = await pool.request().query(`
-            SELECT 
+            SELECT TOP 12
                 round_id, 
                 round_number,
                 CONVERT(varchar, open_time, 120) as open_time,
@@ -4401,13 +4401,13 @@ app.get('/api/yeeki/rounds', async (req, res) => {
                 CONVERT(varchar, draw_time, 120) as draw_time,
                 status
             FROM Yeeki_Rounds 
-            WHERE CAST(draw_date AS DATE) = CAST(DATEADD(hour, 7, GETUTCDATE()) AS DATE) 
-            ORDER BY round_number ASC
+            WHERE close_time > DATEADD(hour, 7, GETUTCDATE()) 
+            ORDER BY draw_date ASC, round_number ASC
         `);
         
         res.json({ success: true, rounds: result.recordset });
     } catch (err) {
-        console.error("Error fetching Yeeki rounds:", err);
+        console.error("Error fetching public yeeki rounds:", err);
         res.status(500).json({ success: false, message: err.message });
     }
 });
