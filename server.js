@@ -4618,33 +4618,121 @@ app.post('/api/yeeki/settings', async (req, res) => {
     }
 });
 
-// ==========================================
-// 🌟 2. ดึงประวัติการออกรางวัล (ดึงเฉพาะรอบที่ออกผลแล้ว)
-// ==========================================
+// 1. ดึงประวัติการออกรางวัล (เพื่อให้ตารางหน้าแรกโชว์ผลย้อนหลัง)
 app.get('/api/admin/yeeki-draw-history', async (req, res) => {
     try {
         const { date } = req.query;
         const pool = await sql.connect(dbConfig);
         
-        const result = await pool.request()
+        // ดึงรอบล่าสุดที่ออกผลแล้วของวันนี้
+        const historyReq = await pool.request()
+            .input('date', sql.VarChar, date)
+            .query(`SELECT TOP 1 * FROM Yeeki_Rounds WHERE CAST(draw_date AS DATE) = CAST(@date AS DATE) AND status = 'Completed' ORDER BY round_number DESC`);
+            
+        // ดึงรายชื่อคนถูกรางวัลของวันนี้
+        const winnersReq = await pool.request()
             .input('date', sql.VarChar, date)
             .query(`
-                SELECT TOP 1 round_number, result_8_super, result_4_top, result_3_top, result_2_bottom
-                FROM Yeeki_Rounds
-                WHERE CAST(draw_date AS DATE) = CAST(@date AS DATE) AND status = 'Completed'
-                ORDER BY round_number DESC
+                SELECT u.username, o.round_id as round_number, oi.lottery_type, oi.selected_number, oi.price, oi.prize_amount, o.currency_code
+                FROM Yeeki_Order_Items oi
+                JOIN Yeeki_Orders o ON oi.order_id = o.order_id
+                JOIN Users u ON o.user_id = u.user_id
+                WHERE CAST(o.created_at AS DATE) = CAST(@date AS DATE) AND oi.status = 'Win'
+                ORDER BY o.round_id DESC
             `);
             
-        if (result.recordset.length > 0) {
-            res.json({ success: true, results: result.recordset[0], winners: [] });
-        } else {
-            res.json({ success: true, results: null, winners: [] });
-        }
+        res.json({ success: true, results: historyReq.recordset[0] || null, winners: winnersReq.recordset });
     } catch (err) {
-        console.error("Error fetching Yeeki history:", err);
         res.status(500).json({ success: false, message: err.message });
     }
 });
+
+// 2. วิเคราะห์ยอดจ่ายแบบแอดมินพิมพ์เลขเอง (กดเช็คยอดจ่ายทันที)
+app.post('/api/admin/analyze-yeeki-draw', async (req, res) => {
+    try {
+        const { round_id, super_number, top_number, bottom_number } = req.body;
+        const pool = await sql.connect(dbConfig);
+        
+        const ordersReq = await pool.request().input('rid', sql.Int, round_id).query(`
+            SELECT oi.lottery_type, oi.selected_number, oi.price, o.currency_code
+            FROM Yeeki_Order_Items oi JOIN Yeeki_Orders o ON oi.order_id = o.order_id
+            WHERE o.round_id = @rid AND oi.status = N'รอผลตรวจ'
+        `);
+        const items = ordersReq.recordset;
+
+        const rates = { '8 ตัว (Super)': 1000000, '4 ตัวท้าย': 6000, '3 ตัวบน': 900, '3 ตัวโต๊ด': 150, '2 ตัวบน': 90, '2 ตัวล่าง': 90, 'วิ่งบน': 3.2, 'วิ่งล่าง': 4.2 };
+        const EXCHANGE_RATE = 620;
+
+        let totalSalesTHB = 0; let totalPayoutTHB = 0;
+        let top3 = top_number.slice(-3); let top2 = top_number.slice(-2);
+        let t1 = top3[0], t2 = top3[1], t3 = top3[2];
+        let toadSets = [ t1+t2+t3, t1+t3+t2, t2+t1+t3, t2+t3+t1, t3+t1+t2, t3+t2+t1 ];
+
+        for (let item of items) {
+            let priceTHB = (item.currency_code === 'LAK' || item.currency_code === '₭') ? (item.price / EXCHANGE_RATE) : item.price;
+            totalSalesTHB += priceTHB;
+            
+            let isWin = false; let num = item.selected_number;
+            switch (item.lottery_type) {
+                case '8 ตัว (Super)': if (num === super_number) isWin = true; break;
+                case '4 ตัวท้าย': if (num === top_number) isWin = true; break;
+                case '3 ตัวบน': if (num === top3) isWin = true; break;
+                case '3 ตัวโต๊ด': if (toadSets.includes(num)) isWin = true; break;
+                case '2 ตัวบน': if (num === top2) isWin = true; break;
+                case '2 ตัวล่าง': if (num === bottom_number) isWin = true; break;
+                case 'วิ่งบน': if (top3.includes(num)) isWin = true; break;
+                case 'วิ่งล่าง': if (bottom_number.includes(num)) isWin = true; break;
+            }
+            if (isWin) totalPayoutTHB += (priceTHB * (rates[item.lottery_type] || 0));
+        }
+
+        res.json({ 
+            success: true, 
+            totalSales: totalSalesTHB, 
+            analysis: { 
+                profit: totalSalesTHB - totalPayoutTHB, 
+                payout: totalPayoutTHB, 
+                isSafe: totalPayoutTHB < totalSalesTHB 
+            } 
+        });
+    } catch (err) { res.status(500).json({ success: false, message: err.message }); }
+});
+
+
+// 3. ค้นหาคนซื้อ (ปุ่มค้นหาผู้ใช้จากตัวเลข)
+app.post('/api/admin/search-yeeki-buyers', async (req, res) => {
+    try {
+        const { number, date } = req.body;
+        const pool = await sql.connect(dbConfig);
+        const searchReq = await pool.request()
+            .input('num', sql.VarChar, number)
+            .input('date', sql.VarChar, date)
+            .query(`
+                SELECT u.username, o.round_id as round_number, oi.lottery_type, oi.selected_number, oi.price, o.currency_code, oi.status
+                FROM Yeeki_Order_Items oi
+                JOIN Yeeki_Orders o ON oi.order_id = o.order_id
+                JOIN Users u ON o.user_id = u.user_id
+                WHERE oi.selected_number LIKE '%' + @num + '%' AND CAST(o.created_at AS DATE) = CAST(@date AS DATE)
+            `);
+        res.json({ success: true, buyers: searchReq.recordset });
+    } catch (err) { res.status(500).json({ success: false, message: err.message }); }
+});
+
+// 4. API จำลองการตั้งค่า (Settings & Prize Rates เพื่อป้องกันหน้าเว็บ Error ตอนโหลด)
+app.get('/api/yeeki/settings', (req, res) => {
+    // ปัจจุบันส่งค่า Default ไปก่อน ถ้ามีตารางตั้งค่าในอนาคตค่อยมาแก้ตรงนี้ครับ
+    res.json({ success: true, data: { is_auto_draw: true, auto_draw_percent: 25 } });
+});
+app.post('/api/yeeki/settings', (req, res) => res.json({ success: true }));
+
+app.get('/api/yeeki/prize-rates', (req, res) => res.json({ success: true, rates: [] }));
+app.post('/api/yeeki/prize-rates', (req, res) => res.json({ success: true }));
+
+app.get('/api/admin/exchange-rates', (req, res) => {
+    res.json({ success: true, rates: [{ currency_pair: 'THB_LAK', rate: 620 }] });
+});
+app.post('/api/admin/exchange-rates', (req, res) => res.json({ success: true }));
+
 
 // ==========================================
 // 🌟 3. กดยืนยันการออกรางวัลและแจกเงินเข้า Wallet!
