@@ -4520,7 +4520,7 @@ app.get('/api/admin/yeeki/sales-report', async (req, res) => {
 });
 
 // ==========================================
-// 🌟 API สำหรับการซื้อหวยยี่กี (แก้ไขชื่อคอลัมน์เป็น referrer_username)
+// 🌟 API สำหรับการซื้อหวยยี่กี (แก้ไขชื่อคอลัมน์เป็น title)
 // ==========================================
 app.post('/api/yeeki/buy', async (req, res) => {
     const { user_id, cart, total_price, currency, note, lottery_category } = req.body;
@@ -4533,7 +4533,7 @@ app.post('/api/yeeki/buy', async (req, res) => {
 
         pool = await sql.connect(dbConfig);
         
-        // 1. ดึงข้อมูลผู้ซื้อ (เปลี่ยนจาก referrer_id เป็น referrer_username ตามฐานข้อมูลจริง)
+        // 1. ดึงข้อมูลผู้ซื้อ 
         const userCheck = await pool.request()
             .input('uid', sql.Int, user_id)
             .query(`SELECT username, wallet_balance, referrer_username FROM Users WHERE user_id = @uid`);
@@ -4559,15 +4559,15 @@ app.post('/api/yeeki/buy', async (req, res) => {
                 .input('uid', sql.Int, user_id)
                 .query(`UPDATE Users SET wallet_balance = wallet_balance - @price WHERE user_id = @uid`);
 
-            // 3. สร้างประวัติ Transaction ผู้ซื้อ
+            // 3. สร้างประวัติ Transaction ผู้ซื้อ (เปลี่ยน description เป็น title)
             await transaction.request()
                 .input('uid', sql.Int, user_id)
                 .input('amount', sql.Decimal(18,2), -total_price)
                 .input('type', sql.VarChar(50), 'BUY_YEEKI')
-                .input('desc', sql.NVarChar(255), `แทงหวยยี่กี รอบที่ ${cart[0].round_number}`)
+                .input('title', sql.NVarChar(255), `แทงหวยยี่กี รอบที่ ${cart[0].round_number}`) // เปลี่ยนชื่อตัวแปรให้ตรง
                 .query(`
-                    INSERT INTO Transactions (user_id, amount, transaction_type, description, status)
-                    VALUES (@uid, @amount, @type, @desc, 'Completed')
+                    INSERT INTO Transactions (user_id, amount, transaction_type, title, status) -- เปลี่ยนคอลัมน์เป็น title
+                    VALUES (@uid, @amount, @type, @title, 'Completed')
                 `);
 
             // 4. บันทึกบิลหลักลง Yeeki_Orders
@@ -4601,7 +4601,6 @@ app.post('/api/yeeki/buy', async (req, res) => {
             }
 
             // 6. 💰 ระบบแจกค่าคอมมิชชั่น 5% ให้ผู้แนะนำ
-            // เช็คว่ามีชื่อผู้แนะนำ (referrer_username) หรือไม่ (เช่น 'userthai')
             if (buyer.referrer_username) {
                 // 6.1 เอาชื่อผู้แนะนำ ไปค้นหา user_id ในตาราง Users ก่อน
                 const refCheck = await transaction.request()
@@ -4620,15 +4619,15 @@ app.post('/api/yeeki/buy', async (req, res) => {
                         .input('refUserId', sql.Int, referrerUserId)
                         .query(`UPDATE Users SET wallet_balance = wallet_balance + @commAmount WHERE user_id = @refUserId`);
 
-                    // 6.3 สร้างประวัติ Transaction รายได้ให้ "ผู้แนะนำ"
+                    // 6.3 สร้างประวัติ Transaction รายได้ให้ "ผู้แนะนำ" (เปลี่ยน description เป็น title)
                     await transaction.request()
                         .input('refUserId', sql.Int, referrerUserId)
                         .input('commAmount', sql.Decimal(18,2), commissionAmount)
                         .input('commType', sql.VarChar(50), 'COMMISSION_5')
-                        .input('commDesc', sql.NVarChar(255), `รายได้ 5% จากทีมงาน (${buyer.username})`)
+                        .input('commTitle', sql.NVarChar(255), `รายได้ 5% จากทีมงาน (${buyer.username})`) // เปลี่ยนชื่อตัวแปรให้ตรง
                         .query(`
-                            INSERT INTO Transactions (user_id, amount, transaction_type, description, status)
-                            VALUES (@refUserId, @commAmount, @commType, @commDesc, 'Completed')
+                            INSERT INTO Transactions (user_id, amount, transaction_type, title, status) -- เปลี่ยนคอลัมน์เป็น title
+                            VALUES (@refUserId, @commAmount, @commType, @commTitle, 'Completed')
                         `);
                 }
             }
