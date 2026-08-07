@@ -4535,7 +4535,6 @@ app.post('/api/yeeki/buy', async (req, res) => {
         pool = await sql.connect(dbConfig);
         
         // 1. ดึงข้อมูลผู้ซื้อ (เช็คยอดเงิน, เอาชื่อยูส, และหาว่าใครเป็นคนแนะนำ)
-        // ⚠️ หมายเหตุ: สมมติว่าคอลัมน์ผู้แนะนำในตาราง Users ชื่อ 'referrer_id' (คุณพี่แก้ชื่อคอลัมน์นี้ให้ตรงกับ DB ได้เลยครับ)
         const userCheck = await pool.request()
             .input('uid', sql.Int, user_id)
             .query(`SELECT username, wallet_balance, referrer_id FROM Users WHERE user_id = @uid`);
@@ -4561,8 +4560,7 @@ app.post('/api/yeeki/buy', async (req, res) => {
                 .input('uid', sql.Int, user_id)
                 .query(`UPDATE Users SET wallet_balance = wallet_balance - @price WHERE user_id = @uid`);
 
-            // 3. 📝 [ใหม่] สร้างประวัติ Transaction ของ "ผู้ซื้อ" (แสดงยอดติดลบ เพราะเป็นการจ่ายเงิน)
-            // ⚠️ หมายเหตุ: ตรวจสอบชื่อตาราง 'Transactions' และคอลัมน์ให้ตรงกับ DB ของคุณพี่นะครับ
+            // 3. สร้างประวัติ Transaction ของ "ผู้ซื้อ"
             await transaction.request()
                 .input('uid', sql.Int, user_id)
                 .input('amount', sql.Decimal(18,2), -total_price)
@@ -4603,7 +4601,7 @@ app.post('/api/yeeki/buy', async (req, res) => {
                     `);
             }
 
-            // 6. 💰 [ใหม่] ระบบแจกค่าคอมมิชชั่น 5% ให้ผู้แนะนำ
+            // 6. ระบบแจกค่าคอมมิชชั่น 5% ให้ผู้แนะนำ
             if (buyer.referrer_id) {
                 const commissionRate = 0.05; // เรท 5%
                 const commissionAmount = total_price * commissionRate;
@@ -4614,7 +4612,7 @@ app.post('/api/yeeki/buy', async (req, res) => {
                     .input('refId', sql.Int, buyer.referrer_id)
                     .query(`UPDATE Users SET wallet_balance = wallet_balance + @commAmount WHERE user_id = @refId`);
 
-                // 6.2 สร้างประวัติ Transaction รายได้ให้ "ผู้แนะนำ" (แบบที่โชว์ในภาพเลยครับ)
+                // 6.2 สร้างประวัติ Transaction รายได้ให้ "ผู้แนะนำ"
                 await transaction.request()
                     .input('refId', sql.Int, buyer.referrer_id)
                     .input('commAmount', sql.Decimal(18,2), commissionAmount)
@@ -4632,12 +4630,16 @@ app.post('/api/yeeki/buy', async (req, res) => {
 
         } catch (innerErr) {
             await transaction.rollback();
-            throw innerErr;
+            throw innerErr; // โยน Error ของ SQL ออกไปให้บล็อก catch ด้านล่างจับ
         }
 
     } catch (err) {
         console.error("Yeeki Buy error:", err);
-        res.status(500).json({ success: false, message: "เกิดข้อผิดพลาดในการสั่งซื้อ กรุณาลองใหม่", error: err.message });
+        // 🚨 สาด Error จาก Database (err.message) กลับไปที่หน้าจอตรงๆ จะได้รู้ว่าตารางไหนผิด
+        res.status(500).json({ 
+            success: false, 
+            message: `ฐานข้อมูลขัดข้อง (Database Error): ${err.message}` 
+        });
     }
 });
 
