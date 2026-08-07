@@ -4521,7 +4521,7 @@ app.get('/api/admin/yeeki/sales-report', async (req, res) => {
 
 
 // ==========================================
-// 🌟 API สำหรับการซื้อหวยยี่กี
+// 🌟 API สำหรับการซื้อหวยยี่กี (ระบบตัดเงิน + สร้าง Transaction + จ่ายค่าคอมทีมงาน 5%)
 // ==========================================
 app.post('/api/yeeki/buy', async (req, res) => {
     const { user_id, cart, total_price, currency, note, lottery_category } = req.body;
@@ -4534,16 +4534,18 @@ app.post('/api/yeeki/buy', async (req, res) => {
 
         pool = await sql.connect(dbConfig);
         
-        // เช็คยอดเงินในตาราง Users ก่อนตัดเงิน
+        // 1. ดึงข้อมูลผู้ซื้อ (เช็คยอดเงิน, เอาชื่อยูส, และหาว่าใครเป็นคนแนะนำ)
+        // ⚠️ หมายเหตุ: สมมติว่าคอลัมน์ผู้แนะนำในตาราง Users ชื่อ 'referrer_id' (คุณพี่แก้ชื่อคอลัมน์นี้ให้ตรงกับ DB ได้เลยครับ)
         const userCheck = await pool.request()
             .input('uid', sql.Int, user_id)
-            .query(`SELECT wallet_balance FROM Users WHERE user_id = @uid`);
+            .query(`SELECT username, wallet_balance, referrer_id FROM Users WHERE user_id = @uid`);
             
         if (userCheck.recordset.length === 0) {
             return res.status(404).json({ success: false, message: "ไม่พบข้อมูลผู้ใช้" });
         }
         
-        const currentBalance = userCheck.recordset[0].wallet_balance || 0;
+        const buyer = userCheck.recordset[0];
+        const currentBalance = buyer.wallet_balance || 0;
         
         if (currentBalance < total_price) {
             return res.status(400).json({ success: false, message: "ยอดเงินในกระเป๋าไม่เพียงพอ" });
@@ -4553,16 +4555,26 @@ app.post('/api/yeeki/buy', async (req, res) => {
         await transaction.begin();
 
         try {
-            // หักเงินจากตาราง Users
+            // 2. หักเงินผู้ซื้อจากตาราง Users
             await transaction.request()
                 .input('price', sql.Decimal(18,2), total_price)
                 .input('uid', sql.Int, user_id)
                 .query(`UPDATE Users SET wallet_balance = wallet_balance - @price WHERE user_id = @uid`);
 
-            // ใช้ round_id จากบิลใบแรก (เพราะตระกร้าเดียวกันต้องเป็นรอบเดียวกัน)
-            const mainRoundId = cart[0].round_id;
+            // 3. 📝 [ใหม่] สร้างประวัติ Transaction ของ "ผู้ซื้อ" (แสดงยอดติดลบ เพราะเป็นการจ่ายเงิน)
+            // ⚠️ หมายเหตุ: ตรวจสอบชื่อตาราง 'Transactions' และคอลัมน์ให้ตรงกับ DB ของคุณพี่นะครับ
+            await transaction.request()
+                .input('uid', sql.Int, user_id)
+                .input('amount', sql.Decimal(18,2), -total_price)
+                .input('type', sql.VarChar(50), 'BUY_YEEKI')
+                .input('desc', sql.NVarChar(255), `แทงหวยยี่กี รอบที่ ${cart[0].round_number}`)
+                .query(`
+                    INSERT INTO Transactions (user_id, amount, transaction_type, description, status)
+                    VALUES (@uid, @amount, @type, @desc, 'Completed')
+                `);
 
-            // บันทึกบิลหลักลง Yeeki_Orders
+            // 4. บันทึกบิลหลักลง Yeeki_Orders
+            const mainRoundId = cart[0].round_id;
             const insertOrderReq = await transaction.request()
                 .input('user_id', sql.Int, user_id)
                 .input('round_id', sql.Int, mainRoundId)
@@ -4578,7 +4590,7 @@ app.post('/api/yeeki/buy', async (req, res) => {
 
             const newOrderId = insertOrderReq.recordset[0].order_id;
 
-            // บันทึกรายการย่อยทีละตัว ลงใน Yeeki_Order_Items
+            // 5. บันทึกรายการย่อยทีละตัว ลงใน Yeeki_Order_Items
             for (let item of cart) {
                 await transaction.request()
                     .input('order_id', sql.Int, newOrderId)
@@ -4591,6 +4603,30 @@ app.post('/api/yeeki/buy', async (req, res) => {
                     `);
             }
 
+            // 6. 💰 [ใหม่] ระบบแจกค่าคอมมิชชั่น 5% ให้ผู้แนะนำ
+            if (buyer.referrer_id) {
+                const commissionRate = 0.05; // เรท 5%
+                const commissionAmount = total_price * commissionRate;
+
+                // 6.1 อัปเดตกระเป๋าเงินของผู้แนะนำ (บวกเงินเพิ่ม)
+                await transaction.request()
+                    .input('commAmount', sql.Decimal(18,2), commissionAmount)
+                    .input('refId', sql.Int, buyer.referrer_id)
+                    .query(`UPDATE Users SET wallet_balance = wallet_balance + @commAmount WHERE user_id = @refId`);
+
+                // 6.2 สร้างประวัติ Transaction รายได้ให้ "ผู้แนะนำ" (แบบที่โชว์ในภาพเลยครับ)
+                await transaction.request()
+                    .input('refId', sql.Int, buyer.referrer_id)
+                    .input('commAmount', sql.Decimal(18,2), commissionAmount)
+                    .input('commType', sql.VarChar(50), 'COMMISSION_5')
+                    .input('commDesc', sql.NVarChar(255), `รายได้ 5% จากทีมงาน (${buyer.username})`)
+                    .query(`
+                        INSERT INTO Transactions (user_id, amount, transaction_type, description, status)
+                        VALUES (@refId, @commAmount, @commType, @commDesc, 'Completed')
+                    `);
+            }
+
+            // 7. สำเร็จกระบวนการทั้งหมด กด Save ลงฐานข้อมูล
             await transaction.commit();
             res.json({ success: true, message: "สั่งซื้อสำเร็จ", order_id: newOrderId });
 
@@ -4601,7 +4637,7 @@ app.post('/api/yeeki/buy', async (req, res) => {
 
     } catch (err) {
         console.error("Yeeki Buy error:", err);
-        res.status(500).json({ success: false, message: "เกิดข้อผิดพลาดในการสั่งซื้อ กรุณาลองใหม่" });
+        res.status(500).json({ success: false, message: "เกิดข้อผิดพลาดในการสั่งซื้อ กรุณาลองใหม่", error: err.message });
     }
 });
 
