@@ -4429,16 +4429,17 @@ app.put('/api/admin/yeeki-rounds/:id', async (req, res) => {
         res.status(500).json({ success: false, message: err.message });
     }
 });
+
 // ==========================================
-// 🌟 รายงานยอดขายหวยยี่กี (Admin Sales Report)
+// 🌟 รายงานยอดขายหวยยี่กี (Admin Sales Report - โชว์การ์ด 12 รอบถัดไปเสมอ)
 // ==========================================
 app.get('/api/admin/yeeki/sales-report', async (req, res) => {
     try {
         const pool = await sql.connect(dbConfig);
         
-        // 1. ดึงรอบทั้งหมดของวันนี้
+        // 1. ดึง 12 รอบถัดไป (ข้ามวันได้) มาทำการ์ด
         const roundsResult = await pool.request().query(`
-            SELECT 
+            SELECT TOP 12
                 round_id, round_number, 
                 CONVERT(varchar, open_time, 120) as open_time_str, 
                 CONVERT(varchar, close_time, 120) as close_time_str, 
@@ -4446,11 +4447,11 @@ app.get('/api/admin/yeeki/sales-report', async (req, res) => {
                 status as db_status,
                 result_8_super, result_4_top, result_2_bottom
             FROM Yeeki_Rounds
-            WHERE CAST(draw_date AS DATE) = CAST(DATEADD(hour, 7, GETUTCDATE()) AS DATE)
-            ORDER BY round_number ASC
+            WHERE draw_time >= DATEADD(hour, 7, GETUTCDATE())
+            ORDER BY draw_date ASC, round_number ASC
         `);
         
-        // 2. ดึงบิลทั้งหมดของวันนี้
+        // 2. ดึงบิลทั้งหมดเฉพาะที่อยู่ใน 12 รอบนี้
         const ordersResult = await pool.request().query(`
             SELECT 
                 o.round_id, u.username, oi.lottery_type as type, oi.selected_number as number,
@@ -4458,7 +4459,12 @@ app.get('/api/admin/yeeki/sales-report', async (req, res) => {
             FROM Yeeki_Orders o
             JOIN Yeeki_Order_Items oi ON o.order_id = oi.order_id
             JOIN Users u ON o.user_id = u.user_id
-            WHERE o.round_id IN (SELECT round_id FROM Yeeki_Rounds WHERE CAST(draw_date AS DATE) = CAST(DATEADD(hour, 7, GETUTCDATE()) AS DATE))
+            WHERE o.round_id IN (
+                SELECT TOP 12 round_id
+                FROM Yeeki_Rounds
+                WHERE draw_time >= DATEADD(hour, 7, GETUTCDATE())
+                ORDER BY draw_date ASC, round_number ASC
+            )
             ORDER BY o.created_at DESC
         `);
         
