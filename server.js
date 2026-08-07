@@ -4839,29 +4839,39 @@ app.post('/api/admin/execute-yeeki-draw', async (req, res) => {
 });
 
 // ==========================================
-// 🌟 ดึงข้อมูลรอบให้ลูกค้า (ดึง 12 รอบล่วงหน้าที่ยังไม่ปิดรับแทง ตลอดเวลา)
+// 🌟 API ฝั่งลูกค้า: ดึง 12 รอบที่กำลังจะมาถึงเสมอ (ข้ามวันอัตโนมัติ)
 // ==========================================
 app.get('/api/yeeki/rounds', async (req, res) => {
     try {
-        const pool = await sql.connect(dbConfig); 
+        const pool = await sql.connect(dbConfig);
         
-        // 🌟 เปลี่ยนคำสั่ง SQL: ใช้ TOP 12 และเช็คแค่ว่า close_time ต้องมากกว่าเวลาปัจจุบัน
+        // ใช้คำสั่ง SELECT TOP 12 และเรียงตามเวลา เพื่อให้ได้ 12 รอบถัดไปเป๊ะๆ
         const result = await pool.request().query(`
-            SELECT TOP 12
-                round_id, 
-                round_number,
-                CONVERT(varchar, open_time, 120) as open_time,
-                CONVERT(varchar, close_time, 120) as close_time,
-                CONVERT(varchar, draw_time, 120) as draw_time,
-                status
+            SELECT TOP 12 * 
             FROM Yeeki_Rounds 
-            WHERE close_time > DATEADD(hour, 7, GETUTCDATE()) 
+            WHERE draw_time >= DATEADD(hour, 7, GETUTCDATE()) 
             ORDER BY draw_date ASC, round_number ASC
         `);
-        
-        res.json({ success: true, rounds: result.recordset });
+
+        // ตรวจสอบสถานะว่าเปิดหรือปิดรับแทง
+        const jsNow = new Date();
+        const activeRounds = result.recordset.map(r => {
+            let computedStatus = 'Pending';
+            const openTime = new Date(r.open_time);
+            const closeTime = new Date(r.close_time);
+            
+            if (jsNow >= openTime && jsNow <= closeTime) {
+                computedStatus = 'Open';
+            } else if (jsNow > closeTime) {
+                computedStatus = 'Closed';
+            }
+            
+            return { ...r, status: computedStatus };
+        });
+
+        res.json({ success: true, rounds: activeRounds });
     } catch (err) {
-        console.error("Error fetching public yeeki rounds:", err);
+        console.error("Error fetching yeeki rounds:", err);
         res.status(500).json({ success: false, message: err.message });
     }
 });
