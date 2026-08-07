@@ -4519,9 +4519,8 @@ app.get('/api/admin/yeeki/sales-report', async (req, res) => {
     }
 });
 
-
 // ==========================================
-// 🌟 API สำหรับการซื้อหวยยี่กี (ระบบตัดเงิน + สร้าง Transaction + จ่ายค่าคอมทีมงาน 5%)
+// 🌟 API สำหรับการซื้อหวยยี่กี (แก้ไขชื่อคอลัมน์เป็น referrer_username)
 // ==========================================
 app.post('/api/yeeki/buy', async (req, res) => {
     const { user_id, cart, total_price, currency, note, lottery_category } = req.body;
@@ -4534,10 +4533,10 @@ app.post('/api/yeeki/buy', async (req, res) => {
 
         pool = await sql.connect(dbConfig);
         
-        // 1. ดึงข้อมูลผู้ซื้อ (เช็คยอดเงิน, เอาชื่อยูส, และหาว่าใครเป็นคนแนะนำ)
+        // 1. ดึงข้อมูลผู้ซื้อ (เปลี่ยนจาก referrer_id เป็น referrer_username ตามฐานข้อมูลจริง)
         const userCheck = await pool.request()
             .input('uid', sql.Int, user_id)
-            .query(`SELECT username, wallet_balance, referrer_id FROM Users WHERE user_id = @uid`);
+            .query(`SELECT username, wallet_balance, referrer_username FROM Users WHERE user_id = @uid`);
             
         if (userCheck.recordset.length === 0) {
             return res.status(404).json({ success: false, message: "ไม่พบข้อมูลผู้ใช้" });
@@ -4554,13 +4553,13 @@ app.post('/api/yeeki/buy', async (req, res) => {
         await transaction.begin();
 
         try {
-            // 2. หักเงินผู้ซื้อจากตาราง Users
+            // 2. หักเงินผู้ซื้อ
             await transaction.request()
                 .input('price', sql.Decimal(18,2), total_price)
                 .input('uid', sql.Int, user_id)
                 .query(`UPDATE Users SET wallet_balance = wallet_balance - @price WHERE user_id = @uid`);
 
-            // 3. สร้างประวัติ Transaction ของ "ผู้ซื้อ"
+            // 3. สร้างประวัติ Transaction ผู้ซื้อ
             await transaction.request()
                 .input('uid', sql.Int, user_id)
                 .input('amount', sql.Decimal(18,2), -total_price)
@@ -4588,7 +4587,7 @@ app.post('/api/yeeki/buy', async (req, res) => {
 
             const newOrderId = insertOrderReq.recordset[0].order_id;
 
-            // 5. บันทึกรายการย่อยทีละตัว ลงใน Yeeki_Order_Items
+            // 5. บันทึกรายการย่อยทีละตัว
             for (let item of cart) {
                 await transaction.request()
                     .input('order_id', sql.Int, newOrderId)
@@ -4601,41 +4600,49 @@ app.post('/api/yeeki/buy', async (req, res) => {
                     `);
             }
 
-            // 6. ระบบแจกค่าคอมมิชชั่น 5% ให้ผู้แนะนำ
-            if (buyer.referrer_id) {
-                const commissionRate = 0.05; // เรท 5%
-                const commissionAmount = total_price * commissionRate;
+            // 6. 💰 ระบบแจกค่าคอมมิชชั่น 5% ให้ผู้แนะนำ
+            // เช็คว่ามีชื่อผู้แนะนำ (referrer_username) หรือไม่ (เช่น 'userthai')
+            if (buyer.referrer_username) {
+                // 6.1 เอาชื่อผู้แนะนำ ไปค้นหา user_id ในตาราง Users ก่อน
+                const refCheck = await transaction.request()
+                    .input('refUsername', sql.VarChar(50), buyer.referrer_username)
+                    .query(`SELECT user_id FROM Users WHERE username = @refUsername`);
 
-                // 6.1 อัปเดตกระเป๋าเงินของผู้แนะนำ (บวกเงินเพิ่ม)
-                await transaction.request()
-                    .input('commAmount', sql.Decimal(18,2), commissionAmount)
-                    .input('refId', sql.Int, buyer.referrer_id)
-                    .query(`UPDATE Users SET wallet_balance = wallet_balance + @commAmount WHERE user_id = @refId`);
+                // ถ้าเจอตัวผู้แนะนำในระบบ ค่อยจ่ายเงิน
+                if (refCheck.recordset.length > 0) {
+                    const referrerUserId = refCheck.recordset[0].user_id;
+                    const commissionRate = 0.05; // เรท 5%
+                    const commissionAmount = total_price * commissionRate;
 
-                // 6.2 สร้างประวัติ Transaction รายได้ให้ "ผู้แนะนำ"
-                await transaction.request()
-                    .input('refId', sql.Int, buyer.referrer_id)
-                    .input('commAmount', sql.Decimal(18,2), commissionAmount)
-                    .input('commType', sql.VarChar(50), 'COMMISSION_5')
-                    .input('commDesc', sql.NVarChar(255), `รายได้ 5% จากทีมงาน (${buyer.username})`)
-                    .query(`
-                        INSERT INTO Transactions (user_id, amount, transaction_type, description, status)
-                        VALUES (@refId, @commAmount, @commType, @commDesc, 'Completed')
-                    `);
+                    // 6.2 อัปเดตกระเป๋าเงินของผู้แนะนำ (บวกเงินเพิ่ม)
+                    await transaction.request()
+                        .input('commAmount', sql.Decimal(18,2), commissionAmount)
+                        .input('refUserId', sql.Int, referrerUserId)
+                        .query(`UPDATE Users SET wallet_balance = wallet_balance + @commAmount WHERE user_id = @refUserId`);
+
+                    // 6.3 สร้างประวัติ Transaction รายได้ให้ "ผู้แนะนำ"
+                    await transaction.request()
+                        .input('refUserId', sql.Int, referrerUserId)
+                        .input('commAmount', sql.Decimal(18,2), commissionAmount)
+                        .input('commType', sql.VarChar(50), 'COMMISSION_5')
+                        .input('commDesc', sql.NVarChar(255), `รายได้ 5% จากทีมงาน (${buyer.username})`)
+                        .query(`
+                            INSERT INTO Transactions (user_id, amount, transaction_type, description, status)
+                            VALUES (@refUserId, @commAmount, @commType, @commDesc, 'Completed')
+                        `);
+                }
             }
 
-            // 7. สำเร็จกระบวนการทั้งหมด กด Save ลงฐานข้อมูล
             await transaction.commit();
             res.json({ success: true, message: "สั่งซื้อสำเร็จ", order_id: newOrderId });
 
         } catch (innerErr) {
             await transaction.rollback();
-            throw innerErr; // โยน Error ของ SQL ออกไปให้บล็อก catch ด้านล่างจับ
+            throw innerErr;
         }
 
     } catch (err) {
         console.error("Yeeki Buy error:", err);
-        // 🚨 สาด Error จาก Database (err.message) กลับไปที่หน้าจอตรงๆ จะได้รู้ว่าตารางไหนผิด
         res.status(500).json({ 
             success: false, 
             message: `ฐานข้อมูลขัดข้อง (Database Error): ${err.message}` 
