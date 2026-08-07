@@ -3164,8 +3164,10 @@ app.post('/api/admin/analyze-draw', async (req, res) => {
         res.json({ success: true, totalSales, analysis: analysisRes.recordset });
     } catch (err) { res.status(500).json({ success: false }); }
 });
+
+
 // ==========================================
-// 🌟 API สำหรับสุ่มเลขแนะนำ (Suggest Draw) - แก้ไขให้สุ่มหาเลข 6 ตัว
+// 1. API: สุ่มเลขแบบแยกชุดและคุม % (แปลง LAK เป็น THB ก่อนคำนวณ)
 // ==========================================
 app.post('/api/admin/yeeki/suggest-draw', async (req, res) => {
     const { target_percent, round_id } = req.body;
@@ -3173,230 +3175,104 @@ app.post('/api/admin/yeeki/suggest-draw', async (req, res) => {
     try {
         pool = await sql.connect(dbConfig);
         
-        // 1. ดึงยอดขายรวม (Total Sales)
-        const salesReq = await pool.request()
-            .input('roundId', sql.Int, round_id)
-            .query(`
-                SELECT SUM(i.price) as totalSales 
-                FROM Yeeki_Order_Items i
-                JOIN Yeeki_Orders o ON i.order_id = o.order_id
-                WHERE o.round_id = @roundId
-            `);
-        const totalSales = salesReq.recordset[0].totalSales || 0;
+        // ดึงเรท LAK -> THB
+        const exReq = await pool.request().query("SELECT rate FROM Exchange_Rates WHERE currency_pair = 'THB_LAK'");
+        const lakRate = exReq.recordset.length > 0 ? exReq.recordset[0].rate : 620;
 
-        // ถ้าไม่มียอดขายเลย สุ่มเลข 6 ตัว และ 8 ตัว อะไรก็ได้
-        if (totalSales === 0) {
-            return res.json({ 
-                success: true, 
-                super_8: String(Math.floor(10000000 + Math.random() * 90000000)),
-                top_6: String(Math.floor(100000 + Math.random() * 900000))
-            });
-        }
-
-        const maxPayout = totalSales * (target_percent / 100);
-
-        // 2. ดึงรายการซื้อทั้งหมดของรอบนี้มาไว้ใน memory เพื่อคำนวณ
         const itemsReq = await pool.request()
             .input('roundId', sql.Int, round_id)
             .query(`
-                SELECT i.lottery_type, i.selected_number, i.price
+                SELECT i.lottery_type, i.selected_number, i.price, o.currency_code
                 FROM Yeeki_Order_Items i
                 JOIN Yeeki_Orders o ON i.order_id = o.order_id
-                WHERE o.round_id = @roundId
+                WHERE o.round_id = @roundId AND i.status = N'รอผลตรวจ'
             `);
         const orders = itemsReq.recordset;
 
-        // 3. ดึงเรทการจ่าย
+        // คำนวณยอดขายรวมทั้งหมดให้กลายเป็นเงินบาท (THB) ก่อน
+        let totalSalesTHB = 0;
+        orders.forEach(o => {
+            totalSalesTHB += o.currency_code === 'LAK' ? (o.price / lakRate) : o.price;
+        });
+
+        if (totalSalesTHB === 0) {
+            return res.json({ 
+                success: true, 
+                super_8: String(Math.floor(10000000 + Math.random() * 90000000)),
+                top_6: String(Math.floor(100000 + Math.random() * 900000)),
+                bottom_2: String(Math.floor(10 + Math.random() * 90))
+            });
+        }
+
+        const maxPayoutTHB = totalSalesTHB * (target_percent / 100);
+
         const ratesReq = await pool.request().query(`SELECT lottery_type, multiplier FROM Yeeki_Prize_Rates`);
         const prizeRates = {};
         ratesReq.recordset.forEach(r => prizeRates[r.lottery_type] = r.multiplier);
 
-        // 4. สุ่มหาเลข 6 ตัว ที่ปลอดภัย (ทำ 100 รอบ)
         let best_top_6 = String(Math.floor(100000 + Math.random() * 900000));
-        let min_payout = Infinity;
+        let best_bot_2 = String(Math.floor(10 + Math.random() * 90));
+        let min_payout_thb = Infinity;
 
+        // สุ่มหาเลขที่ดีที่สุด 100 รอบ (ที่ยอดจ่ายรวมน้อยกว่าเป้า)
         for (let i = 0; i < 100; i++) {
             const test_6 = String(Math.floor(100000 + Math.random() * 900000));
+            const test_bot_2 = String(Math.floor(10 + Math.random() * 90)); // 💡 Generate 2 ตัวล่างแยก!
             
-            // แตกเลขตามสูตรที่คุณพี่ต้องการ
             const test_4 = test_6.slice(-4);
             const test_3 = test_6.slice(-3);
             const test_2top = test_6.slice(-2);
-            const test_2bot = test_6.slice(2, 4);
 
-            let current_payout = 0;
+            let current_payout_thb = 0;
 
             for (let order of orders) {
                 let isWin = false;
-                if (order.lottery_type === '6 ตัว' && order.selected_number === test_6) isWin = true;
-                else if (order.lottery_type === '4 ตัวท้าย' && order.selected_number === test_4) isWin = true;
-                else if (order.lottery_type === '3 ตัวบน' && order.selected_number === test_3) isWin = true;
+                const num = order.selected_number;
+                if (order.lottery_type === '6 ตัว' && num === test_6) isWin = true;
+                else if (order.lottery_type === '4 ตัวท้าย' && num === test_4) isWin = true;
+                else if (order.lottery_type === '3 ตัวบน' && num === test_3) isWin = true;
                 else if (order.lottery_type === '3 ตัวโต๊ด') {
-                    const winArr = test_3.split('').sort().join('');
-                    const playArr = order.selected_number.split('').sort().join('');
-                    if (winArr === playArr) isWin = true;
+                    if (test_3.split('').sort().join('') === num.split('').sort().join('')) isWin = true;
                 }
-                else if (order.lottery_type === '2 ตัวบน' && order.selected_number === test_2top) isWin = true;
-                else if (order.lottery_type === '2 ตัวล่าง' && order.selected_number === test_2bot) isWin = true;
-                else if (order.lottery_type === 'วิ่งบน' && test_3.includes(order.selected_number)) isWin = true;
-                else if (order.lottery_type === 'วิ่งล่าง' && test_2bot.includes(order.selected_number)) isWin = true;
+                else if (order.lottery_type === '2 ตัวบน' && num === test_2top) isWin = true;
+                else if (order.lottery_type === '2 ตัวล่าง' && num === test_bot_2) isWin = true;
+                else if (order.lottery_type === 'วิ่งบน' && test_3.includes(num)) isWin = true;
+                else if (order.lottery_type === 'วิ่งล่าง' && test_bot_2.includes(num)) isWin = true;
 
                 if (isWin) {
-                    current_payout += order.price * (prizeRates[order.lottery_type] || 0);
+                    let payout = order.price * (prizeRates[order.lottery_type] || 0);
+                    current_payout_thb += order.currency_code === 'LAK' ? (payout / lakRate) : payout;
                 }
             }
 
-            // ถ้าเจอเลขที่ยอดจ่ายน้อยกว่าที่ตั้งไว้ ให้ใช้เลขนี้เลย
-            if (current_payout <= maxPayout) {
+            if (current_payout_thb <= maxPayoutTHB) {
                 best_top_6 = test_6;
+                best_bot_2 = test_bot_2;
                 break; 
             }
-            // เก็บเลขที่ยอดจ่ายน้อยที่สุดไว้เผื่อ
-            if (current_payout < min_payout) {
-                min_payout = current_payout;
+            if (current_payout_thb < min_payout_thb) {
+                min_payout_thb = current_payout_thb;
                 best_top_6 = test_6;
+                best_bot_2 = test_bot_2;
             }
         }
-
-        // 5. สุ่มเลข 8 ตัว (สุ่มใหม่ตลอด เพราะคุณพี่คุมใน Frontend แล้ว)
-        const super_8 = String(Math.floor(10000000 + Math.random() * 90000000));
 
         res.json({ 
             success: true, 
-            super_8: super_8,
-            top_6: best_top_6
+            super_8: String(Math.floor(10000000 + Math.random() * 90000000)), // สุ่มไว้รอ ถ้าหน้าเว็บมีแล้วจะไม่ทับ
+            top_6: best_top_6,
+            bottom_2: best_bot_2
         });
-
-    } catch (err) {
-        console.error("Suggest Draw error:", err);
-        res.status(500).json({ success: false, message: err.message });
-    }
+    } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 });
 
 
-// ==========================================
-// 🌟 ระบบ AI สุ่มหาเลขที่ปลอดภัยที่สุด (หลบยอดจ่ายเกินเป้า %)
-// ==========================================
-app.post('/api/admin/yeeki/suggest-draw', async (req, res) => {
-    try {
-        const { round_id, target_percent } = req.body;
-        const pool = await sql.connect(dbConfig);
-
-        // 1. ดึงโพยทั้งหมดของรอบนี้มาวิเคราะห์
-        const orders = await pool.request()
-            .input('round_id', sql.Int, round_id)
-            .query(`
-                SELECT oi.lottery_type, oi.selected_number, oi.price, o.currency_code
-                FROM Yeeki_Order_Items oi
-                JOIN Yeeki_Orders o ON oi.order_id = o.order_id
-                WHERE o.round_id = @round_id AND oi.status = N'รอผลตรวจ'
-            `);
-
-        const items = orders.recordset;
-
-        // 2. ถ้ายังไม่มีใครแทงเลย สุ่มเลขมั่วๆ แบบอิสระได้เลย (เพราะยังไงก็ไม่ขาดทุน)
-        if (items.length === 0) {
-            return res.json({
-                success: true,
-                super_8: String(Math.floor(Math.random() * 100000000)).padStart(8, '0'),
-                top_4: String(Math.floor(Math.random() * 10000)).padStart(4, '0'),
-                bottom_2: String(Math.floor(Math.random() * 100)).padStart(2, '0'),
-                message: "ไม่มีรายการแทง สุ่มเลขอิสระเรียบร้อย"
-            });
-        }
-
-        // 3. กำหนดอัตราจ่าย (จำลอง) *คุณพี่สามารถปรับเรทตรงนี้ให้ตรงกับระบบจริงได้ครับ*
-        const rates = {
-            '8 ตัว (Super)': 1000000,
-            '4 ตัวท้าย': 6000,
-            '3 ตัวบน': 900,
-            '3 ตัวโต๊ด': 150,
-            '2 ตัวบน': 90,
-            '2 ตัวล่าง': 90,
-            'วิ่งบน': 3.2,
-            'วิ่งล่าง': 4.2
-        };
-
-        const EXCHANGE_RATE = 620; // เรทแลกเปลี่ยน 1 THB = 620 LAK
-
-        // คำนวณยอดขายรวมทั้งหมด (แปลงเงินกีบเป็นเงินบาท เพื่อใช้คำนวณกำไร)
-        let totalSalesTHB = 0;
-        items.forEach(item => {
-            totalSalesTHB += (item.currency_code === 'LAK' || item.currency_code === '₭') ? (item.price / EXCHANGE_RATE) : item.price;
-        });
-
-        // 🎯 เป้าหมายยอดจ่ายสูงสุดที่รับได้ (เช่น ขายได้ 1000, ตั้งเป้า 25% = จ่ายได้ห้ามเกิน 250 บาท)
-        const maxPayoutTHB = totalSalesTHB * (target_percent / 100);
-
-        let bestSet = null;
-        let minPayout = Infinity;
-
-        // 4. หุ่นยนต์เริ่มวิ่งสุ่มจำลองผล 1,000 ครั้ง
-        for (let i = 0; i < 1000; i++) {
-            // สุ่มเลขจำลอง (แยกชุดอิสระ)
-            let super8 = String(Math.floor(Math.random() * 100000000)).padStart(8, '0');
-            let top4 = String(Math.floor(Math.random() * 10000)).padStart(4, '0');
-            let bottom2 = String(Math.floor(Math.random() * 100)).padStart(2, '0');
-
-            let top3 = top4.slice(-3);
-            let top2 = top4.slice(-2);
-            let t1 = top3[0], t2 = top3[1], t3 = top3[2];
-            let toadSets = [ t1+t2+t3, t1+t3+t2, t2+t1+t3, t2+t3+t1, t3+t1+t2, t3+t2+t1 ];
-
-            let currentPayoutTHB = 0;
-
-            // ตรวจบิลจำลองทีละใบ
-            for (let item of items) {
-                let priceTHB = (item.currency_code === 'LAK' || item.currency_code === '₭') ? (item.price / EXCHANGE_RATE) : item.price;
-                let isWin = false;
-                let num = item.selected_number;
-
-                switch (item.lottery_type) {
-                    case '8 ตัว (Super)': if (num === super8) isWin = true; break;
-                    case '4 ตัวท้าย': if (num === top4) isWin = true; break;
-                    case '3 ตัวบน': if (num === top3) isWin = true; break;
-                    case '3 ตัวโต๊ด': if (toadSets.includes(num)) isWin = true; break;
-                    case '2 ตัวบน': if (num === top2) isWin = true; break;
-                    case '2 ตัวล่าง': if (num === bottom2) isWin = true; break;
-                    case 'วิ่งบน': if (top3.includes(num)) isWin = true; break;
-                    case 'วิ่งล่าง': if (bottom2.includes(num)) isWin = true; break;
-                }
-
-                if (isWin) currentPayoutTHB += (priceTHB * (rates[item.lottery_type] || 0));
-            }
-
-            // ถ้าเจอชุดตัวเลขที่ยอดจ่าย "น้อยกว่าหรือเท่ากับ" เป้าหมายที่ตั้งไว้ ให้หยุดหาและใช้เลขนี้ทันที!
-            if (currentPayoutTHB <= maxPayoutTHB) {
-                bestSet = { super_8: super8, top_4: top4, bottom_2: bottom2 };
-                break;
-            }
-
-            // ถ้ายังไม่เจอ ก็เก็บเลขชุดที่เสียน้อยที่สุดไว้เป็นแผนสำรอง
-            if (currentPayoutTHB < minPayout) {
-                minPayout = currentPayoutTHB;
-                bestSet = { super_8: super8, top_4: top4, bottom_2: bottom2 };
-            }
-        }
-
-        res.json({
-            success: true,
-            super_8: bestSet.super_8,
-            top_4: bestSet.top_4,
-            bottom_2: bestSet.bottom_2
-        });
-
-    } catch (err) {
-        console.error("Error in suggest-draw:", err);
-        res.status(500).json({ success: false, message: err.message });
-    }
-});
 
 // ==========================================
-// 🌟 API ประกาศผลและตรวจรางวัล (Execute Draw)
+// 3. API: ประกาศผลและตรวจบิลจริง (Execute Draw)
 // ==========================================
 app.post('/api/admin/execute-yeeki-draw', async (req, res) => {
-    // 💡 เปลี่ยนมารับค่า top_6
-    const { round_id, super_number, top_6 } = req.body;
+    const { round_id, super_number, top_6, bottom_2 } = req.body;
     let pool;
     try {
         pool = await sql.connect(dbConfig);
@@ -3404,28 +3280,19 @@ app.post('/api/admin/execute-yeeki-draw', async (req, res) => {
         await transaction.begin();
 
         try {
-            // 💡 แตกเลข
             const top_4 = top_6.slice(-4);
             const top_3 = top_6.slice(-3);
             const top_2 = top_6.slice(-2);
-            const bottom_2 = top_6.slice(2, 4);
 
-            // 1. อัปเดตผลรางวัลลงตาราง
             await transaction.request()
                 .input('roundId', sql.Int, round_id)
                 .input('res8', sql.VarChar(8), super_number)
-                // 💡 เก็บ 6 ตัวไว้ในคอลัมน์ไหน? สมมติเก็บ 4 ตัวไว้เหมือนเดิม แต่เราสามารถตรวจสอบย้อนหลังได้จาก order
-                // ถ้าคุณพี่มีคอลัมน์ result_6 ก็เพิ่มตรงนี้ได้ครับ แต่เพื่อความชัวร์ผมเก็บแค่ 4 ตัวตามฐานข้อมูลเดิมก่อน
                 .input('res4', sql.VarChar(4), top_4) 
                 .input('res3', sql.VarChar(3), top_3)
                 .input('res2bot', sql.VarChar(2), bottom_2)
                 .query(`
                     UPDATE Yeeki_Rounds 
-                    SET result_8_super = @res8, 
-                        result_4_top = @res4, 
-                        result_3_top = @res3, 
-                        result_2_bottom = @res2bot,
-                        status = 'Completed' 
+                    SET result_8_super = @res8, result_4_top = @res4, result_3_top = @res3, result_2_bottom = @res2bot, status = 'Completed' 
                     WHERE round_id = @roundId
                 `);
 
@@ -3433,15 +3300,12 @@ app.post('/api/admin/execute-yeeki-draw', async (req, res) => {
             const prizeRates = {};
             ratesReq.recordset.forEach(r => prizeRates[r.lottery_type] = r.multiplier);
 
-            const itemsReq = await transaction.request()
-                .input('roundId', sql.Int, round_id)
-                .query(`
-                    SELECT i.item_id, i.order_id, i.lottery_type, i.selected_number, i.price, o.user_id, o.currency_code
-                    FROM Yeeki_Order_Items i
-                    JOIN Yeeki_Orders o ON i.order_id = o.order_id
-                    WHERE o.round_id = @roundId AND i.status = N'รอผลตรวจ'
-                `);
-
+            const itemsReq = await transaction.request().input('roundId', sql.Int, round_id).query(`
+                SELECT i.item_id, i.order_id, i.lottery_type, i.selected_number, i.price, o.user_id, o.currency_code
+                FROM Yeeki_Order_Items i
+                JOIN Yeeki_Orders o ON i.order_id = o.order_id
+                WHERE o.round_id = @roundId AND i.status = N'รอผลตรวจ'
+            `);
             const items = itemsReq.recordset;
 
             for (let item of items) {
@@ -3449,15 +3313,12 @@ app.post('/api/admin/execute-yeeki-draw', async (req, res) => {
                 const type = item.lottery_type;
                 const num = item.selected_number;
 
-                // 💡 เงื่อนไขการตรวจของจริง
                 if (type === '8 ตัว (Super)' && num === super_number) isWin = true;
                 else if (type === '6 ตัว' && num === top_6) isWin = true;
                 else if (type === '4 ตัวท้าย' && num === top_4) isWin = true;
                 else if (type === '3 ตัวบน' && num === top_3) isWin = true;
                 else if (type === '3 ตัวโต๊ด') {
-                    const winArr = top_3.split('').sort().join('');
-                    const playArr = num.split('').sort().join('');
-                    if (winArr === playArr) isWin = true;
+                    if (top_3.split('').sort().join('') === num.split('').sort().join('')) isWin = true;
                 }
                 else if (type === '2 ตัวบน' && num === top_2) isWin = true;
                 else if (type === '2 ตัวล่าง' && num === bottom_2) isWin = true;
@@ -3466,44 +3327,17 @@ app.post('/api/admin/execute-yeeki-draw', async (req, res) => {
 
                 if (isWin) {
                     const prizeAmount = item.price * (prizeRates[type] || 0);
-
-                    await transaction.request()
-                        .input('itemId', sql.Int, item.item_id)
-                        .input('prizeAmt', sql.Decimal(18,2), prizeAmount)
-                        .query(`UPDATE Yeeki_Order_Items SET status = N'ชนะ', prize_amount = @prizeAmt WHERE item_id = @itemId`);
-
-                    await transaction.request()
-                        .input('uid', sql.Int, item.user_id)
-                        .input('prize', sql.Decimal(18,2), prizeAmount)
-                        .query(`UPDATE Users SET wallet_balance = wallet_balance + @prize WHERE user_id = @uid`);
-
-                    await transaction.request()
-                        .input('uid', sql.Int, item.user_id)
-                        .input('prize', sql.Decimal(18,2), prizeAmount)
-                        .input('title', sql.NVarChar(255), `ถูกรางวัล ${type} (${num}) รอบที่ ${round_id}`)
-                        .query(`
-                            INSERT INTO Transactions (user_id, amount, transaction_type, title, status)
-                            VALUES (@uid, @prize, 'PRIZE_WIN', @title, 'Completed')
-                        `);
+                    await transaction.request().input('itemId', sql.Int, item.item_id).input('prizeAmt', sql.Decimal(18,2), prizeAmount).query(`UPDATE Yeeki_Order_Items SET status = N'ชนะ', prize_amount = @prizeAmt WHERE item_id = @itemId`);
+                    await transaction.request().input('uid', sql.Int, item.user_id).input('prize', sql.Decimal(18,2), prizeAmount).query(`UPDATE Users SET wallet_balance = wallet_balance + @prize WHERE user_id = @uid`);
+                    await transaction.request().input('uid', sql.Int, item.user_id).input('prize', sql.Decimal(18,2), prizeAmount).input('title', sql.NVarChar(255), `ถูกรางวัล ${type} (${num}) รอบที่ ${round_id}`).query(`INSERT INTO Transactions (user_id, amount, transaction_type, title, status) VALUES (@uid, @prize, 'PRIZE_WIN', @title, 'Completed')`);
                 } else {
-                    await transaction.request()
-                        .input('itemId', sql.Int, item.item_id)
-                        .query(`UPDATE Yeeki_Order_Items SET status = N'แพ้' WHERE item_id = @itemId`);
+                    await transaction.request().input('itemId', sql.Int, item.item_id).query(`UPDATE Yeeki_Order_Items SET status = N'แพ้' WHERE item_id = @itemId`);
                 }
             }
-
             await transaction.commit();
             res.json({ success: true, message: "ประกาศผลและโอนเงินรางวัลเสร็จสิ้น!" });
-
-        } catch (innerErr) {
-            await transaction.rollback();
-            throw innerErr;
-        }
-
-    } catch (err) {
-        console.error("Execute Draw error:", err);
-        res.status(500).json({ success: false, message: `Database Error: ${err.message}` });
-    }
+        } catch (innerErr) { await transaction.rollback(); throw innerErr; }
+    } catch (err) { res.status(500).json({ success: false, message: `Database Error: ${err.message}` }); }
 });
 
 // ==========================================
@@ -5175,39 +5009,26 @@ app.post('/api/admin/suggest-yeeki-draw', async (req, res) => {
 });
 
 // ==========================================
-// 🌟 API จำลองการออกรางวัล (Analyze Draw)
+// 2. API: จำลองผลตรวจรางวัล (Analyze Draw)
 // ==========================================
 app.post('/api/admin/analyze-yeeki-draw', async (req, res) => {
-    // 💡 เปลี่ยนมารับค่า top_6 แทนตัวย่อยๆ
-    const { round_id, super_number, top_6 } = req.body; 
+    const { round_id, super_number, top_6, bottom_2 } = req.body; 
     let pool;
     try {
         pool = await sql.connect(dbConfig);
-        
-        // 💡 แตกเลข 6 ตัวให้ถูกต้องตรงตามที่คุณพี่ระบุ
+        const exReq = await pool.request().query("SELECT rate FROM Exchange_Rates WHERE currency_pair = 'THB_LAK'");
+        const lakRate = exReq.recordset.length > 0 ? exReq.recordset[0].rate : 620;
+
         const top_4 = top_6.slice(-4);
         const top_3 = top_6.slice(-3);
         const top_2 = top_6.slice(-2);
-        const bottom_2 = top_6.slice(2, 4);
 
-        const salesReq = await pool.request()
-            .input('roundId', sql.Int, round_id)
-            .query(`
-                SELECT SUM(i.price) as totalSales 
-                FROM Yeeki_Order_Items i
-                JOIN Yeeki_Orders o ON i.order_id = o.order_id
-                WHERE o.round_id = @roundId
-            `);
-        const totalSales = salesReq.recordset[0].totalSales || 0;
-
-        const itemsReq = await pool.request()
-            .input('roundId', sql.Int, round_id)
-            .query(`
-                SELECT i.lottery_type, i.selected_number, i.price
-                FROM Yeeki_Order_Items i
-                JOIN Yeeki_Orders o ON i.order_id = o.order_id
-                WHERE o.round_id = @roundId
-            `);
+        const itemsReq = await pool.request().input('roundId', sql.Int, round_id).query(`
+            SELECT i.lottery_type, i.selected_number, i.price, o.currency_code
+            FROM Yeeki_Order_Items i
+            JOIN Yeeki_Orders o ON i.order_id = o.order_id
+            WHERE o.round_id = @roundId AND i.status = N'รอผลตรวจ'
+        `);
         const orders = itemsReq.recordset;
 
         const ratesReq = await pool.request().query(`SELECT lottery_type, multiplier FROM Yeeki_Prize_Rates`);
@@ -5215,39 +5036,39 @@ app.post('/api/admin/analyze-yeeki-draw', async (req, res) => {
         ratesReq.recordset.forEach(r => prizeRates[r.lottery_type] = r.multiplier);
 
         const analysis = {};
-        const types = ['8 ตัว (Super)', '6 ตัว', '4 ตัวท้าย', '3 ตัวบน', '3 ตัวโต๊ด', '2 ตัวบน', '2 ตัวล่าง', 'วิ่งบน', 'วิ่งล่าง'];
-        types.forEach(t => analysis[t] = { lottery_type: t, winner_count: 0, total_payout: 0 });
+        ['8 ตัว (Super)', '6 ตัว', '4 ตัวท้าย', '3 ตัวบน', '3 ตัวโต๊ด', '2 ตัวบน', '2 ตัวล่าง', 'วิ่งบน', 'วิ่งล่าง'].forEach(t => 
+            analysis[t] = { lottery_type: t, winner_count: 0, total_payout_thb: 0 }
+        );
+
+        let totalSalesTHB = 0;
 
         for (let order of orders) {
             let isWin = false;
+            const num = order.selected_number;
             
-            // 💡 เงื่อนไขการตรวจ
-            if (order.lottery_type === '8 ตัว (Super)' && order.selected_number === super_number) isWin = true;
-            else if (order.lottery_type === '6 ตัว' && order.selected_number === top_6) isWin = true;
-            else if (order.lottery_type === '4 ตัวท้าย' && order.selected_number === top_4) isWin = true;
-            else if (order.lottery_type === '3 ตัวบน' && order.selected_number === top_3) isWin = true;
+            totalSalesTHB += order.currency_code === 'LAK' ? (order.price / lakRate) : order.price;
+
+            if (order.lottery_type === '8 ตัว (Super)' && num === super_number) isWin = true;
+            else if (order.lottery_type === '6 ตัว' && num === top_6) isWin = true;
+            else if (order.lottery_type === '4 ตัวท้าย' && num === top_4) isWin = true;
+            else if (order.lottery_type === '3 ตัวบน' && num === top_3) isWin = true;
             else if (order.lottery_type === '3 ตัวโต๊ด') {
-                const winArr = top_3.split('').sort().join('');
-                const playArr = order.selected_number.split('').sort().join('');
-                if (winArr === playArr) isWin = true;
+                if (top_3.split('').sort().join('') === num.split('').sort().join('')) isWin = true;
             }
-            else if (order.lottery_type === '2 ตัวบน' && order.selected_number === top_2) isWin = true;
-            else if (order.lottery_type === '2 ตัวล่าง' && order.selected_number === bottom_2) isWin = true;
-            else if (order.lottery_type === 'วิ่งบน' && top_3.includes(order.selected_number)) isWin = true;
-            else if (order.lottery_type === 'วิ่งล่าง' && bottom_2.includes(order.selected_number)) isWin = true;
+            else if (order.lottery_type === '2 ตัวบน' && num === top_2) isWin = true;
+            else if (order.lottery_type === '2 ตัวล่าง' && num === bottom_2) isWin = true;
+            else if (order.lottery_type === 'วิ่งบน' && top_3.includes(num)) isWin = true;
+            else if (order.lottery_type === 'วิ่งล่าง' && bottom_2.includes(num)) isWin = true;
 
             if (isWin) {
                 const payout = order.price * (prizeRates[order.lottery_type] || 0);
+                const payoutTHB = order.currency_code === 'LAK' ? (payout / lakRate) : payout;
                 analysis[order.lottery_type].winner_count += 1;
-                analysis[order.lottery_type].total_payout += payout;
+                analysis[order.lottery_type].total_payout_thb += payoutTHB;
             }
         }
-
-        res.json({ success: true, totalSales, analysis: Object.values(analysis) });
-    } catch (err) {
-        console.error("Analyze error:", err);
-        res.status(500).json({ success: false, message: err.message });
-    }
+        res.json({ success: true, totalSalesTHB, analysis: Object.values(analysis) });
+    } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 });
 
 app.listen(port, () => {
