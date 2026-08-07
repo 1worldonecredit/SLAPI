@@ -4518,76 +4518,90 @@ app.get('/api/admin/yeeki/sales-report', async (req, res) => {
         res.status(500).json({ success: false, message: err.message });
     }
 });
+
+
 // ==========================================
-// API: ซื้อหวยยี่กี (บันทึกลงตาราง Yeeki_Orders โดยเฉพาะ)
+// 🌟 API สำหรับการซื้อหวยยี่กี
 // ==========================================
 app.post('/api/yeeki/buy', async (req, res) => {
-    const { user_id, cart, total_price, currency, note } = req.body;
+    const { user_id, cart, total_price, currency, note, lottery_category } = req.body;
+    let pool;
     
-    if (!user_id || !cart || cart.length === 0) {
-        return res.status(400).json({ success: false, message: 'ข้อมูลตะกร้าว่างเปล่า' });
-    }
-
     try {
-        const pool = await sql.connect(dbConfig);
+        if (!user_id || !cart || cart.length === 0) {
+            return res.status(400).json({ success: false, message: "ข้อมูลการสั่งซื้อไม่ครบถ้วน" });
+        }
+
+        pool = await sql.connect(dbConfig);
+        
+        // เช็คยอดเงินในตาราง Users ก่อนตัดเงิน
+        const userCheck = await pool.request()
+            .input('uid', sql.Int, user_id)
+            .query(`SELECT wallet_balance FROM Users WHERE user_id = @uid`);
+            
+        if (userCheck.recordset.length === 0) {
+            return res.status(404).json({ success: false, message: "ไม่พบข้อมูลผู้ใช้" });
+        }
+        
+        const currentBalance = userCheck.recordset[0].wallet_balance || 0;
+        
+        if (currentBalance < total_price) {
+            return res.status(400).json({ success: false, message: "ยอดเงินในกระเป๋าไม่เพียงพอ" });
+        }
+
         const transaction = new sql.Transaction(pool);
         await transaction.begin();
-        
-        try {
-            // 1. ดึงรอบจากรายการแรกในตะกร้า
-            const round_id = cart[0].round_id;
-            
-            // 2. บันทึกลงตาราง Yeeki_Orders (บิลหลัก)
-            const orderResult = await transaction.request()
-                .input('user_id', sql.Int, user_id)
-                .input('round_id', sql.Int, round_id)
-                .input('total_amount', sql.Decimal(18, 2), total_price)
-                .input('currency_code', sql.VarChar(10), currency)
-                .input('status', sql.NVarChar(50), 'รอผลตรวจ')
-                .input('order_note', sql.NVarChar(sql.MAX), note || '')
-                .query(`
-                    INSERT INTO Yeeki_Orders (user_id, round_id, total_amount, currency_code, status, order_note, created_at)
-                    OUTPUT INSERTED.order_id
-                    VALUES (@user_id, @round_id, @total_amount, @currency_code, @status, @order_note, DATEADD(hour, 7, GETUTCDATE()))
-                `);
-                
-            const new_order_id = orderResult.recordset[0].order_id;
 
-            // 3. บันทึกลงตาราง Yeeki_Order_Items (รายการตัวเลข)
+        try {
+            // หักเงินจากตาราง Users
+            await transaction.request()
+                .input('price', sql.Decimal(18,2), total_price)
+                .input('uid', sql.Int, user_id)
+                .query(`UPDATE Users SET wallet_balance = wallet_balance - @price WHERE user_id = @uid`);
+
+            // ใช้ round_id จากบิลใบแรก (เพราะตระกร้าเดียวกันต้องเป็นรอบเดียวกัน)
+            const mainRoundId = cart[0].round_id;
+
+            // บันทึกบิลหลักลง Yeeki_Orders
+            const insertOrderReq = await transaction.request()
+                .input('user_id', sql.Int, user_id)
+                .input('round_id', sql.Int, mainRoundId)
+                .input('total_amount', sql.Decimal(18,2), total_price)
+                .input('currency', sql.VarChar(10), currency)
+                .input('note', sql.NVarChar(255), note || '')
+                .input('status', sql.VarChar(50), 'Completed')
+                .query(`
+                    INSERT INTO Yeeki_Orders (user_id, round_id, total_amount, currency_code, status, order_note)
+                    OUTPUT INSERTED.order_id
+                    VALUES (@user_id, @round_id, @total_amount, @currency, @status, @note)
+                `);
+
+            const newOrderId = insertOrderReq.recordset[0].order_id;
+
+            // บันทึกรายการย่อยทีละตัว ลงใน Yeeki_Order_Items
             for (let item of cart) {
                 await transaction.request()
-                    .input('order_id', sql.Int, new_order_id)
-                    .input('lottery_type', sql.NVarChar(50), item.type)
-                    .input('selected_number', sql.VarChar(20), item.number)
-                    .input('price', sql.Decimal(18, 2), item.price)
-                    .input('status', sql.NVarChar(50), 'รอผลตรวจ')
-                    .input('prize_amount', sql.Decimal(18, 2), 0)
+                    .input('order_id', sql.Int, newOrderId)
+                    .input('ltype', sql.NVarChar(50), item.type)
+                    .input('number', sql.VarChar(20), item.number)
+                    .input('price', sql.Decimal(18,2), item.price)
                     .query(`
-                        INSERT INTO Yeeki_Order_Items (order_id, lottery_type, selected_number, price, status, prize_amount)
-                        VALUES (@order_id, @lottery_type, @selected_number, @price, @status, @prize_amount)
+                        INSERT INTO Yeeki_Order_Items (order_id, lottery_type, selected_number, price, status)
+                        VALUES (@order_id, @ltype, @number, @price, N'รอผลตรวจ')
                     `);
             }
 
-            // 4. หักเงินในกระเป๋าลูกค้า
-            await transaction.request()
-                .input('user_id', sql.Int, user_id)
-                .input('total_price', sql.Decimal(18, 2), total_price)
-                .query(`
-                    UPDATE User_Profile_Banks 
-                    SET wallet_balance = wallet_balance - @total_price 
-                    WHERE user_id = @user_id
-                `);
-
             await transaction.commit();
-            res.json({ success: true, order_id: new_order_id });
+            res.json({ success: true, message: "สั่งซื้อสำเร็จ", order_id: newOrderId });
 
-        } catch (err) {
+        } catch (innerErr) {
             await transaction.rollback();
-            throw err;
+            throw innerErr;
         }
-    } catch (error) {
-        console.error("Yeeki Buy Error:", error);
-        res.status(500).json({ success: false, message: error.message });
+
+    } catch (err) {
+        console.error("Yeeki Buy error:", err);
+        res.status(500).json({ success: false, message: "เกิดข้อผิดพลาดในการสั่งซื้อ กรุณาลองใหม่" });
     }
 });
 
