@@ -5072,31 +5072,37 @@ app.post('/api/admin/analyze-yeeki-draw', async (req, res) => {
 });
 
 // ==========================================
-// 🌟 API ใหม่: ดึงผลรางวัลและรายชื่อเจาะจงตามรอบ (เมื่อคลิกการ์ด)
+// 🌟 API ดึงผลรางวัลและรายชื่อเจาะจงตามรอบ
 // ==========================================
 app.get('/api/admin/yeeki-round-detail', async (req, res) => {
     const { round_id } = req.query;
     try {
         const pool = await sql.connect(dbConfig);
         
-        // 1. ดึงผลการออกรางวัลของรอบที่คลิก
+        // 1. ดึงผลการออกรางวัลของรอบนี้
         const roundReq = await pool.request()
             .input('roundId', sql.Int, round_id)
             .query(`SELECT * FROM Yeeki_Rounds WHERE round_id = @roundId`);
             
-        // 2. ดึงรายชื่อผู้ที่ถูกรางวัลในรอบนี้ทั้งหมด
+        // 2. 💡 ดึงรายชื่อคนที่ถูกรางวัล (สถานะ = 'ชนะ')
         const winnersReq = await pool.request()
             .input('roundId', sql.Int, round_id)
             .query(`
                 SELECT 
-                    r.round_number, r.round_id, u.username, 
-                    i.lottery_type, i.selected_number, i.price, i.prize_amount, 
-                    o.currency_code, N'โอนเงินแล้ว' as status
+                    r.round_number, 
+                    u.username, 
+                    i.lottery_type, 
+                    i.selected_number, 
+                    i.price, 
+                    i.prize_amount, 
+                    o.currency_code, 
+                    N'โอนเงินแล้ว' as status
                 FROM Yeeki_Order_Items i
                 JOIN Yeeki_Orders o ON i.order_id = o.order_id
                 JOIN Yeeki_Rounds r ON o.round_id = r.round_id
                 JOIN Users u ON o.user_id = u.user_id
-                WHERE r.round_id = @roundId AND i.status = N'ชนะ'
+                WHERE r.round_id = @roundId 
+                  AND i.status = N'ชนะ'
             `);
 
         res.json({
@@ -5105,6 +5111,7 @@ app.get('/api/admin/yeeki-round-detail', async (req, res) => {
             winners: winnersReq.recordset
         });
     } catch (err) {
+        console.error("Error in yeeki-round-detail:", err);
         res.status(500).json({ success: false, message: err.message });
     }
 });
