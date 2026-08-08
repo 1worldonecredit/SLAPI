@@ -4769,7 +4769,7 @@ app.post('/api/admin/search-yeeki-buyers', async (req, res) => {
         const exReq = await pool.request().query(`SELECT rate FROM ExchangeRates WHERE currency_pair = 'THB_LAK'`);
         const lakRate = exReq.recordset[0]?.rate || 620;
 
-        // 3. ค้นหาบิล (🔴 เปลี่ยนจากการใช้ LIKE มาใช้ = @number เพื่อให้ค้นหาเลขตรงตัวเป๊ะๆ)
+        // 3. ค้นหาบิล (แก้ตรง JOIN Users u ON o.user_id = u.user_id)
         const query = `
             SELECT 
                 r.round_number,
@@ -4781,7 +4781,7 @@ app.post('/api/admin/search-yeeki-buyers', async (req, res) => {
             FROM Yeeki_Order_Items i
             JOIN Yeeki_Orders o ON i.order_id = o.order_id
             JOIN Yeeki_Rounds r ON o.round_id = r.round_id
-            JOIN Users u ON o.user_id = u.id
+            JOIN Users u ON o.user_id = u.user_id
             WHERE r.draw_date = @date 
               AND i.selected_number = @number
             ORDER BY r.round_number ASC
