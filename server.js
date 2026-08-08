@@ -3166,14 +3166,13 @@ app.post('/api/admin/analyze-draw', async (req, res) => {
 });
 
 // ==========================================
-// 🌟 API สุ่มเลขแนะนำ (ฉบับ AI วิเคราะห์ขั้นสูง V2: บังคับกระจายรางวัล 2ตัว, 3ตัว)
+// 🌟 API สุ่มเลขแนะนำ (AI V3: เน้นแจก 3 ตัวบน เพื่อดึงดูดลูกค้า แต่คุมงบไม่ให้เกินลิมิต)
 // ==========================================
 app.post('/api/admin/yeeki/suggest-draw', async (req, res) => {
     const { target_percent, round_id } = req.body;
     try {
         const pool = await sql.connect(dbConfig);
 
-        // 1. ดึงบิลทั้งหมดของรอบนี้
         const ordersReq = await pool.request()
             .input('roundId', sql.Int, round_id)
             .query(`
@@ -3184,7 +3183,6 @@ app.post('/api/admin/yeeki/suggest-draw', async (req, res) => {
             `);
         const orders = ordersReq.recordset;
 
-        // 2. ดึงเรทแลกเปลี่ยน และคำนวณ "ยอดขายรวมสุทธิ (THB)"
         const exReq = await pool.request().query(`SELECT rate FROM ExchangeRates WHERE currency_pair = 'THB_LAK'`);
         const lakRate = exReq.recordset[0]?.rate || 620;
 
@@ -3193,12 +3191,10 @@ app.post('/api/admin/yeeki/suggest-draw', async (req, res) => {
             totalSalesTHB += (o.currency_code === 'LAK' || o.currency_code === '₭') ? (o.price / lakRate) : o.price;
         });
 
-        // 3. ดึงอัตราจ่าย
         const ratesReq = await pool.request().query(`SELECT lottery_type, multiplier FROM Yeeki_Prize_Rates`);
         const prizeRates = {};
         ratesReq.recordset.forEach(r => prizeRates[r.lottery_type] = r.multiplier);
 
-        // 4. คำนวณเป้าหมายยอดจ่ายสูงสุด (THB)
         const targetMaxPayoutTHB = totalSalesTHB * (target_percent / 100);
 
         const randDigit = () => Math.floor(Math.random() * 10).toString();
@@ -3208,41 +3204,38 @@ app.post('/api/admin/yeeki/suggest-draw', async (req, res) => {
             return res;
         };
 
-        // 5. 🌟 อัปเกรด V2: จงใจ "จับคู่เลข บน-ล่าง ที่ลูกค้าซื้อ" 
-        let candidates = [];
-        let topNumbers = ['']; 
-        let botNumbers = [''];
+        // 🌟 อัปเกรด V3: ดึง "เฉพาะ" เลขที่ลูกค้าซื้อ 3 ตัวบน และ 2 ตัวล่าง มาเป็นตัวตั้งต้นโดยตรง
+        let top3Candidates = [];
+        let bot2Candidates = [];
 
         orders.forEach(o => {
-            const num = o.selected_number;
-            if(o.lottery_type.includes('บน') || o.lottery_type.includes('ท้าย') || o.lottery_type.includes('ตัว')) {
-                if (!topNumbers.includes(num)) topNumbers.push(num);
-            } 
-            if (o.lottery_type.includes('ล่าง')) {
-                if (!botNumbers.includes(num)) botNumbers.push(num);
-            }
+            if (o.lottery_type === '3 ตัวบน') top3Candidates.push(o.selected_number);
+            if (o.lottery_type === '2 ตัวล่าง') bot2Candidates.push(o.selected_number);
         });
 
-        // เอาเลขบนและล่างมาผสมไขว้กัน (Cross Match)
-        for (let t of topNumbers) {
-            for (let b of botNumbers) {
-                for (let i = 0; i < 5; i++) { // สุ่ม 5 รูปแบบต่อคู่
-                    let t6 = t ? padRandom(t.slice(-6), 6) : padRandom('', 6);
-                    let b2 = b ? padRandom(b.slice(-2), 2) : padRandom('', 2);
-                    candidates.push({ t6, b2 });
-                }
+        // ถ้าไม่มีคนซื้อเลย ก็สุ่มหลอกไว้
+        if (top3Candidates.length === 0) top3Candidates.push(padRandom('', 3));
+        if (bot2Candidates.length === 0) bot2Candidates.push(padRandom('', 2));
+
+        let candidates = [];
+
+        // จับคู่ 3 ตัวบน และ 2 ตัวล่าง ทุกรูปแบบที่มีคนซื้อ
+        for (let t3 of top3Candidates) {
+            for (let b2 of bot2Candidates) {
+                // สร้างเลข 6 ตัว โดยบังคับให้ 3 ตัวท้ายตรงกับที่ลูกค้าซื้อ 3 ตัวบน
+                let t6 = padRandom('', 3) + t3; 
+                candidates.push({ t6: t6, b2: b2 });
             }
         }
 
-        // เติมแบบสุ่มเผื่อไว้ 2,000 ชุด
-        for(let i = 0; i < 2000; i++) {
+        // เติมแบบสุ่มเผื่อไว้หนีตาย (กรณีลูกค้าแทงหนักทุกคนจนแจก 3 ตัวไม่ได้จริงๆ)
+        for(let i = 0; i < 3000; i++) {
             candidates.push({ t6: padRandom('', 6), b2: padRandom('', 2) });
         }
 
         let bestResult = null;
         let bestScore = -Infinity;
 
-        // 6. เริ่มกระบวนการจำลองการออกรางวัล
         for (let cand of candidates) {
             const sim6 = cand.t6;
             const simBot2 = cand.b2;
@@ -3287,10 +3280,10 @@ app.post('/api/admin/yeeki/suggest-draw', async (req, res) => {
                 }
             }
 
-            // 🚫 กฎเหล็ก 1: ถ้ายอดจ่ายรวมเกินเป้าหมาย (เช่นเกิน 100%) ปัดตก!
+            // กฎเหล็ก 1: จ่ายรวมห้ามเกินเป้า
             if (simTotalPayoutTHB > targetMaxPayoutTHB) continue;
 
-            // 🚫 กฎเหล็ก 2: ถ้ายอดขายรวม น้อยกว่า ยอดจ่ายเฉพาะประเภท ปัดตก!
+            // กฎเหล็ก 2: ประเภทเดียวห้ามเกินยอดขายรวม
             let violatesConstraint = false;
             for (let t in typePayoutsTHB) {
                 if (typePayoutsTHB[t] > totalSalesTHB) {
@@ -3300,12 +3293,13 @@ app.post('/api/admin/yeeki/suggest-draw', async (req, res) => {
             }
             if (violatesConstraint) continue;
 
-            // 🌟 ให้คะแนนโบนัส! (ยิ่งมีคนถูกรางวัลใหญ่ ยิ่งได้คะแนนสูง)
+            // 🌟 ให้คะแนนโบนัสมหาศาล บังคับให้ AI "ต้อง" เลือกคนถูก 3 ตัวบน ถ้างบยังเหลือ!
             let complexityBonus = 0;
-            if (typePayoutsTHB['3 ตัวบน']) complexityBonus += 5000000;
-            if (typePayoutsTHB['2 ตัวบน']) complexityBonus += 2000000;
-            if (typePayoutsTHB['2 ตัวล่าง']) complexityBonus += 2000000;
+            if (typePayoutsTHB['3 ตัวบน']) complexityBonus += 20000000; // บังคับหา 3 ตัวก่อน
+            if (typePayoutsTHB['2 ตัวล่าง']) complexityBonus += 5000000;  // ตามด้วย 2 ตัวล่าง
+            if (typePayoutsTHB['2 ตัวบน']) complexityBonus += 5000000;
             
+            // ให้คะแนนเพิ่มถ้ายอดจ่ายเข้าใกล้ 100% มากที่สุด จะได้ดูสมจริง
             let score = (winTypesCount * 1000000) + complexityBonus + simTotalPayoutTHB;
 
             if (score > bestScore) {
@@ -3314,7 +3308,6 @@ app.post('/api/admin/yeeki/suggest-draw', async (req, res) => {
             }
         }
 
-        // กรณีไม่มีชุดตัวเลขไหนผ่านเงื่อนไข 100% เลย (ลูกค้าแทงหนักทุกตัว) ให้ออกแบบสุ่มเซฟบริษัท
         if (!bestResult) {
             bestResult = { super_8: padRandom('', 8), top_4: padRandom('', 4), bottom_2: padRandom('', 2) };
         }
@@ -3331,7 +3324,6 @@ app.post('/api/admin/yeeki/suggest-draw', async (req, res) => {
         res.status(500).json({ success: false, message: err.message });
     }
 });
-
 
 // ==========================================
 // 3. API: ประกาศผลและตรวจบิลจริง (Execute Draw)
