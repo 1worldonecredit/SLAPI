@@ -4802,48 +4802,65 @@ app.get('/api/yeeki/prize-rates', async (req, res) => {
 });
 
 // ==========================================
-// 🌟 API บันทึกอัตราจ่าย (POST) - เวอร์ชันติดเรดาร์เช็คบัค
+// 🌟 API บันทึกอัตราจ่าย (POST) - เวอร์ชันครอบจักรวาล รองรับทั้ง Array และ Object
 // ==========================================
 app.post('/api/yeeki/prize-rates', async (req, res) => {
     try {
         const { rates } = req.body; 
         
-        // 🔍 1. ปริ้นดูเลยว่า หน้าเว็บส่งเลขอะไรมาให้หลังบ้าน (เลขใหม่ หรือ เลขเก่า?)
-        console.log("👉 ข้อมูลอัตราจ่ายที่หน้าเว็บส่งมา:", rates);
-
-        if (!rates || Object.keys(rates).length === 0) {
+        if (!rates) {
             return res.status(400).json({ success: false, message: 'ไม่มีข้อมูลอัตราจ่ายส่งมา' });
         }
 
         const pool = await sql.connect(dbConfig);
         let totalUpdated = 0;
-        
-        for (const [type, multiplier] of Object.entries(rates)) {
-            const numericMultiplier = Number(multiplier);
 
-            if (!isNaN(numericMultiplier)) {
-                const result = await pool.request()
-                    .input('type', sql.NVarChar(100), type.trim()) // 🔍 2. ใส่ .trim() ตัดเว้นวรรคทิ้ง ป้องกันชื่อไม่ตรง
-                    .input('multiplier', sql.Decimal(18, 2), numericMultiplier)
-                    .query(`
-                        UPDATE Yeeki_Prize_Rates 
-                        SET multiplier = @multiplier, updated_at = GETUTCDATE() 
-                        WHERE lottery_type = @type
-                    `);
-                
-                // 🔍 3. ปริ้นดูว่า อัปเดตเข้า Database ได้กี่แถว (ถ้าเป็น 0 แปลว่าหาชื่อไม่เจอ)
-                console.log(`✅ สั่งอัปเดต [${type}] เป็น ${numericMultiplier} -> จำนวนแถวที่เปลี่ยนใน DB: ${result.rowsAffected[0]}`);
-                totalUpdated += result.rowsAffected[0] || 0;
+        // 🟢 ตรวจสอบว่าหน้าเว็บส่งมาเป็น Array (แบบตาราง) ใช่หรือไม่
+        if (Array.isArray(rates)) {
+            for (const item of rates) {
+                const type = item.lottery_type;
+                const numericMultiplier = Number(item.multiplier);
+
+                if (type && !isNaN(numericMultiplier)) {
+                    const result = await pool.request()
+                        .input('type', sql.NVarChar(100), type.trim())
+                        .input('multiplier', sql.Decimal(18, 2), numericMultiplier)
+                        .query(`
+                            UPDATE Yeeki_Prize_Rates 
+                            SET multiplier = @multiplier, updated_at = GETUTCDATE() 
+                            WHERE lottery_type = @type
+                        `);
+                    totalUpdated += result.rowsAffected[0] || 0;
+                }
+            }
+        } 
+        // 🟢 หรือหน้าเว็บส่งมาเป็น Object (แบบจับคู่)
+        else {
+            for (const [type, multiplier] of Object.entries(rates)) {
+                const numericMultiplier = Number(multiplier);
+
+                if (!isNaN(numericMultiplier)) {
+                    const result = await pool.request()
+                        .input('type', sql.NVarChar(100), type.trim())
+                        .input('multiplier', sql.Decimal(18, 2), numericMultiplier)
+                        .query(`
+                            UPDATE Yeeki_Prize_Rates 
+                            SET multiplier = @multiplier, updated_at = GETUTCDATE() 
+                            WHERE lottery_type = @type
+                        `);
+                    totalUpdated += result.rowsAffected[0] || 0;
+                }
             }
         }
         
-        console.log(`🏁 สรุป: อัปเดตลง Database สำเร็จทั้งหมด ${totalUpdated} รายการ`);
+        console.log(`✅ อัปเดตอัตราจ่ายลง Database สำเร็จทั้งหมด: ${totalUpdated} แถว`);
         res.json({ success: true, message: 'บันทึกอัตราจ่ายสำเร็จ' });
     } catch (err) {
         console.error('❌ Error updating prize rates:', err);
         res.status(500).json({ success: false, message: err.message });
     }
 });
+
 
 app.get('/api/admin/exchange-rates', (req, res) => {
     res.json({ success: true, rates: [{ currency_pair: 'THB_LAK', rate: 620 }] });
