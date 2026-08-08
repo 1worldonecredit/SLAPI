@@ -4784,8 +4784,54 @@ app.get('/api/yeeki/settings', (req, res) => {
 });
 app.post('/api/yeeki/settings', (req, res) => res.json({ success: true }));
 
-app.get('/api/yeeki/prize-rates', (req, res) => res.json({ success: true, rates: [] }));
-app.post('/api/yeeki/prize-rates', (req, res) => res.json({ success: true }));
+// ==========================================
+// 🌟 API ดึงอัตราจ่าย (GET) - ดึงจาก Database จริง
+// ==========================================
+app.get('/api/yeeki/prize-rates', async (req, res) => {
+    try {
+        const pool = await sql.connect(dbConfig);
+        const result = await pool.request().query(`
+            SELECT lottery_type, multiplier 
+            FROM Yeeki_Prize_Rates
+        `);
+        res.json({ success: true, rates: result.recordset });
+    } catch (err) {
+        console.error('Error fetching prize rates:', err);
+        res.status(500).json({ success: false, message: 'Database error' });
+    }
+});
+
+// ==========================================
+// 🌟 API บันทึกอัตราจ่าย (POST) - บันทึกลง Database จริง (รองรับ 6 ตัว)
+// ==========================================
+app.post('/api/yeeki/prize-rates', async (req, res) => {
+    try {
+        const { rates } = req.body; 
+        
+        if (!rates) {
+            return res.status(400).json({ success: false, message: 'ไม่มีข้อมูลอัตราจ่ายส่งมา' });
+        }
+
+        const pool = await sql.connect(dbConfig);
+        
+        // วนลูปอัปเดตข้อมูลทุกประเภทที่ส่งมา
+        for (const [type, multiplier] of Object.entries(rates)) {
+            await pool.request()
+                .input('type', sql.NVarChar, type)
+                .input('multiplier', sql.Decimal(18, 2), multiplier)
+                .query(`
+                    UPDATE Yeeki_Prize_Rates 
+                    SET multiplier = @multiplier, updated_at = GETUTCDATE() 
+                    WHERE lottery_type = @type
+                `);
+        }
+        
+        res.json({ success: true, message: 'บันทึกอัตราจ่ายสำเร็จ' });
+    } catch (err) {
+        console.error('Error updating prize rates:', err);
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
 
 app.get('/api/admin/exchange-rates', (req, res) => {
     res.json({ success: true, rates: [{ currency_pair: 'THB_LAK', rate: 620 }] });
