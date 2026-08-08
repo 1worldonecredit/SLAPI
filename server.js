@@ -4802,7 +4802,7 @@ app.get('/api/yeeki/prize-rates', async (req, res) => {
 });
 
 // ==========================================
-// 🌟 API บันทึกอัตราจ่าย (POST) - บันทึกลง Database จริง (รองรับ 6 ตัว)
+// 🌟 API บันทึกอัตราจ่าย (POST) - บันทึกลง Database จริง (แก้ปัญหา Invalid Number แล้ว)
 // ==========================================
 app.post('/api/yeeki/prize-rates', async (req, res) => {
     try {
@@ -4816,14 +4816,21 @@ app.post('/api/yeeki/prize-rates', async (req, res) => {
         
         // วนลูปอัปเดตข้อมูลทุกประเภทที่ส่งมา
         for (const [type, multiplier] of Object.entries(rates)) {
-            await pool.request()
-                .input('type', sql.NVarChar, type)
-                .input('multiplier', sql.Decimal(18, 2), multiplier)
-                .query(`
-                    UPDATE Yeeki_Prize_Rates 
-                    SET multiplier = @multiplier, updated_at = GETUTCDATE() 
-                    WHERE lottery_type = @type
-                `);
+            
+            // 🔴 จุดที่แก้ไข: บังคับแปลงค่าที่หน้าเว็บส่งมา ให้กลายเป็นตัวเลข (Number) ทันที
+            const numericMultiplier = Number(multiplier);
+
+            // เช็คความชัวร์ว่าแปลงสำเร็จ (ไม่เป็น NaN) ถึงจะยอมให้บันทึก
+            if (!isNaN(numericMultiplier)) {
+                await pool.request()
+                    .input('type', sql.NVarChar, type)
+                    .input('multiplier', sql.Decimal(18, 2), numericMultiplier)
+                    .query(`
+                        UPDATE Yeeki_Prize_Rates 
+                        SET multiplier = @multiplier, updated_at = GETUTCDATE() 
+                        WHERE lottery_type = @type
+                    `);
+            }
         }
         
         res.json({ success: true, message: 'บันทึกอัตราจ่ายสำเร็จ' });
