@@ -5072,7 +5072,7 @@ app.post('/api/admin/analyze-yeeki-draw', async (req, res) => {
 });
 
 // ==========================================
-// 🌟 API ดึงผลรางวัล ยอดขาย และรายชื่อเจาะจงตามรอบ
+// 🌟 API ดึงผลรางวัล ยอดขาย และบิลทั้งหมดเจาะจงตามรอบ
 // ==========================================
 app.get('/api/admin/yeeki-round-detail', async (req, res) => {
     const { round_id } = req.query;
@@ -5084,21 +5084,21 @@ app.get('/api/admin/yeeki-round-detail', async (req, res) => {
             .input('roundId', sql.Int, round_id)
             .query(`SELECT * FROM Yeeki_Rounds WHERE round_id = @roundId`);
             
-        // 2. ดึงรายชื่อคนที่ถูกรางวัล (สถานะ = 'ชนะ')
-        const winnersReq = await pool.request()
+        // 2. 💡 ดึง "บิลทั้งหมด" ของรอบนี้ (ไม่ต้องสนสถานะ เพื่อให้หน้าเว็บไปตรวจเอง)
+        const allOrdersReq = await pool.request()
             .input('roundId', sql.Int, round_id)
             .query(`
                 SELECT 
                     r.round_number, u.username, i.lottery_type, i.selected_number, 
-                    i.price, i.prize_amount, o.currency_code, N'โอนเงินแล้ว' as status
+                    i.price, o.currency_code, i.status, i.prize_amount
                 FROM Yeeki_Order_Items i
                 JOIN Yeeki_Orders o ON i.order_id = o.order_id
                 JOIN Yeeki_Rounds r ON o.round_id = r.round_id
                 JOIN Users u ON o.user_id = u.user_id
-                WHERE r.round_id = @roundId AND i.status = N'ชนะ'
+                WHERE r.round_id = @roundId
             `);
 
-        // 3. 💡 ดึงยอดขายรวมทั้งหมดของรอบนี้ แยกตามสกุลเงิน
+        // 3. ดึงยอดขายรวม
         const salesReq = await pool.request()
             .input('roundId', sql.Int, round_id)
             .query(`
@@ -5112,8 +5112,8 @@ app.get('/api/admin/yeeki-round-detail', async (req, res) => {
         res.json({
             success: true,
             round: roundReq.recordset[0],
-            winners: winnersReq.recordset,
-            sales: salesReq.recordset // 💡 ส่งยอดขายกลับไปด้วย
+            all_orders: allOrdersReq.recordset, // 💡 ส่งบิลทั้งหมดไปให้หน้าเว็บ
+            sales: salesReq.recordset
         });
     } catch (err) {
         console.error("Error in yeeki-round-detail:", err);
