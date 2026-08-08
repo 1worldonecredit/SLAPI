@@ -5072,7 +5072,7 @@ app.post('/api/admin/analyze-yeeki-draw', async (req, res) => {
 });
 
 // ==========================================
-// 🌟 API ดึงผลรางวัลและรายชื่อเจาะจงตามรอบ
+// 🌟 API ดึงผลรางวัล ยอดขาย และรายชื่อเจาะจงตามรอบ
 // ==========================================
 app.get('/api/admin/yeeki-round-detail', async (req, res) => {
     const { round_id } = req.query;
@@ -5084,31 +5084,36 @@ app.get('/api/admin/yeeki-round-detail', async (req, res) => {
             .input('roundId', sql.Int, round_id)
             .query(`SELECT * FROM Yeeki_Rounds WHERE round_id = @roundId`);
             
-        // 2. 💡 ดึงรายชื่อคนที่ถูกรางวัล (สถานะ = 'ชนะ')
+        // 2. ดึงรายชื่อคนที่ถูกรางวัล (สถานะ = 'ชนะ')
         const winnersReq = await pool.request()
             .input('roundId', sql.Int, round_id)
             .query(`
                 SELECT 
-                    r.round_number, 
-                    u.username, 
-                    i.lottery_type, 
-                    i.selected_number, 
-                    i.price, 
-                    i.prize_amount, 
-                    o.currency_code, 
-                    N'โอนเงินแล้ว' as status
+                    r.round_number, u.username, i.lottery_type, i.selected_number, 
+                    i.price, i.prize_amount, o.currency_code, N'โอนเงินแล้ว' as status
                 FROM Yeeki_Order_Items i
                 JOIN Yeeki_Orders o ON i.order_id = o.order_id
                 JOIN Yeeki_Rounds r ON o.round_id = r.round_id
                 JOIN Users u ON o.user_id = u.user_id
-                WHERE r.round_id = @roundId 
-                  AND i.status = N'ชนะ'
+                WHERE r.round_id = @roundId AND i.status = N'ชนะ'
+            `);
+
+        // 3. 💡 ดึงยอดขายรวมทั้งหมดของรอบนี้ แยกตามสกุลเงิน
+        const salesReq = await pool.request()
+            .input('roundId', sql.Int, round_id)
+            .query(`
+                SELECT o.currency_code, SUM(i.price) as total_sales
+                FROM Yeeki_Order_Items i
+                JOIN Yeeki_Orders o ON i.order_id = o.order_id
+                WHERE o.round_id = @roundId
+                GROUP BY o.currency_code
             `);
 
         res.json({
             success: true,
             round: roundReq.recordset[0],
-            winners: winnersReq.recordset
+            winners: winnersReq.recordset,
+            sales: salesReq.recordset // 💡 ส่งยอดขายกลับไปด้วย
         });
     } catch (err) {
         console.error("Error in yeeki-round-detail:", err);
