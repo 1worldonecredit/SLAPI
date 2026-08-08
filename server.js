@@ -4802,40 +4802,45 @@ app.get('/api/yeeki/prize-rates', async (req, res) => {
 });
 
 // ==========================================
-// 🌟 API บันทึกอัตราจ่าย (POST) - บันทึกลง Database จริง (แก้ปัญหา Invalid Number แล้ว)
+// 🌟 API บันทึกอัตราจ่าย (POST) - เวอร์ชันติดเรดาร์เช็คบัค
 // ==========================================
 app.post('/api/yeeki/prize-rates', async (req, res) => {
     try {
         const { rates } = req.body; 
         
-        if (!rates) {
+        // 🔍 1. ปริ้นดูเลยว่า หน้าเว็บส่งเลขอะไรมาให้หลังบ้าน (เลขใหม่ หรือ เลขเก่า?)
+        console.log("👉 ข้อมูลอัตราจ่ายที่หน้าเว็บส่งมา:", rates);
+
+        if (!rates || Object.keys(rates).length === 0) {
             return res.status(400).json({ success: false, message: 'ไม่มีข้อมูลอัตราจ่ายส่งมา' });
         }
 
         const pool = await sql.connect(dbConfig);
+        let totalUpdated = 0;
         
-        // วนลูปอัปเดตข้อมูลทุกประเภทที่ส่งมา
         for (const [type, multiplier] of Object.entries(rates)) {
-            
-            // 🔴 จุดที่แก้ไข: บังคับแปลงค่าที่หน้าเว็บส่งมา ให้กลายเป็นตัวเลข (Number) ทันที
             const numericMultiplier = Number(multiplier);
 
-            // เช็คความชัวร์ว่าแปลงสำเร็จ (ไม่เป็น NaN) ถึงจะยอมให้บันทึก
             if (!isNaN(numericMultiplier)) {
-                await pool.request()
-                    .input('type', sql.NVarChar, type)
+                const result = await pool.request()
+                    .input('type', sql.NVarChar(100), type.trim()) // 🔍 2. ใส่ .trim() ตัดเว้นวรรคทิ้ง ป้องกันชื่อไม่ตรง
                     .input('multiplier', sql.Decimal(18, 2), numericMultiplier)
                     .query(`
                         UPDATE Yeeki_Prize_Rates 
                         SET multiplier = @multiplier, updated_at = GETUTCDATE() 
                         WHERE lottery_type = @type
                     `);
+                
+                // 🔍 3. ปริ้นดูว่า อัปเดตเข้า Database ได้กี่แถว (ถ้าเป็น 0 แปลว่าหาชื่อไม่เจอ)
+                console.log(`✅ สั่งอัปเดต [${type}] เป็น ${numericMultiplier} -> จำนวนแถวที่เปลี่ยนใน DB: ${result.rowsAffected[0]}`);
+                totalUpdated += result.rowsAffected[0] || 0;
             }
         }
         
+        console.log(`🏁 สรุป: อัปเดตลง Database สำเร็จทั้งหมด ${totalUpdated} รายการ`);
         res.json({ success: true, message: 'บันทึกอัตราจ่ายสำเร็จ' });
     } catch (err) {
-        console.error('Error updating prize rates:', err);
+        console.error('❌ Error updating prize rates:', err);
         res.status(500).json({ success: false, message: err.message });
     }
 });
