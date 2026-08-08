@@ -4747,23 +4747,77 @@ app.post('/api/admin/execute-yeeki-draw', async (req, res) => {
     }
 });
 
-// 3. ค้นหาคนซื้อ (ปุ่มค้นหาผู้ใช้จากตัวเลข)
+// ==========================================
+// 🌟 API ค้นหาประวัติการซื้อ (เวอร์ชัน Exact Match + คำนวณเงินรางวัลเป๊ะๆ)
+// ==========================================
 app.post('/api/admin/search-yeeki-buyers', async (req, res) => {
+    const { number, date } = req.body;
+
+    if (!number || !date) {
+        return res.status(400).json({ success: false, message: 'ข้อมูลไม่ครบถ้วน' });
+    }
+
     try {
-        const { number, date } = req.body;
         const pool = await sql.connect(dbConfig);
-        const searchReq = await pool.request()
-            .input('num', sql.VarChar, number)
-            .input('date', sql.VarChar, date)
-            .query(`
-                SELECT u.username, o.round_id as round_number, oi.lottery_type, oi.selected_number, oi.price, o.currency_code, oi.status
-                FROM Yeeki_Order_Items oi
-                JOIN Yeeki_Orders o ON oi.order_id = o.order_id
-                JOIN Users u ON o.user_id = u.user_id
-                WHERE oi.selected_number LIKE '%' + @num + '%' AND CAST(o.created_at AS DATE) = CAST(@date AS DATE)
-            `);
-        res.json({ success: true, buyers: searchReq.recordset });
-    } catch (err) { res.status(500).json({ success: false, message: err.message }); }
+
+        // 1. ดึงเรทอัตราจ่ายปัจจุบัน เพื่อเอามาคำนวณกำไร
+        const ratesReq = await pool.request().query(`SELECT lottery_type, multiplier FROM Yeeki_Prize_Rates`);
+        const prizeRates = {};
+        ratesReq.recordset.forEach(r => prizeRates[r.lottery_type] = r.multiplier);
+
+        // 2. ดึงเรทแลกเปลี่ยน
+        const exReq = await pool.request().query(`SELECT rate FROM ExchangeRates WHERE currency_pair = 'THB_LAK'`);
+        const lakRate = exReq.recordset[0]?.rate || 620;
+
+        // 3. ค้นหาบิล (🔴 เปลี่ยนจากการใช้ LIKE มาใช้ = @number เพื่อให้ค้นหาเลขตรงตัวเป๊ะๆ)
+        const query = `
+            SELECT 
+                r.round_number,
+                u.username,
+                i.lottery_type,
+                i.selected_number,
+                i.price,
+                o.currency_code
+            FROM Yeeki_Order_Items i
+            JOIN Yeeki_Orders o ON i.order_id = o.order_id
+            JOIN Yeeki_Rounds r ON o.round_id = r.round_id
+            JOIN Users u ON o.user_id = u.id
+            WHERE r.draw_date = @date 
+              AND i.selected_number = @number
+            ORDER BY r.round_number ASC
+        `;
+        // 💡 หมายเหตุ: หาก Table Yeeki_Rounds ของคุณพี่ใช้ชื่อคอลัมน์เก็บวันที่เป็นชื่ออื่น (เช่น open_time) 
+        // ให้แก้ r.draw_date ด้านบนเป็นชื่อคอลัมน์ที่ถูกต้องนะครับ
+
+        const result = await pool.request()
+            .input('date', sql.NVarChar, date) 
+            .input('number', sql.NVarChar(50), number.trim()) // ใส่ .trim() เผื่อมีเว้นวรรคหลงมา
+            .query(query);
+
+        // 4. คำนวณยอดเงินรางวัลล่วงหน้าให้แอดมินดู
+        const buyers = result.recordset.map(w => {
+            const multiplier = prizeRates[w.lottery_type] || 0;
+            const prize = w.price * multiplier;
+            let prizeTHB = 0;
+
+            if (w.currency_code === 'LAK' || w.currency_code === '₭') {
+                prizeTHB = prize / lakRate;
+            } else {
+                prizeTHB = prize;
+            }
+
+            return {
+                ...w,
+                estimated_prize: prize,
+                estimated_prize_thb: prizeTHB
+            };
+        });
+
+        res.json({ success: true, buyers });
+    } catch (err) {
+        console.error("Error searching buyers:", err);
+        res.status(500).json({ success: false, message: err.message });
+    }
 });
 
 // 4. API จำลองการตั้งค่า (Settings & Prize Rates เพื่อป้องกันหน้าเว็บ Error ตอนโหลด)
