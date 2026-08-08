@@ -4748,28 +4748,27 @@ app.post('/api/admin/execute-yeeki-draw', async (req, res) => {
 });
 
 // ==========================================
-// 🌟 API ค้นหาประวัติการซื้อ (เวอร์ชัน Exact Match + คำนวณเงินรางวัลเป๊ะๆ)
+// 🌟 API ค้นหาประวัติการซื้อ (ล็อคเป้า "เฉพาะรอบที่เลือกเท่านั้น" + แม่นยำ 100%)
 // ==========================================
 app.post('/api/admin/search-yeeki-buyers', async (req, res) => {
-    const { number, date } = req.body;
+    // 🔴 รับค่า round_id มาจากหน้าเว็บ แทนที่จะเป็น date
+    const { number, round_id } = req.body;
 
-    if (!number || !date) {
-        return res.status(400).json({ success: false, message: 'ข้อมูลไม่ครบถ้วน' });
+    if (!number || !round_id) {
+        return res.status(400).json({ success: false, message: 'ข้อมูลไม่ครบถ้วน (ขาดเลขหรือรหัสรอบ)' });
     }
 
     try {
         const pool = await sql.connect(dbConfig);
 
-        // 1. ดึงเรทอัตราจ่ายปัจจุบัน เพื่อเอามาคำนวณกำไร
         const ratesReq = await pool.request().query(`SELECT lottery_type, multiplier FROM Yeeki_Prize_Rates`);
         const prizeRates = {};
         ratesReq.recordset.forEach(r => prizeRates[r.lottery_type] = r.multiplier);
 
-        // 2. ดึงเรทแลกเปลี่ยน
         const exReq = await pool.request().query(`SELECT rate FROM ExchangeRates WHERE currency_pair = 'THB_LAK'`);
         const lakRate = exReq.recordset[0]?.rate || 620;
 
-        // 3. ค้นหาบิล (แก้ตรง JOIN Users u ON o.user_id = u.user_id)
+        // 🔴 แก้ SQL: เปลี่ยนจากหาทั้งวัน (r.draw_date) เป็นหาเฉพาะรอบเป๊ะๆ (r.round_id)
         const query = `
             SELECT 
                 r.round_number,
@@ -4782,19 +4781,16 @@ app.post('/api/admin/search-yeeki-buyers', async (req, res) => {
             JOIN Yeeki_Orders o ON i.order_id = o.order_id
             JOIN Yeeki_Rounds r ON o.round_id = r.round_id
             JOIN Users u ON o.user_id = u.user_id
-            WHERE r.draw_date = @date 
+            WHERE r.round_id = @roundId 
               AND i.selected_number = @number
             ORDER BY r.round_number ASC
         `;
-        // 💡 หมายเหตุ: หาก Table Yeeki_Rounds ของคุณพี่ใช้ชื่อคอลัมน์เก็บวันที่เป็นชื่ออื่น (เช่น open_time) 
-        // ให้แก้ r.draw_date ด้านบนเป็นชื่อคอลัมน์ที่ถูกต้องนะครับ
 
         const result = await pool.request()
-            .input('date', sql.NVarChar, date) 
-            .input('number', sql.NVarChar(50), number.trim()) // ใส่ .trim() เผื่อมีเว้นวรรคหลงมา
+            .input('roundId', sql.Int, round_id) // ใส่ round_id เข้าไปค้นหา
+            .input('number', sql.NVarChar(50), number.trim())
             .query(query);
 
-        // 4. คำนวณยอดเงินรางวัลล่วงหน้าให้แอดมินดู
         const buyers = result.recordset.map(w => {
             const multiplier = prizeRates[w.lottery_type] || 0;
             const prize = w.price * multiplier;
