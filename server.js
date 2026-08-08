@@ -3166,7 +3166,7 @@ app.post('/api/admin/analyze-draw', async (req, res) => {
 });
 
 // ==========================================
-// 🌟 API สุ่มเลขแนะนำ (ฉบับ AI วิเคราะห์ขั้นสูง กระจายรางวัล & คุมความเสี่ยง 100%) แก้ไขวันที่ 8  ก่อนหน้านี้ ก็ดี
+// 🌟 API สุ่มเลขแนะนำ (ฉบับ AI วิเคราะห์ขั้นสูง V2: บังคับกระจายรางวัล 2ตัว, 3ตัว)
 // ==========================================
 app.post('/api/admin/yeeki/suggest-draw', async (req, res) => {
     const { target_percent, round_id } = req.body;
@@ -3198,60 +3198,68 @@ app.post('/api/admin/yeeki/suggest-draw', async (req, res) => {
         const prizeRates = {};
         ratesReq.recordset.forEach(r => prizeRates[r.lottery_type] = r.multiplier);
 
-        // 4. คำนวณเป้าหมายยอดจ่ายสูงสุด (THB) เช่น 100% ของ 87,000 = 87,000
+        // 4. คำนวณเป้าหมายยอดจ่ายสูงสุด (THB)
         const targetMaxPayoutTHB = totalSalesTHB * (target_percent / 100);
 
-        // ฟังก์ชันสุ่มตัวเลขเสริม
         const randDigit = () => Math.floor(Math.random() * 10).toString();
         const padRandom = (num, length) => {
-            let res = num.toString();
+            let res = num ? num.toString() : '';
             while(res.length < length) res = randDigit() + res;
             return res;
         };
 
-        // 5. สร้างกลุ่มตัวอย่าง (Candidates) เพื่อจำลองผล
+        // 5. 🌟 อัปเกรด V2: จงใจ "จับคู่เลข บน-ล่าง ที่ลูกค้าซื้อ" 
         let candidates = [];
-        
-        // แบบที่ 1: ดึงเลขจากบิลลูกค้ามาประกอบร่าง (บังคับให้มีคนถูกรางวัลแบบกระจาย)
+        let topNumbers = ['']; 
+        let botNumbers = [''];
+
         orders.forEach(o => {
-            let t6 = padRandom('', 6);
-            let b2 = padRandom('', 2);
-            
-            if(o.lottery_type.includes('บน') || o.lottery_type.includes('ท้าย') || o.lottery_type === '6 ตัว' || o.lottery_type === '8 ตัว (Super)') {
-                t6 = padRandom(o.selected_number.slice(-6), 6);
-            } else if (o.lottery_type.includes('ล่าง')) {
-                b2 = padRandom(o.selected_number.slice(-2), 2);
+            const num = o.selected_number;
+            if(o.lottery_type.includes('บน') || o.lottery_type.includes('ท้าย') || o.lottery_type.includes('ตัว')) {
+                if (!topNumbers.includes(num)) topNumbers.push(num);
+            } 
+            if (o.lottery_type.includes('ล่าง')) {
+                if (!botNumbers.includes(num)) botNumbers.push(num);
             }
-            candidates.push({ t6, b2 });
         });
 
-        // แบบที่ 2: สุ่มแบบ Random เผื่อไว้ตีกรอบความเสี่ยง เพิ่มอีก 5,000 ชุด
-        for(let i = 0; i < 5000; i++) {
+        // เอาเลขบนและล่างมาผสมไขว้กัน (Cross Match)
+        for (let t of topNumbers) {
+            for (let b of botNumbers) {
+                for (let i = 0; i < 5; i++) { // สุ่ม 5 รูปแบบต่อคู่
+                    let t6 = t ? padRandom(t.slice(-6), 6) : padRandom('', 6);
+                    let b2 = b ? padRandom(b.slice(-2), 2) : padRandom('', 2);
+                    candidates.push({ t6, b2 });
+                }
+            }
+        }
+
+        // เติมแบบสุ่มเผื่อไว้ 2,000 ชุด
+        for(let i = 0; i < 2000; i++) {
             candidates.push({ t6: padRandom('', 6), b2: padRandom('', 2) });
         }
 
         let bestResult = null;
-        let bestScore = -Infinity; // คะแนนเริ่มต้น
+        let bestScore = -Infinity;
 
-        // 6. เริ่มกระบวนการจำลองการออกรางวัล (Simulation Loop)
+        // 6. เริ่มกระบวนการจำลองการออกรางวัล
         for (let cand of candidates) {
             const sim6 = cand.t6;
             const simBot2 = cand.b2;
             const simTop4 = sim6.slice(-4);
             const simTop3 = sim6.slice(-3);
             const simTop2 = sim6.slice(-2);
-            const simSuper8 = padRandom('', 2) + sim6; // 8 ตัว
+            const simSuper8 = padRandom('', 2) + sim6; 
 
             let simTotalPayoutTHB = 0;
             let typePayoutsTHB = {};
-            let winTypesCount = 0; // นับว่ามีการถูกกี่ประเภท
+            let winTypesCount = 0; 
 
             for (let o of orders) {
                 let isWin = false;
                 const num = o.selected_number;
                 const type = o.lottery_type;
 
-                // ตรวจสอบเงื่อนไขการถูกรางวัล
                 if (type === '8 ตัว (Super)' && num === simSuper8) isWin = true;
                 else if (type === '6 ตัว' && num === sim6) isWin = true;
                 else if (type === '4 ตัวท้าย' && num === simTop4) isWin = true;
@@ -3273,18 +3281,16 @@ app.post('/api/admin/yeeki/suggest-draw', async (req, res) => {
                     
                     if (!typePayoutsTHB[type]) {
                         typePayoutsTHB[type] = 0;
-                        winTypesCount++; // มีการถูกประเภทใหม่เพิ่มขึ้น 1
+                        winTypesCount++; 
                     }
                     typePayoutsTHB[type] += payout;
                 }
             }
 
-            // 🚫 --- กฎเหล็กที่ 1 --- 
-            // ถ้ายอดจ่ายรวม > เป้าหมาย (เช่น เกิน 100%) -> คัดทิ้งทันที
+            // 🚫 กฎเหล็ก 1: ถ้ายอดจ่ายรวมเกินเป้าหมาย (เช่นเกิน 100%) ปัดตก!
             if (simTotalPayoutTHB > targetMaxPayoutTHB) continue;
 
-            // 🚫 --- กฎเหล็กที่ 2 --- 
-            // ถ้ายอดขายรวม < เงินรางวัลที่จะต้องจ่ายใน "ประเภทใดประเภทหนึ่ง" -> คัดทิ้งทันที!
+            // 🚫 กฎเหล็ก 2: ถ้ายอดขายรวม น้อยกว่า ยอดจ่ายเฉพาะประเภท ปัดตก!
             let violatesConstraint = false;
             for (let t in typePayoutsTHB) {
                 if (typePayoutsTHB[t] > totalSalesTHB) {
@@ -3294,31 +3300,23 @@ app.post('/api/admin/yeeki/suggest-draw', async (req, res) => {
             }
             if (violatesConstraint) continue;
 
-            // 🌟 --- การให้คะแนน (Scoring) --- 🌟
-            // คะแนนมาจาก 2 ส่วน:
-            // 1. ความหลากหลาย: ยิ่งมีคนถูกหลายประเภท ยิ่งคะแนนสูงลิ่ว (+ประเภทละ 1,000,000 แต้ม)
-            // 2. ความคุ้มค่า: พยายามแจกเงินรางวัลให้เข้าใกล้ Target มากที่สุดโดยไม่ทะลุ
-            let score = (winTypesCount * 1000000) + simTotalPayoutTHB;
+            // 🌟 ให้คะแนนโบนัส! (ยิ่งมีคนถูกรางวัลใหญ่ ยิ่งได้คะแนนสูง)
+            let complexityBonus = 0;
+            if (typePayoutsTHB['3 ตัวบน']) complexityBonus += 5000000;
+            if (typePayoutsTHB['2 ตัวบน']) complexityBonus += 2000000;
+            if (typePayoutsTHB['2 ตัวล่าง']) complexityBonus += 2000000;
+            
+            let score = (winTypesCount * 1000000) + complexityBonus + simTotalPayoutTHB;
 
-            // บันทึกตัวเลือกที่ดีที่สุด
             if (score > bestScore) {
                 bestScore = score;
-                bestResult = { 
-                    super_8: simSuper8, 
-                    top_4: simTop4, 
-                    bottom_2: simBot2 
-                };
+                bestResult = { super_8: simSuper8, top_4: simTop4, bottom_2: simBot2 };
             }
         }
 
-        // กรณีฉุกเฉิน: ถ้าลูกค้าแทงหนักมากๆ จนทุกตัวเลือกทะลุ 100% หมด
-        // ระบบจะทำการสุ่มเลขแบบสุ่ม 100% (ซึ่งมีโอกาสไม่มีใครถูกเลย เพื่อเซฟบริษัท)
+        // กรณีไม่มีชุดตัวเลขไหนผ่านเงื่อนไข 100% เลย (ลูกค้าแทงหนักทุกตัว) ให้ออกแบบสุ่มเซฟบริษัท
         if (!bestResult) {
-            bestResult = {
-                super_8: padRandom('', 8),
-                top_4: padRandom('', 4),
-                bottom_2: padRandom('', 2)
-            };
+            bestResult = { super_8: padRandom('', 8), top_4: padRandom('', 4), bottom_2: padRandom('', 2) };
         }
 
         res.json({
@@ -3333,7 +3331,6 @@ app.post('/api/admin/yeeki/suggest-draw', async (req, res) => {
         res.status(500).json({ success: false, message: err.message });
     }
 });
-
 
 
 // ==========================================
