@@ -3166,7 +3166,7 @@ app.post('/api/admin/analyze-draw', async (req, res) => {
 });
 
 // ==========================================
-// 🌟 API สุ่มเลขแนะนำ (AI V12: Aggressive Target Pusher - บังคับดันยอดให้ถึงเป้า หรือ ทะลุเป้า 100%+)
+// 🌟 API สุ่มเลขแนะนำ (AI V13: The Target Sniper - บังคับพุ่งชนเป้า 95%-105% ยอมจ่ายเกินเพื่อความแม่นยำ)
 // ==========================================
 app.post('/api/admin/yeeki/suggest-draw', async (req, res) => {
     const { target_percent, round_id } = req.body;
@@ -3190,56 +3190,66 @@ app.post('/api/admin/yeeki/suggest-draw', async (req, res) => {
         const prizeRates = {};
         ratesReq.recordset.forEach(r => prizeRates[r.lottery_type] = r.multiplier);
 
+        // 1. คำนวณยอดขายรวม และ ยอดจ่ายเป้าหมาย (THB)
         let totalSalesTHB = 0;
         orders.forEach(o => {
             totalSalesTHB += (o.currency_code === 'LAK' || o.currency_code === '₭') ? (o.price / lakRate) : o.price;
         });
-        const targetMaxPayoutTHB = totalSalesTHB * (target_percent / 100);
+        
+        // 🎯 นี่คือเป้าหมายที่คุณพี่ตั้งไว้ (เช่น 100% = จ่ายเท่ากับยอดขาย)
+        const targetPayoutTHB = totalSalesTHB * (target_percent / 100);
 
         const pad = (num, len) => num.toString().padStart(len, '0');
         const getPayoutTHB = (o) => (o.currency_code === 'LAK' || o.currency_code === '₭') ? (o.price * (prizeRates[o.lottery_type] || 0)) / lakRate : (o.price * (prizeRates[o.lottery_type] || 0));
 
         let topOrders = orders.filter(o => ['6 ตัว', '4 ตัวท้าย', '3 ตัวบน', '3 ตัวโต๊ด', '2 ตัวบน', 'วิ่งบน'].includes(o.lottery_type));
         let botOrders = orders.filter(o => ['2 ตัวล่าง', 'วิ่งล่าง'].includes(o.lottery_type));
-        let superOrders = orders.filter(o => o.lottery_type === '8 ตัว (Super)');
 
         // ==========================================
-        // 🌟 1. ดึงเลขแกนกลาง 1-4 หลักท้าย จากบิลที่ลูกค้าซื้อจริงอย่างเคร่งครัด
+        // 🌟 2. สกัด "แกนกลาง 1-4 หลัก" จากบิลลูกค้าอย่างเคร่งครัด
         // ==========================================
-        let tails4 = new Set();
+        let t4_pool = new Set();
         topOrders.forEach(o => {
             let n = o.selected_number;
-            if (o.lottery_type === '4 ตัวท้าย') tails4.add(n);
+            if (o.lottery_type === '4 ตัวท้าย') t4_pool.add(n);
             else if (o.lottery_type === '3 ตัวบน' || o.lottery_type === '3 ตัวโต๊ด') {
-                for (let i = 0; i <= 9; i++) tails4.add(i.toString() + n);
+                for (let i = 0; i <= 9; i++) t4_pool.add(i.toString() + n);
             }
             else if (o.lottery_type === '2 ตัวบน') {
-                for (let i = 0; i <= 99; i++) tails4.add(pad(i, 2) + n);
+                for (let i = 0; i <= 99; i++) t4_pool.add(pad(i, 2) + n);
             }
             else if (o.lottery_type === 'วิ่งบน') {
-                tails4.add('000' + n);
-                tails4.add('00' + n + '0');
-                tails4.add('0' + n + '00');
+                // ยัดเลขวิ่งบนให้ไปอยู่ใน 3 หลักท้าย ทุกรูปแบบที่เป็นไปได้
+                for (let d1=0; d1<=9; d1++) {
+                    for (let d2=0; d2<=9; d2++) {
+                        for (let d3=0; d3<=9; d3++) {
+                            t4_pool.add(`${d1}${n}${d2}${d3}`);
+                            t4_pool.add(`${d1}${d2}${n}${d3}`);
+                            t4_pool.add(`${d1}${d2}${d3}${n}`);
+                        }
+                    }
+                }
             }
-            else if (o.lottery_type === '6 ตัว') tails4.add(n.slice(-4));
+            else if (o.lottery_type === '6 ตัว') t4_pool.add(n.slice(-4));
         });
-        if (tails4.size === 0) tails4.add(pad(Math.floor(Math.random() * 10000), 4));
 
-        let bots2 = new Set();
+        let b2_pool = new Set();
         botOrders.forEach(o => {
             let n = o.selected_number;
-            if (o.lottery_type === '2 ตัวล่าง') bots2.add(n);
+            if (o.lottery_type === '2 ตัวล่าง') b2_pool.add(n);
             else if (o.lottery_type === 'วิ่งล่าง') {
-                for (let i = 0; i <= 9; i++) { bots2.add(i.toString() + n); bots2.add(n + i.toString()); }
+                for(let i=0; i<=9; i++) { b2_pool.add(n + i.toString()); b2_pool.add(i.toString() + n); }
             }
         });
-        if (bots2.size === 0) bots2.add(pad(Math.floor(Math.random() * 100), 2));
+
+        if (t4_pool.size === 0) t4_pool.add(pad(Math.floor(Math.random() * 10000), 4));
+        if (b2_pool.size === 0) b2_pool.add(pad(Math.floor(Math.random() * 100), 2));
 
         // ==========================================
-        // 🌟 2. ประเมินยอดจ่ายของทุกชุดตัวเลขที่เป็นไปได้
+        // 🌟 3. ประเมินยอดจ่ายของทุกชุดตัวเลขที่เป็นไปได้
         // ==========================================
-        let evalTops = [];
-        for (let t4 of tails4) {
+        let topEvals = [];
+        for (let t4 of t4_pool) {
             let p = 0, thb = 0, lak = 0, hits = new Set();
             let t3 = t4.slice(-3), t2 = t4.slice(-2);
             let sT3 = t3.split('').sort().join('');
@@ -3258,12 +3268,12 @@ app.post('/api/admin/yeeki/suggest-draw', async (req, res) => {
                     hits.add(t);
                 }
             }
-            if (p > 0) evalTops.push({ t4, payout: p, thb, lak, hits: hits.size });
+            if (p > 0) topEvals.push({ t4, payout: p, thb, lak, hits: hits.size });
         }
-        if (evalTops.length === 0) evalTops.push({ t4: pad(Math.floor(Math.random() * 10000), 4), payout: 0, thb: 0, lak: 0, hits: 0 });
+        if (topEvals.length === 0) topEvals.push({ t4: pad(Math.floor(Math.random()*10000), 4), payout: 0, thb: 0, lak: 0, hits: 0 });
 
-        let evalBots = [];
-        for (let b2 of bots2) {
+        let botEvals = [];
+        for (let b2 of b2_pool) {
             let p = 0, thb = 0, lak = 0, hits = new Set();
             for (let o of botOrders) {
                 let win = (o.lottery_type === '2 ตัวล่าง' && o.selected_number === b2) || (o.lottery_type === 'วิ่งล่าง' && b2.includes(o.selected_number));
@@ -3273,49 +3283,44 @@ app.post('/api/admin/yeeki/suggest-draw', async (req, res) => {
                     hits.add(o.lottery_type);
                 }
             }
-            if (p > 0) evalBots.push({ b2, payout: p, thb, lak, hits: hits.size });
+            if (p > 0) botEvals.push({ b2, payout: p, thb, lak, hits: hits.size });
         }
-        if (evalBots.length === 0) evalBots.push({ b2: pad(Math.floor(Math.random() * 100), 2), payout: 0, thb: 0, lak: 0, hits: 0 });
+        if (botEvals.length === 0) botEvals.push({ b2: pad(Math.floor(Math.random()*100), 2), payout: 0, thb: 0, lak: 0, hits: 0 });
 
         // ==========================================
-        // 🌟 3. กระบวนการแมตช์คู่ดุดัน (Aggressive Scoring)
+        // 🌟 4. แมตช์คู่หา % ที่เข้าใกล้เป้าหมายที่สุด (ยอมทะลุ 100% ได้!)
         // ==========================================
-        let combinations = [];
+        let bestMatch = null;
+        let minRatioDiff = Infinity; // เก็บระยะห่างจากเป้าหมาย (ยิ่งใกล้ 0 ยิ่งดี)
 
-        for (let top of evalTops) {
-            for (let bot of evalBots) {
+        for (let top of topEvals) {
+            for (let bot of botEvals) {
                 let totalPayout = top.payout + bot.payout;
-                let diff = totalPayout - targetMaxPayoutTHB;
+                
+                // คำนวณสัดส่วน % เช่น ถ้าเป้าคือ 48,000 และยอดคือ 50,400 -> ratio = 1.05 (105%)
+                let ratio = targetPayoutTHB > 0 ? (totalPayout / targetPayoutTHB) : 0;
+                
+                // คำนวณระยะห่างจาก 100% (1.0) 
+                // เช่น 1.05 ห่าง 0.05 | 0.30 ห่าง 0.70 -> ระบบจะเลือก 1.05 ทันที!
+                let ratioDiff = Math.abs(ratio - 1.0);
 
-                // 🔥 สูตรผลักดันเป้าหมาย:
-                // ถ้าจ่ายทะลุเป้า (diff > 0) ให้น้ำหนักปกติ เพื่อให้ทะลุได้แบบพอดีๆ
-                // ถ้าจ่ายต่ำกว่าเป้า (diff < 0) ให้ลงโทษคูณ 5! บังคับให้ AI เลิกเลือกยอดต่ำ
-                let penalty = diff >= 0 ? diff : (Math.abs(diff) * 5);
-
-                // 🔥 สูตรเฉลี่ยสกุลเงิน:
-                let totalTHB = top.thb + bot.thb;
-                let totalLAK = top.lak + bot.lak;
-                let thbRatio = totalPayout > 0 ? (totalTHB / totalPayout) : 0.5;
-                let lakRatio = totalPayout > 0 ? (totalLAK / totalPayout) : 0.5;
-                // ยิ่งห่างจาก 0.5 (สมดุล 50/50) มากเท่าไหร่ ยิ่งโดนหักคะแนน 
-                let balancePenalty = Math.abs(thbRatio - lakRatio) * (targetMaxPayoutTHB * 0.1); 
-
-                // 🔥 สูตรกระจายประเภทรางวัล (โบนัสลดโทษ)
-                let varietyBonus = (top.hits + bot.hits) * (targetMaxPayoutTHB * 0.05);
-
-                // คะแนนสุทธิ (ยิ่งน้อยยิ่งดี)
-                let finalScore = penalty + balancePenalty - varietyBonus;
-
-                combinations.push({ top, bot, totalPayout, finalScore });
+                if (ratioDiff < minRatioDiff) {
+                    minRatioDiff = ratioDiff;
+                    bestMatch = { top, bot, totalPayout };
+                } 
+                else if (ratioDiff === minRatioDiff && bestMatch) {
+                    // ถ้าระยะห่าง % เท่ากัน (เช่น ได้ 95% กับ 105%) ให้มาวัดที่ความสมดุลของสกุลเงิน THB/LAK
+                    let curBal = Math.abs((top.thb + bot.thb) / totalPayout - 0.5);
+                    let bestBal = Math.abs((bestMatch.top.thb + bestMatch.bot.thb) / bestMatch.totalPayout - 0.5);
+                    if (curBal < bestBal) {
+                        bestMatch = { top, bot, totalPayout };
+                    }
+                }
             }
         }
 
-        // คัดเลือกชุดที่คะแนนดีที่สุด (คลาดเคลื่อนเป้าหมายน้อยที่สุด และยอมจ่ายเกินเป้าดีกว่าต่ำเป้า)
-        combinations.sort((a, b) => a.finalScore - b.finalScore);
-        let bestMatch = combinations[0];
-
         // ==========================================
-        // 🌟 4. ประกอบ 6 ตัวเต็ม และ 8 ตัว
+        // 🌟 5. ประกอบร่าง 6 ตัวหน้า และ 8 ตัว
         // ==========================================
         let best6 = pad(Math.floor(Math.random() * 100), 2) + bestMatch.top.t4;
         let best8 = pad(Math.floor(Math.random() * 100), 2) + best6;
@@ -3325,8 +3330,7 @@ app.post('/api/admin/yeeki/suggest-draw', async (req, res) => {
             suggestedSuper: best8,
             suggested6: best6,
             suggestedTop: bestMatch.top.t4,
-            suggestedBottom: bestMatch.bot.b2,
-            debug_payout: bestMatch.totalPayout // ซ่อนยอดไว้ดูหลังบ้านเผื่อรีเช็ค
+            suggestedBottom: bestMatch.bot.b2
         });
 
     } catch (err) {
