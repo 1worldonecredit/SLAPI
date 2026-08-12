@@ -3166,7 +3166,7 @@ app.post('/api/admin/analyze-draw', async (req, res) => {
 });
 
 // ==========================================
-// 🌟 API สุ่มเลขแนะนำ (AI V20: The Perfect Balance - คุมเพดานทะลุได้สูงสุด 105%)
+// 🌟 API สุ่มเลขแนะนำ (AI V21: The Sweet Spot - อิงตรรกะ V19 ยืดหยุ่น 15% ดึงดูด 3 ตัว)
 // ==========================================
 app.post('/api/admin/yeeki/suggest-draw', async (req, res) => {
     const { target_percent, round_id } = req.body;
@@ -3193,7 +3193,6 @@ app.post('/api/admin/yeeki/suggest-draw', async (req, res) => {
         let totalSalesTHB = 0;
         let hasBets = false;
 
-        // จัดกลุ่มบิลทั้งหมด
         let bets = { t6: {}, t4: {}, t3: {}, tTode: {}, t2: {}, tRun: {}, b2: {}, bRun: {}, s8: {} };
 
         orders.forEach(o => {
@@ -3224,10 +3223,12 @@ app.post('/api/admin/yeeki/suggest-draw', async (req, res) => {
         });
 
         // 🎯 เป้าหมายหลัก
+        // ป้องกันกรณีไม่มียอดขายเลย (0 บาท) เพื่อไม่ให้ระบบคำนวณพลาด
+        if (totalSalesTHB <= 0) totalSalesTHB = 1; 
+
         const targetPayoutTHB = totalSalesTHB * (target_percent / 100);
-        
-        // 🔥 ปรับตามคำสั่ง: อนุญาตให้ทะลุเป้าหมายได้สูงสุด 5% (105% ของเป้าที่ตั้งไว้)
-        const maxAllowedPayoutTHB = targetPayoutTHB * 1.05; 
+        // 🔥 นำเงื่อนไข V19 กลับมา: อนุญาตให้ทะลุเป้าหมายได้สูงสุด 15% (Buffer 1.15)
+        const maxAllowedPayoutTHB = targetPayoutTHB * 1.15; 
         
         const pad = (num, len) => num.toString().padStart(len, '0');
 
@@ -3262,7 +3263,6 @@ app.post('/api/admin/yeeki/suggest-draw', async (req, res) => {
                     if (bets.tRun[r]) { p += bets.tRun[r].p; thb += bets.tRun[r].thb; lak += bets.tRun[r].lak; }
                 });
 
-                // ยอดต้องไม่เกิน 105%
                 if (p <= maxAllowedPayoutTHB) {
                     validTops.push({ sim6, p, thb, lak, has3Top, n4 });
                 }
@@ -3292,7 +3292,7 @@ app.post('/api/admin/yeeki/suggest-draw', async (req, res) => {
         if (validBots.length === 0) validBots.push({ sim2: pad(Math.floor(Math.random() * 100), 2), p: 0, thb: 0, lak: 0 });
 
         // ==========================================
-        // 🌟 ด่านที่ 3: จับคู่เพื่อหาความใกล้เคียงที่สุด
+        // 🌟 ด่านที่ 3: จับคู่เพื่อหาความใกล้เคียงที่สุด (แบบ V19)
         // ==========================================
         let bestMatch = null;
         let minDiff = Infinity; 
@@ -3301,9 +3301,7 @@ app.post('/api/admin/yeeki/suggest-draw', async (req, res) => {
             for (let bot of validBots) {
                 let totalPayout = top.p + bot.p;
                 
-                // ถ้ายอดรวม บน+ล่าง อยู่ในบัฟเฟอร์ 105%
-                if (totalPayout <= maxAllowedPayoutTHB && totalPayout > 0) {
-                    // หาระยะห่างแบบสัมบูรณ์ ยึดตัวที่ใกล้ 100% ที่สุด
+                if (totalPayout <= maxAllowedPayoutTHB && (totalPayout > 0 || !hasBets)) {
                     let diff = Math.abs(totalPayout - targetPayoutTHB); 
 
                     if (diff < minDiff) {
@@ -3311,11 +3309,10 @@ app.post('/api/admin/yeeki/suggest-draw', async (req, res) => {
                         bestMatch = { top, bot, totalPayout };
                     } 
                     else if (diff === minDiff && bestMatch) {
-                        // เลือกลำดับความสำคัญ 3 ตัว ก่อน
+                        // 🌟 ดึงดูด 3 ตัว: ถ้าระยะห่างเท่ากัน ให้เลือกชุดที่มีคนถูก 3 ตัว
                         if (top.has3Top && !bestMatch.top.has3Top) {
                             bestMatch = { top, bot, totalPayout };
                         } else if (top.has3Top === bestMatch.top.has3Top) {
-                            // ดูความสมดุลเงินบาทและกีบ
                             let curBal = Math.abs(top.thb + bot.thb - (top.lak + bot.lak));
                             let bestBal = Math.abs(bestMatch.top.thb + bestMatch.bot.thb - (bestMatch.top.lak + bestMatch.bot.lak));
                             if (curBal < bestBal) {
