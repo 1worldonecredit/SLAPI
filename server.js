@@ -3166,8 +3166,7 @@ app.post('/api/admin/analyze-draw', async (req, res) => {
 });
 
 // ==========================================
-// 🌟 API สุ่มเลขแนะนำ (AI V18: The House Protector - Top-Down Filter 6->4->3->2)
-// ควบคุมไม่ให้ขาดทุน แต่ดันยอดจ่ายให้สูงใกล้ 100% ที่สุดเท่าที่บิลจะอำนวย
+// 🌟 API สุ่มเลขแนะนำ (AI V20: The Perfect Balance - คุมเพดานทะลุได้สูงสุด 105%)
 // ==========================================
 app.post('/api/admin/yeeki/suggest-draw', async (req, res) => {
     const { target_percent, round_id } = req.body;
@@ -3194,7 +3193,7 @@ app.post('/api/admin/yeeki/suggest-draw', async (req, res) => {
         let totalSalesTHB = 0;
         let hasBets = false;
 
-        // จัดกลุ่มบิลทั้งหมดเพื่อคำนวณอย่างรวดเร็ว (O(1) Lookup)
+        // จัดกลุ่มบิลทั้งหมด
         let bets = { t6: {}, t4: {}, t3: {}, tTode: {}, t2: {}, tRun: {}, b2: {}, bRun: {}, s8: {} };
 
         orders.forEach(o => {
@@ -3224,15 +3223,18 @@ app.post('/api/admin/yeeki/suggest-draw', async (req, res) => {
             else if (t === '8 ตัว (Super)') addBet(bets.s8, n);
         });
 
-        // 🎯 เป้าหมายเพดานเงินรางวัลสูงสุดที่รับได้ (ไม่ให้เกิน % ที่ตั้งไว้)
+        // 🎯 เป้าหมายหลัก
         const targetPayoutTHB = totalSalesTHB * (target_percent / 100);
+        
+        // 🔥 ปรับตามคำสั่ง: อนุญาตให้ทะลุเป้าหมายได้สูงสุด 5% (105% ของเป้าที่ตั้งไว้)
+        const maxAllowedPayoutTHB = targetPayoutTHB * 1.05; 
+        
         const pad = (num, len) => num.toString().padStart(len, '0');
 
         // ==========================================
-        // 🌟 ด่านที่ 1: กรองเลขบน (6 -> 4 -> 3) เอาเฉพาะที่ไม่ทะลุเป้า
+        // 🌟 ด่านที่ 1: กรองเลขบน (6 -> 4 -> 3) 
         // ==========================================
         let t4_pool = new Set();
-        // ดึงสารตั้งต้นจากบิล 4, 3, 2, วิ่ง
         Object.keys(bets.t4).forEach(k => t4_pool.add(k));
         Object.keys(bets.t3).forEach(k => { for(let i=0; i<=9; i++) t4_pool.add(i.toString() + k); });
         Object.keys(bets.t2).forEach(k => { for(let i=0; i<=99; i++) t4_pool.add(pad(i,2) + k); });
@@ -3241,7 +3243,6 @@ app.post('/api/admin/yeeki/suggest-draw', async (req, res) => {
 
         let validTops = [];
         for (let t4 of t4_pool) {
-            // สุ่มประกอบเป็น 6 ตัว เพื่อเช็คยอด
             for (let i = 0; i <= 99; i++) {
                 let sim6 = pad(i, 2) + t4;
                 let n4 = sim6.slice(-4), n3 = sim6.slice(-3), n2 = sim6.slice(-2);
@@ -3261,15 +3262,15 @@ app.post('/api/admin/yeeki/suggest-draw', async (req, res) => {
                     if (bets.tRun[r]) { p += bets.tRun[r].p; thb += bets.tRun[r].thb; lak += bets.tRun[r].lak; }
                 });
 
-                // 🔴 กฎเหล็กของเจ้ามือ: ยอดจ่ายบนอย่างเดียวต้องไม่เกินเป้าหมาย ถ้าเกิน = โยนทิ้ง
-                if (p <= targetPayoutTHB) {
+                // ยอดต้องไม่เกิน 105%
+                if (p <= maxAllowedPayoutTHB) {
                     validTops.push({ sim6, p, thb, lak, has3Top, n4 });
                 }
             }
         }
 
         // ==========================================
-        // 🌟 ด่านที่ 2: เตรียมเลขล่าง (2) ไว้คอยเติมเต็ม
+        // 🌟 ด่านที่ 2: เตรียมเลขล่าง (2)
         // ==========================================
         let validBots = [];
         for (let i = 0; i <= 99; i++) {
@@ -3282,7 +3283,7 @@ app.post('/api/admin/yeeki/suggest-draw', async (req, res) => {
                 if (bets.bRun[r]) { p += bets.bRun[r].p; thb += bets.bRun[r].thb; lak += bets.bRun[r].lak; }
             });
 
-            if (p <= targetPayoutTHB) {
+            if (p <= maxAllowedPayoutTHB) {
                 validBots.push({ sim2, p, thb, lak });
             }
         }
@@ -3291,35 +3292,41 @@ app.post('/api/admin/yeeki/suggest-draw', async (req, res) => {
         if (validBots.length === 0) validBots.push({ sim2: pad(Math.floor(Math.random() * 100), 2), p: 0, thb: 0, lak: 0 });
 
         // ==========================================
-        // 🌟 ด่านที่ 3: ประกอบร่าง บน + ล่าง (รีดยอดให้ใกล้เป้าที่สุด แต่ห้ามเกิน)
+        // 🌟 ด่านที่ 3: จับคู่เพื่อหาความใกล้เคียงที่สุด
         // ==========================================
         let bestMatch = null;
-        let minDiff = Infinity; // เราต้องการให้ระยะห่างจากเป้าหมาย "น้อยที่สุด"
+        let minDiff = Infinity; 
 
         for (let top of validTops) {
             for (let bot of validBots) {
                 let totalPayout = top.p + bot.p;
                 
-                // ถ้ายอดรวม บน+ล่าง ยังอยู่ในเกณฑ์ไม่ขาดทุน
-                if (totalPayout <= targetPayoutTHB && totalPayout > 0) {
-                    let diff = targetPayoutTHB - totalPayout; // ส่วนต่างยิ่งน้อย ยิ่งใกล้ 100%
+                // ถ้ายอดรวม บน+ล่าง อยู่ในบัฟเฟอร์ 105%
+                if (totalPayout <= maxAllowedPayoutTHB && totalPayout > 0) {
+                    // หาระยะห่างแบบสัมบูรณ์ ยึดตัวที่ใกล้ 100% ที่สุด
+                    let diff = Math.abs(totalPayout - targetPayoutTHB); 
 
                     if (diff < minDiff) {
                         minDiff = diff;
                         bestMatch = { top, bot, totalPayout };
                     } 
                     else if (diff === minDiff && bestMatch) {
-                        // ถ้าเจอหลายชุดที่ทำยอดได้สูงเท่ากัน ให้เลือกชุดที่มีคนถูก 3 ตัวท้ายก่อน
+                        // เลือกลำดับความสำคัญ 3 ตัว ก่อน
                         if (top.has3Top && !bestMatch.top.has3Top) {
                             bestMatch = { top, bot, totalPayout };
+                        } else if (top.has3Top === bestMatch.top.has3Top) {
+                            // ดูความสมดุลเงินบาทและกีบ
+                            let curBal = Math.abs(top.thb + bot.thb - (top.lak + bot.lak));
+                            let bestBal = Math.abs(bestMatch.top.thb + bestMatch.bot.thb - (bestMatch.top.lak + bestMatch.bot.lak));
+                            if (curBal < bestBal) {
+                                bestMatch = { top, bot, totalPayout };
+                            }
                         }
                     }
                 }
             }
         }
 
-        // 🚨 กรณีฉุกเฉิน: ถ้าเป้าหมายต่ำมากจนไม่มีเลขคู่ไหนที่รวมกันแล้วไม่ขาดทุนเลย 
-        // ระบบจะค้นหาเลขที่จ่าย "น้อยที่สุด (Absolute Minimum)" เพื่อเซฟเจ้ามือ
         if (!bestMatch) {
             let absMinPayout = Infinity;
             for (let top of validTops) {
@@ -3334,7 +3341,7 @@ app.post('/api/admin/yeeki/suggest-draw', async (req, res) => {
         }
 
         // ==========================================
-        // 🌟 ด่านที่ 4: เติม 2 ตัวหน้าให้ครบ 8 ตัว โดยไม่ให้ทะลุเป้า
+        // 🌟 ด่านที่ 4: เติม 2 ตัวหน้าให้ครบ 8 ตัว
         // ==========================================
         let final6 = bestMatch.top.sim6;
         let final8 = '00' + final6;
@@ -3345,8 +3352,8 @@ app.post('/api/admin/yeeki/suggest-draw', async (req, res) => {
             let extraPayout = bets.s8[sim8] ? bets.s8[sim8].p : 0;
             let newTotal = bestMatch.totalPayout + extraPayout;
             
-            if (newTotal <= targetPayoutTHB) {
-                let diff = targetPayoutTHB - newTotal;
+            if (newTotal <= maxAllowedPayoutTHB) {
+                let diff = Math.abs(newTotal - targetPayoutTHB);
                 if (diff < min8Diff) {
                     min8Diff = diff;
                     final8 = sim8;
