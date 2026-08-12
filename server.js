@@ -3375,7 +3375,7 @@ app.post('/api/admin/yeeki/suggest-draw', async (req, res) => {
     }
 });
 // ==========================================
-// 3. API: ประกาศผลและตรวจบิลจริง (Execute Draw)
+// 3. API: ประกาศผลและตรวจบิลจริง (Execute Draw) - Manual โดย Admin
 // ==========================================
 app.post('/api/admin/execute-yeeki-draw', async (req, res) => {
     const { round_id, super_number, top_6, bottom_2 } = req.body;
@@ -3433,11 +3433,24 @@ app.post('/api/admin/execute-yeeki-draw', async (req, res) => {
 
                 if (isWin) {
                     const prizeAmount = item.price * (prizeRates[type] || 0);
-                    await transaction.request().input('itemId', sql.Int, item.item_id).input('prizeAmt', sql.Decimal(18,2), prizeAmount).query(`UPDATE Yeeki_Order_Items SET status = N'ชนะ', prize_amount = @prizeAmt WHERE item_id = @itemId`);
-                    await transaction.request().input('uid', sql.Int, item.user_id).input('prize', sql.Decimal(18,2), prizeAmount).query(`UPDATE Users SET wallet_balance = wallet_balance + @prize WHERE user_id = @uid`);
-                    await transaction.request().input('uid', sql.Int, item.user_id).input('prize', sql.Decimal(18,2), prizeAmount).input('title', sql.NVarChar(255), `ถูกรางวัล ${type} (${num}) รอบที่ ${round_id}`).query(`INSERT INTO Transactions (user_id, amount, transaction_type, title, status) VALUES (@uid, @prize, 'PRIZE_WIN', @title, 'Completed')`);
+                    
+                    // 1. อัปเดตสถานะบิลว่าถูกรางวัล
+                    await transaction.request().input('itemId', sql.Int, item.item_id).input('prizeAmt', sql.Decimal(18,2), prizeAmount)
+                        .query(`UPDATE Yeeki_Order_Items SET status = N'ชนะ', prize_amount = @prizeAmt WHERE item_id = @itemId`);
+                    
+                    // 2. เติมเงินเข้ากระเป๋า
+                    await transaction.request().input('uid', sql.Int, item.user_id).input('prize', sql.Decimal(18,2), prizeAmount)
+                        .query(`UPDATE Users SET wallet_balance = wallet_balance + @prize WHERE user_id = @uid`);
+                    
+                    // 3. สร้างประวัติ (Transaction) ให้ไปโชว์ที่หน้าแดชบอร์ด
+                    await transaction.request()
+                        .input('uid', sql.Int, item.user_id)
+                        .input('prize', sql.Decimal(18,2), prizeAmount)
+                        .input('title', sql.NVarChar(255), `ถูกรางวัล ${type} (${num}) รอบที่ ${round_id}`)
+                        .query(`INSERT INTO Transactions (user_id, amount, transaction_type, title, status) VALUES (@uid, @prize, 'PRIZE_WIN', @title, 'Completed')`);
                 } else {
-                    await transaction.request().input('itemId', sql.Int, item.item_id).query(`UPDATE Yeeki_Order_Items SET status = N'แพ้' WHERE item_id = @itemId`);
+                    await transaction.request().input('itemId', sql.Int, item.item_id)
+                        .query(`UPDATE Yeeki_Order_Items SET status = N'แพ้' WHERE item_id = @itemId`);
                 }
             }
             await transaction.commit();
@@ -3445,6 +3458,7 @@ app.post('/api/admin/execute-yeeki-draw', async (req, res) => {
         } catch (innerErr) { await transaction.rollback(); throw innerErr; }
     } catch (err) { res.status(500).json({ success: false, message: `Database Error: ${err.message}` }); }
 });
+
 
 // ==========================================
 // 🤖 หุ่นยนต์ออกรางวัลอัตโนมัติ 24 ชม. (Auto-Draw Worker)
@@ -3454,7 +3468,6 @@ setInterval(async () => {
     try {
         const pool = await sql.connect(dbConfig);
         
-        // 1. ตรวจหา "รอบที่ถึงเวลาออกผลแล้ว (เวลาปัจจุปันเลยเวลา draw_time มาแล้ว) แต่สถานะยังไม่ใช่ Completed"
         const pendingRounds = await pool.request().query(`
             SELECT round_id, round_number 
             FROM Yeeki_Rounds 
@@ -3462,33 +3475,30 @@ setInterval(async () => {
             AND status != 'Completed'
         `);
 
-        // ถ้าไม่มีรอบค้าง หุ่นยนต์จะกลับไปนอนต่อ
         if (pendingRounds.recordset.length === 0) return;
 
-        // 🎯 กำหนดเป้าหมายคุมยอดจ่ายที่ 50% (คุณพี่แก้ตัวเลขตรงนี้ได้เลยครับ)
         const target_percent = 50; 
         const EXCHANGE_RATE = 620;
 
         for (let round of pendingRounds.recordset) {
             console.log(`🤖 [AUTO] หุ่นยนต์กำลังออกรางวัลรอบที่ ${round.round_number} อัตโนมัติ...`);
             
-            // 2. ดึงโพยทั้งหมดของรอบนี้มาประมวลผล
+            // 🌟 แก้ไข: ดึง item_id มาด้วย เพื่อป้องกันบั๊กอัปเดตบิลผิดตัว
             const ordersReq = await pool.request()
                 .input('rid', sql.Int, round.round_id)
                 .query(`
-                    SELECT oi.order_id, oi.lottery_type, oi.selected_number, oi.price, o.user_id, o.currency_code
+                    SELECT oi.item_id, oi.order_id, oi.lottery_type, oi.selected_number, oi.price, o.user_id, o.currency_code
                     FROM Yeeki_Order_Items oi
                     JOIN Yeeki_Orders o ON oi.order_id = o.order_id
                     WHERE o.round_id = @rid AND oi.status = N'รอผลตรวจ'
                 `);
             const items = ordersReq.recordset;
 
-            // 3. AI สุ่มเลข 1,000 ครั้ง เพื่อหาเลขหลบยอดจ่ายแบบอัตโนมัติ
             let super_number = String(Math.floor(Math.random() * 100000000)).padStart(8, '0');
             let top_number = String(Math.floor(Math.random() * 10000)).padStart(4, '0');
             let bottom_number = String(Math.floor(Math.random() * 100)).padStart(2, '0');
 
-            const rates = { '8 ตัว (Super)': 1000000, '4 ตัวท้าย': 6000, '3 ตัวบน': 900, '3 ตัวโต๊ด': 150, '2 ตัวบน': 90, '2 ตัวล่าง': 90, 'วิ่งบน': 3.2, 'วิ่งล่าง': 4.2 };
+            const rates = { '8 ตัว (Super)': 1000000, '6 ตัว': 400000, '4 ตัวท้าย': 6000, '3 ตัวบน': 900, '3 ตัวโต๊ด': 150, '2 ตัวบน': 90, '2 ตัวล่าง': 90, 'วิ่งบน': 3.2, 'วิ่งล่าง': 4.2 };
 
             if (items.length > 0) {
                 let totalSalesTHB = items.reduce((sum, item) => sum + ((item.currency_code === 'LAK' || item.currency_code === '₭') ? (item.price / EXCHANGE_RATE) : item.price), 0);
@@ -3501,17 +3511,18 @@ setInterval(async () => {
                     let t4 = String(Math.floor(Math.random() * 10000)).padStart(4, '0');
                     let b2 = String(Math.floor(Math.random() * 100)).padStart(2, '0');
                     let t3 = t4.slice(-3); let t2 = t4.slice(-2);
-                    let toadSets = [ t3[0]+t3[1]+t3[2], t3[0]+t3[2]+t3[1], t3[1]+t3[0]+t3[2], t3[1]+t3[2]+t3[0], t3[2]+t3[0]+t3[1], t3[2]+t3[1]+t3[0] ];
+                    let sT3 = t3.split('').sort().join('');
 
                     let currentPayoutTHB = 0;
                     for (let item of items) {
                         let priceTHB = (item.currency_code === 'LAK' || item.currency_code === '₭') ? (item.price / EXCHANGE_RATE) : item.price;
                         let isWin = false; let num = item.selected_number;
+                        
                         switch (item.lottery_type) {
                             case '8 ตัว (Super)': if (num === s8) isWin = true; break;
                             case '4 ตัวท้าย': if (num === t4) isWin = true; break;
                             case '3 ตัวบน': if (num === t3) isWin = true; break;
-                            case '3 ตัวโต๊ด': if (toadSets.includes(num)) isWin = true; break;
+                            case '3 ตัวโต๊ด': if (num.split('').sort().join('') === sT3) isWin = true; break; // แก้บั๊ก 3 ตัวโต๊ด
                             case '2 ตัวบน': if (num === t2) isWin = true; break;
                             case '2 ตัวล่าง': if (num === b2) isWin = true; break;
                             case 'วิ่งบน': if (t3.includes(num)) isWin = true; break;
@@ -3525,25 +3536,21 @@ setInterval(async () => {
                 super_number = bestSet.super_8; top_number = bestSet.top_4; bottom_number = bestSet.bottom_2;
             }
 
-            // 4. จ่ายเงินแบบอัตโนมัติ! (เหมือนแอดมินมากดปุ่ม)
             const transaction = new sql.Transaction(pool);
             await transaction.begin();
             try {
                 let top3 = top_number.slice(-3); let top2 = top_number.slice(-2);
-                let toadSets = [ top3[0]+top3[1]+top3[2], top3[0]+top3[2]+top3[1], top3[1]+top3[0]+top3[2], top3[1]+top3[2]+top3[0], top3[2]+top3[0]+top3[1], top3[2]+top3[1]+top3[0] ];
 
-                // บันทึกผลรางวัล
                 await transaction.request().input('rid', sql.Int, round.round_id).input('s8', sql.VarChar, super_number).input('t4', sql.VarChar, top_number).input('t3', sql.VarChar, top3).input('b2', sql.VarChar, bottom_number)
                     .query(`UPDATE Yeeki_Rounds SET result_8_super = @s8, result_4_top = @t4, result_3_top = @t3, result_2_bottom = @b2, status = 'Completed' WHERE round_id = @rid`);
 
-                // ตรวจบิลและแจกเงิน
                 for (let item of items) {
                     let isWin = false; let num = item.selected_number;
                     switch (item.lottery_type) {
                         case '8 ตัว (Super)': if (num === super_number) isWin = true; break;
                         case '4 ตัวท้าย': if (num === top_number) isWin = true; break;
                         case '3 ตัวบน': if (num === top3) isWin = true; break;
-                        case '3 ตัวโต๊ด': if (toadSets.includes(num)) isWin = true; break;
+                        case '3 ตัวโต๊ด': if (num.split('').sort().join('') === top3.split('').sort().join('')) isWin = true; break;
                         case '2 ตัวบน': if (num === top2) isWin = true; break;
                         case '2 ตัวล่าง': if (num === bottom_number) isWin = true; break;
                         case 'วิ่งบน': if (top3.includes(num)) isWin = true; break;
@@ -3552,19 +3559,30 @@ setInterval(async () => {
 
                     if (isWin) {
                         let prize = item.price * (rates[item.lottery_type] || 0);
-                        await transaction.request().input('oid', sql.Int, item.order_id).input('ltype', sql.NVarChar, item.lottery_type).input('snum', sql.VarChar, item.selected_number).input('prize', sql.Decimal(18,2), prize)
-                            .query(`UPDATE Yeeki_Order_Items SET status = 'Win', prize_amount = @prize WHERE order_id = @oid AND lottery_type = @ltype AND selected_number = @snum`);
+                        
+                        // 🌟 แก้ไขให้ใช้ item_id ป้องกันการอัปเดตผิดบิล
+                        await transaction.request().input('itemId', sql.Int, item.item_id).input('prize', sql.Decimal(18,2), prize)
+                            .query(`UPDATE Yeeki_Order_Items SET status = 'Win', prize_amount = @prize WHERE item_id = @itemId`);
+                        
                         await transaction.request().input('uid', sql.Int, item.user_id).input('prizeAmount', sql.Decimal(18,2), prize)
                             .query(`UPDATE Users SET wallet_balance = wallet_balance + @prizeAmount WHERE user_id = @uid`);
+                            
+                        // 🌟🌟🌟 ไฮไลท์สำคัญ: เพิ่มระบบบันทึกประวัติให้หุ่นยนต์ 🌟🌟🌟
+                        await transaction.request()
+                            .input('uid', sql.Int, item.user_id)
+                            .input('prizeAmount', sql.Decimal(18,2), prize)
+                            .input('title', sql.NVarChar(255), `ถูกรางวัล ${item.lottery_type} (${num}) รอบที่ ${round.round_number}`)
+                            .query(`INSERT INTO Transactions (user_id, amount, transaction_type, title, status) VALUES (@uid, @prizeAmount, 'PRIZE_WIN', @title, 'Completed')`);
+
                     } else {
-                        await transaction.request().input('oid', sql.Int, item.order_id).input('ltype', sql.NVarChar, item.lottery_type).input('snum', sql.VarChar, item.selected_number)
-                            .query(`UPDATE Yeeki_Order_Items SET status = 'Lose', prize_amount = 0 WHERE order_id = @oid AND lottery_type = @ltype AND selected_number = @snum`);
+                        await transaction.request().input('itemId', sql.Int, item.item_id)
+                            .query(`UPDATE Yeeki_Order_Items SET status = 'Lose', prize_amount = 0 WHERE item_id = @itemId`);
                     }
                 }
                 
                 await transaction.request().input('rid', sql.Int, round.round_id).query(`UPDATE Yeeki_Orders SET status = 'Completed' WHERE round_id = @rid`);
                 await transaction.commit();
-                console.log(`✅ [AUTO] จ่ายเงินรอบที่ ${round.round_number} สำเร็จแล้วแบบไร้รอยต่อ!`);
+                console.log(`✅ [AUTO] จ่ายเงินและสร้างประวัติรอบที่ ${round.round_number} สำเร็จแล้วแบบไร้รอยต่อ!`);
             } catch (innerErr) {
                 await transaction.rollback();
                 console.error(`❌ [AUTO] พังตอนแจกเงินรอบ ${round.round_number}:`, innerErr);
@@ -3573,7 +3591,7 @@ setInterval(async () => {
     } catch (err) {
         console.error("Auto draw interval error:", err);
     }
-}, 30000); // ทำงานทุก 30 วินาที
+}, 30000);
 // ==========================================
 // 🌟 API 2: ค้นหาคนซื้อจากเลข (ด้านล่างสุด)
 // ==========================================
