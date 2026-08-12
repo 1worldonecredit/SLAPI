@@ -3166,15 +3166,14 @@ app.post('/api/admin/analyze-draw', async (req, res) => {
 });
 
 // ==========================================
-// 🌟 API สุ่มเลขแนะนำ (AI V15 Final: Smart Range & Absolute Proximity)
-// บังคับหาเลขจากบิลจริง + ดันยอดให้ใกล้เป้าที่สุด (อนุญาตให้ทะลุเป้าได้นิดหน่อยเพื่อไม่ให้ % ตก)
+// 🌟 API สุ่มเลขแนะนำ (AI V17 Final: Pure Percentage & 3-Digit Priority)
+// ไร้เพดานจำนวนเงิน, อิงเปอร์เซ็นต์ล้วน, และให้ความสำคัญกับบิล 3 ตัวท้ายเมื่อ % ใกล้เคียงกัน
 // ==========================================
 app.post('/api/admin/yeeki/suggest-draw', async (req, res) => {
     const { target_percent, round_id } = req.body;
     try {
         const pool = await sql.connect(dbConfig);
 
-        // 1. ดึงข้อมูลรายการสั่งซื้อทั้งหมดในรอบนั้น
         const ordersReq = await pool.request()
             .input('roundId', sql.Int, round_id)
             .query(`
@@ -3185,7 +3184,6 @@ app.post('/api/admin/yeeki/suggest-draw', async (req, res) => {
             `);
         const orders = ordersReq.recordset;
 
-        // ดึงอัตราแลกเปลี่ยนและอัตราจ่าย
         const exReq = await pool.request().query(`SELECT rate FROM ExchangeRates WHERE currency_pair = 'THB_LAK'`);
         const lakRate = exReq.recordset[0]?.rate || 620;
 
@@ -3193,20 +3191,22 @@ app.post('/api/admin/yeeki/suggest-draw', async (req, res) => {
         const prizeRates = {};
         ratesReq.recordset.forEach(r => prizeRates[r.lottery_type] = r.multiplier);
 
-        // 2. คำนวณยอดขายรวม และ ยอดจ่ายเป้าหมาย (THB)
+        // 1. คำนวณยอดขายรวม
         let totalSalesTHB = 0;
         orders.forEach(o => {
             totalSalesTHB += (o.currency_code === 'LAK' || o.currency_code === '₭') ? (o.price / lakRate) : o.price;
         });
         
-        const targetPayoutTHB = totalSalesTHB * (target_percent / 100);
-        // 🔥 กำหนดเพดานสูงสุดที่ยอมรับได้ (ทะลุเป้าได้ 15% เพื่อป้องกันยอดตกไปที่ 20%)
-        const maxAllowedPayoutTHB = targetPayoutTHB * 1.15; 
-
+        // ป้องกันการหารด้วยศูนย์กรณีไม่มียอดขายเลย
+        if (totalSalesTHB <= 0) totalSalesTHB = 1; 
+        
+        // 🎯 เป้าหมายในรูปแบบ Ratio (เช่น 100% = 1.00)
+        const targetRatio = target_percent / 100;
+        
         const pad = (num, len) => num.toString().padStart(len, '0');
         const getPayoutTHB = (o) => (o.currency_code === 'LAK' || o.currency_code === '₭') ? (o.price * (prizeRates[o.lottery_type] || 0)) / lakRate : (o.price * (prizeRates[o.lottery_type] || 0));
 
-        // 3. สกัด "สารตั้งต้น" จากบิลลูกค้าอย่างเคร่งครัด
+        // 🌟 2. สกัดข้อมูลตัวเลขจากบิลลูกค้า (Strict Component)
         let t4_pool = new Set();
         let b2_pool = new Set();
         let hasBets = false;
@@ -3240,7 +3240,6 @@ app.post('/api/admin/yeeki/suggest-draw', async (req, res) => {
             }
         });
 
-        // กรณีไม่มีบิลเลย
         if (!hasBets) {
             t4_pool.add(pad(Math.floor(Math.random() * 10000), 4));
             b2_pool.add(pad(Math.floor(Math.random() * 100), 2));
@@ -3249,27 +3248,25 @@ app.post('/api/admin/yeeki/suggest-draw', async (req, res) => {
             if (b2_pool.size === 0) b2_pool.add(pad(Math.floor(Math.random() * 100), 2));
         }
 
-        // 4. กระบวนการคำนวณหาระยะประชิดที่แม่นยำที่สุด (Absolute Difference Calculation)
-        let bestMatch = null;
-        let minDifference = Infinity;
+        // 🌟 3. คำนวณความเป็นไปได้ทั้งหมด ประเมินผลด้วย Percent Ratio ล้วนๆ
+        let allMatches = [];
 
-        // วนลูปหาคู่ที่ดีที่สุด
         for (let t4 of t4_pool) {
             for (let b2 of b2_pool) {
-                // สุ่มหน้า 2 ตัว เพื่อประกอบเป็น 6 ตัวเต็ม จำนวน 5 รูปแบบต่อชุด เพื่อความรวดเร็วและหลากหลาย
-                for (let i = 0; i < 5; i++) {
+                // สร้าง 6 ตัวหน้า 10 รูปแบบต่อคู่ท้าย 
+                for (let i = 0; i < 10; i++) {
                     let front2 = pad(Math.floor(Math.random() * 100), 2);
                     let sim6 = front2 + t4;
                     let sim8 = pad(Math.floor(Math.random() * 100), 2) + sim6;
                     
-                    let totalPayout = 0;
+                    let payoutTHB = 0;
                     let thbPayout = 0;
                     let lakPayout = 0;
+                    let winTypes = new Set();
 
                     let n4 = sim6.slice(-4), n3 = sim6.slice(-3), n2 = sim6.slice(-2);
                     let sT3 = n3.split('').sort().join('');
 
-                    // คำนวณยอดจ่ายของชุดตัวเลขนี้
                     for (let o of orders) {
                         let win = false;
                         let t = o.lottery_type, n = o.selected_number;
@@ -3286,37 +3283,65 @@ app.post('/api/admin/yeeki/suggest-draw', async (req, res) => {
 
                         if (win) {
                             let amt = getPayoutTHB(o);
-                            totalPayout += amt;
+                            payoutTHB += amt;
                             if (o.currency_code === 'LAK' || o.currency_code === '₭') lakPayout += amt; 
                             else thbPayout += amt;
+                            winTypes.add(t);
                         }
                     }
 
-                    // 🔥 กฎการกรอง: ต้องไม่เกินเพดานสูงสุด (ยอมให้ทะลุได้ 15% แต่ห้ามเกินนี้)
-                    if (totalPayout <= maxAllowedPayoutTHB) {
-                        // หาระยะห่างจากเป้าหมาย (ยิ่งใกล้เป้าหมาย ค่านี้จะยิ่งน้อย)
-                        let diff = Math.abs(totalPayout - targetPayoutTHB);
+                    // บันทึกเฉพาะชุดที่มีคนถูกรางวัล (หรือถ้าไม่มีใครซื้อเลยจริงๆ อนุโลมให้บันทึกเก็บไว้)
+                    if (payoutTHB > 0 || !hasBets) {
+                        // คำนวณอัตราส่วนการจ่ายเงินของชุดนี้ (Payout Ratio)
+                        let payoutRatio = payoutTHB / totalSalesTHB;
+                        // ระยะห่างจากเป้าหมาย (ยิ่งใกล้ 0 ยิ่งดี)
+                        let diffRatio = Math.abs(payoutRatio - targetRatio);
+                        
+                        let has3Digit = winTypes.has('3 ตัวบน') || winTypes.has('3 ตัวโต๊ด');
+                        let varietyCount = winTypes.size;
+                        
+                        // คำนวณความสมดุลของสกุลเงิน (0 ถึง 1, เข้าใกล้ 0 คือสมดุลมาก)
+                        let thbProp = payoutTHB > 0 ? (thbPayout / payoutTHB) : 0.5;
+                        let lakProp = payoutTHB > 0 ? (lakPayout / payoutTHB) : 0.5;
+                        let currencyBalance = Math.abs(thbProp - lakProp);
 
-                        if (diff < minDifference) {
-                            minDifference = diff;
-                            bestMatch = { sim8, sim6, t4, b2, totalPayout, thbPayout, lakPayout };
-                        } 
-                        else if (diff === minDifference && bestMatch) {
-                            // ถ้าระยะห่าง % เท่ากัน ให้มาวัดที่ความสมดุลของสกุลเงิน
-                            let curBal = Math.abs(thbPayout - lakPayout);
-                            let bestBal = Math.abs(bestMatch.thbPayout - bestMatch.lakPayout);
-                            
-                            if (curBal < bestBal) {
-                                bestMatch = { sim8, sim6, t4, b2, totalPayout, thbPayout, lakPayout };
-                            }
-                        }
+                        allMatches.push({ 
+                            sim8, sim6, t4, b2, 
+                            payoutTHB, diffRatio, has3Digit, varietyCount, currencyBalance 
+                        });
                     }
                 }
             }
         }
 
-        // Fallback กรณีหาชุดที่ไม่ทะลุ 115% ไม่เจอเลย (ลูกค้าแทงหนักทุกตัว)
-        if (!bestMatch) {
+        // 🌟 4. คัดเลือกผู้ชนะ (Sorting based on % Logic)
+        let bestMatch = null;
+
+        if (allMatches.length > 0) {
+            allMatches.sort((a, b) => {
+                let diffA = a.diffRatio;
+                let diffB = b.diffRatio;
+
+                // 🔥 กฎเหล็ก: ถ้าระยะห่าง % สูสีกัน (ห่างกันไม่เกิน 5% หรือ 0.05) 
+                if (Math.abs(diffA - diffB) <= 0.05) {
+                    // ลำดับ 1: ดันชุดที่มี 3 ตัวท้ายให้ชนะขาด
+                    if (a.has3Digit !== b.has3Digit) {
+                        return a.has3Digit ? -1 : 1; 
+                    }
+                    // ลำดับ 2: ถ้ามี 3 ตัวทั้งคู่ (หรือไม่มีทั้งคู่) ให้เลือกชุดที่ถูกหลายประเภทกว่า
+                    if (a.varietyCount !== b.varietyCount) {
+                        return b.varietyCount - a.varietyCount;
+                    }
+                    // ลำดับ 3: ถ้ายังเท่ากันอีก เลือกความสมดุลของสกุลเงิน
+                    return a.currencyBalance - b.currencyBalance;
+                }
+                
+                // ถ้าระยะห่าง % ต่างกันชัดเจน ให้ยึดชุดที่ % ตรงเป้าหมายกว่าเป็นผู้ชนะ
+                return diffA - diffB;
+            });
+
+            bestMatch = allMatches[0];
+        } else {
             let escape6 = pad(Math.floor(Math.random() * 1000000), 6);
             bestMatch = {
                 sim8: pad(Math.floor(Math.random() * 100000000), 8),
