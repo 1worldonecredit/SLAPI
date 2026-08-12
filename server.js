@@ -88,58 +88,7 @@ app.get('/api/status', (req, res) => {
 
 const cron = require('node-cron'); // ตรวจสอบให้แน่ใจว่ามีการ import node-cron ไว้ด้านบนของไฟล์
 
-// ==========================================
-// 🚀 1. ระบบสร้างตารางรอบหวยยี่กี 24 รอบอัตโนมัติ (ทำงานทุกวันเวลา 00:00 น. ตรง)
-// ==========================================
-cron.schedule('0 0 * * *', async () => {
-    console.log('⏰ [CRON] 00:00 น. เริ่มต้นสร้างรอบหวยยี่กี 24 รอบ สำหรับวันใหม่โดยอัตโนมัติ...');
-    try {
-        const pool = await sql.connect(dbConfig);
-        
-        // หาวันที่ปัจจุบัน (เวลาไทย)
-        const today = new Date();
-        const dateStr = today.toLocaleDateString('en-CA', { timeZone: 'Asia/Bangkok' }); // จะได้รูปแบบ YYYY-MM-DD
 
-        // เช็คก่อนว่าวันนี้มีการสร้างรอบไปแล้วหรือยัง (ป้องกันการสร้างซ้ำ)
-        const checkExist = await pool.request()
-            .input('draw_date', sql.Date, dateStr)
-            .query('SELECT COUNT(*) as count FROM Yeeki_Rounds WHERE CAST(draw_date AS DATE) = @draw_date');
-        
-        if (checkExist.recordset[0].count > 0) {
-            console.log(`⚠️ [CRON] รอบหวยของวันที่ ${dateStr} มีอยู่ในระบบแล้ว ข้ามการสร้างใหม่`);
-            return;
-        }
-
-        // วนลูปสร้างตาราง 24 รอบ
-        for (let i = 1; i <= 24; i++) {
-            const hour = i - 1;
-            const hStr = hour.toString().padStart(2, '0');
-            
-            const openTime = `${dateStr} ${hStr}:01:00`;
-            const closeTime = `${dateStr} ${hStr}:55:00`;
-            const drawTime = `${dateStr} ${hStr}:56:00`;
-
-            await pool.request()
-                .input('round_number', sql.Int, i)
-                .input('draw_date', sql.Date, dateStr)
-                .input('open_time', sql.DateTime, openTime)
-                .input('close_time', sql.DateTime, closeTime)
-                .input('draw_time', sql.DateTime, drawTime)
-                .input('status', sql.NVarChar, 'Pending')
-                .query(`
-                    INSERT INTO Yeeki_Rounds (round_number, draw_date, open_time, close_time, draw_time, status)
-                    VALUES (@round_number, @draw_date, @open_time, @close_time, @draw_time, @status)
-                `);
-        }
-        console.log(`✅ [CRON] สร้างรอบหวย 24 รอบ สำหรับวันที่ ${dateStr} สำเร็จสมบูรณ์!`);
-
-    } catch (error) {
-        console.error('❌ [CRON] เกิดข้อผิดพลาดในการสร้างรอบหวยอัตโนมัติ:', error);
-    }
-}, {
-    scheduled: true,
-    timezone: "Asia/Bangkok" // ล็อกให้ทำงานตอนเที่ยงคืนตรงตามเวลาประเทศไทย
-});
 
 // ==========================================
 // 🌟 2. ระบบเปิด-ปิดรับซื้อ และ ออกรางวัลอัตโนมัติ (Cron Job รันทุกๆ 1 นาที) - (โค้ดเดิมของคุณพี่ 100%)
