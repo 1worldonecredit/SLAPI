@@ -5459,20 +5459,20 @@ app.get('/api/admin/yeeki/history', async (req, res) => {
     try {
         const pool = await sql.connect(dbConfig);
         
-        let query = `
-    SELECT 
-        round_id, 
-        round_number, 
-        draw_time, 
-        result_8_super,   -- 🌟 เพิ่มบรรทัดนี้เข้ามาครับ!
-        result_6_top, 
-        result_4_top, 
-        result_3_top, 
-        result_2_bottom, 
-        status 
-    FROM Yeeki_Rounds
-    WHERE status = 'Completed'
-`;
+ let query = `
+            SELECT 
+                round_id, 
+                round_number, 
+                draw_time, 
+                result_8_super,  
+                /* ลบ result_6_top ออกไปก่อน เพราะฐานข้อมูลยังไม่มีคอลัมน์นี้ */
+                result_4_top, 
+                result_3_top, 
+                result_2_bottom, 
+                status 
+            FROM Yeeki_Rounds
+            WHERE status = 'Completed'
+        `;
 
         // ถ้ามีการส่งวันที่มา ให้กรองเฉพาะวันนั้น (จัดการ Timezone)
         if (date) {
