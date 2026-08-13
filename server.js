@@ -5464,7 +5464,7 @@ app.get('/api/admin/yeeki/history', async (req, res) => {
                 round_id, 
                 round_number, 
                 draw_time, 
-                result_8_super, 
+                result_6_top, 
                 result_4_top, 
                 result_3_top, 
                 result_2_bottom, 
