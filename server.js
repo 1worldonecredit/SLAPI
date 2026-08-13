@@ -5370,6 +5370,87 @@ app.get('/api/admin/yeeki-round-detail', async (req, res) => {
     }
 });
 
+// ==========================================
+// 🏦 API: จัดการบัญชีธนาคารรับฝากเงิน (Receiving Accounts)
+// ==========================================
+
+// 1. API: ดึงข้อมูลธนาคารทั้งหมด (GET)
+app.get('/api/admin/banks', async (req, res) => {
+    try {
+        const pool = await sql.connect(dbConfig);
+        // ดึงข้อมูลเรียงตาม bank_id
+        const result = await pool.request().query(`
+            SELECT * FROM Banks 
+            ORDER BY bank_id ASC
+        `);
+        res.json(result.recordset);
+    } catch (err) {
+        console.error("Error fetching banks:", err);
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
+
+// 2. API: เพิ่มบัญชีธนาคารใหม่ (POST)
+app.post('/api/admin/banks', async (req, res) => {
+    const { bank_name, bank_code, account_name, account_number, currency, logo_url, is_active } = req.body;
+    try {
+        const pool = await sql.connect(dbConfig);
+        await pool.request()
+            .input('bank_name', sql.NVarChar(100), bank_name)
+            .input('bank_code', sql.VarChar(20), bank_code)
+            .input('account_name', sql.NVarChar(100), account_name)
+            .input('account_number', sql.VarChar(50), account_number)
+            .input('currency', sql.VarChar(10), currency)
+            .input('logo_url', sql.NVarChar(sql.MAX), logo_url || '') // รองรับ Base64 ยาวๆ
+            .input('is_active', sql.Bit, is_active)
+            .query(`
+                INSERT INTO Banks (bank_name, bank_code, account_name, account_number, currency, logo_url, is_active, created_at)
+                VALUES (@bank_name, @bank_code, @account_name, @account_number, @currency, @logo_url, @is_active, GETDATE())
+            `);
+            
+        res.json({ success: true, message: 'เพิ่มบัญชีธนาคารสำเร็จ' });
+    } catch (err) {
+        console.error("Error creating bank:", err);
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
+
+// 3. API: อัปเดต/แก้ไขบัญชีธนาคารเดิม (PUT)
+app.put('/api/admin/banks/:id', async (req, res) => {
+    const { id } = req.params;
+    const { bank_name, bank_code, account_name, account_number, currency, logo_url, is_active } = req.body;
+    
+    try {
+        const pool = await sql.connect(dbConfig);
+        await pool.request()
+            .input('id', sql.Int, id)
+            .input('bank_name', sql.NVarChar(100), bank_name)
+            .input('bank_code', sql.VarChar(20), bank_code)
+            .input('account_name', sql.NVarChar(100), account_name)
+            .input('account_number', sql.VarChar(50), account_number)
+            .input('currency', sql.VarChar(10), currency)
+            .input('logo_url', sql.NVarChar(sql.MAX), logo_url || '') 
+            .input('is_active', sql.Bit, is_active)
+            .query(`
+                UPDATE Banks 
+                SET bank_name = @bank_name, 
+                    bank_code = @bank_code, 
+                    account_name = @account_name, 
+                    account_number = @account_number, 
+                    currency = @currency, 
+                    logo_url = @logo_url, 
+                    is_active = @is_active
+                WHERE bank_id = @id
+            `);
+            
+        res.json({ success: true, message: 'อัปเดตบัญชีธนาคารสำเร็จ' });
+    } catch (err) {
+        console.error("Error updating bank:", err);
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
+
+
 app.listen(port, () => {
     console.log(`🚀 Server เปิดทำงานแล้วที่พอร์ต ${port}`);
 });
