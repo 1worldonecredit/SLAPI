@@ -5451,6 +5451,51 @@ app.put('/api/admin/banks/:id', async (req, res) => {
 });
 
 
+// ==========================================
+// 🏆 API: ดึงประวัติการออกเลขยี่กีตามวันที่
+// ==========================================
+app.get('/api/admin/yeeki/history', async (req, res) => {
+    const { date } = req.query; // รับค่าวันที่ YYYY-MM-DD
+    try {
+        const pool = await sql.connect(dbConfig);
+        
+        let query = `
+            SELECT 
+                round_id, 
+                round_number, 
+                draw_time, 
+                result_8_super, 
+                result_4_top, 
+                result_3_top, 
+                result_2_bottom, 
+                status 
+            FROM Yeeki_Rounds
+            WHERE status = 'Completed' -- ดึงเฉพาะรอบที่ออกผลแล้ว
+        `;
+
+        // ถ้ามีการส่งวันที่มา ให้กรองเฉพาะวันนั้น (จัดการ Timezone)
+        if (date) {
+            query += ` AND CAST(DATEADD(hour, 7, draw_time) AS DATE) = @targetDate `;
+        }
+        
+        // เรียงจากรอบล่าสุดลงไป (เช่น รอบ 88 อยู่บนสุด)
+        query += ` ORDER BY round_number DESC`;
+
+        const request = pool.request();
+        if (date) {
+            request.input('targetDate', sql.Date, date);
+        }
+
+        const result = await request.query(query);
+
+        res.json({ success: true, data: result.recordset });
+
+    } catch (err) {
+        console.error("Error fetching yeeki history:", err);
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
+
 app.listen(port, () => {
     console.log(`🚀 Server เปิดทำงานแล้วที่พอร์ต ${port}`);
 });
