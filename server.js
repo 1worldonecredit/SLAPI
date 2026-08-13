@@ -3374,6 +3374,7 @@ app.post('/api/admin/yeeki/suggest-draw', async (req, res) => {
         res.status(500).json({ success: false, message: err.message });
     }
 });
+
 // ==========================================
 // 3. API: ประกาศผลและตรวจบิลจริง (Execute Draw) - Manual โดย Admin
 // ==========================================
@@ -3393,10 +3394,11 @@ app.post('/api/admin/execute-yeeki-draw', async (req, res) => {
             const top_3 = super_number.slice(-3);
             const top_2 = super_number.slice(-2);
 
-            // 🌟 บันทึกเฉพาะคอลัมน์ที่มีอยู่ใน Database ของคุณพี่จริงๆ
+            // 🌟 แก้ไข: บันทึก result_6_top ลง Database ด้วย
             await transaction.request()
                 .input('roundId', sql.Int, round_id)
                 .input('res8', sql.VarChar(8), super_number)
+                .input('res6', sql.VarChar(6), top_6) // 👈 เพิ่มตรงนี้
                 .input('res4', sql.VarChar(4), top_4) 
                 .input('res3', sql.VarChar(3), top_3)
                 .input('res2bot', sql.VarChar(2), bottom_2)
@@ -3404,6 +3406,7 @@ app.post('/api/admin/execute-yeeki-draw', async (req, res) => {
                     UPDATE Yeeki_Rounds 
                     SET 
                         result_8_super = @res8, 
+                        result_6_top = @res6, /* 👈 เพิ่มตรงนี้ */
                         result_4_top = @res4, 
                         result_3_top = @res3, 
                         result_2_bottom = @res2bot, 
@@ -3469,7 +3472,6 @@ app.post('/api/admin/execute-yeeki-draw', async (req, res) => {
     } catch (err) { res.status(500).json({ success: false, message: `Database Error: ${err.message}` }); }
 });
 
-
 // ==========================================
 // 🤖 หุ่นยนต์ออกรางวัลอัตโนมัติ 24 ชม. (Auto-Draw Worker)
 // ==========================================
@@ -3493,7 +3495,6 @@ setInterval(async () => {
         for (let round of pendingRounds.recordset) {
             console.log(`🤖 [AUTO] หุ่นยนต์กำลังออกรางวัลรอบที่ ${round.round_number} อัตโนมัติ...`);
             
-            // 🌟 แก้ไข: ดึง item_id มาด้วย เพื่อป้องกันบั๊กอัปเดตบิลผิดตัว
             const ordersReq = await pool.request()
                 .input('rid', sql.Int, round.round_id)
                 .query(`
@@ -3530,9 +3531,10 @@ setInterval(async () => {
                         
                         switch (item.lottery_type) {
                             case '8 ตัว (Super)': if (num === s8) isWin = true; break;
+                            case '6 ตัว': if (num === s8.slice(-6)) isWin = true; break; // 👈 แก้ไข: เพิ่มเช็ค 6 ตัวให้บอทจำลอง
                             case '4 ตัวท้าย': if (num === t4) isWin = true; break;
                             case '3 ตัวบน': if (num === t3) isWin = true; break;
-                            case '3 ตัวโต๊ด': if (num.split('').sort().join('') === sT3) isWin = true; break; // แก้บั๊ก 3 ตัวโต๊ด
+                            case '3 ตัวโต๊ด': if (num.split('').sort().join('') === sT3) isWin = true; break; 
                             case '2 ตัวบน': if (num === t2) isWin = true; break;
                             case '2 ตัวล่าง': if (num === b2) isWin = true; break;
                             case 'วิ่งบน': if (t3.includes(num)) isWin = true; break;
@@ -3549,15 +3551,30 @@ setInterval(async () => {
             const transaction = new sql.Transaction(pool);
             await transaction.begin();
             try {
-                let top3 = top_number.slice(-3); let top2 = top_number.slice(-2);
+                // 🌟 ให้หุ่นยนต์หั่นเลข 6 ตัวออกมาเตรียมไว้ด้วย
+                let top6 = super_number.slice(-6);
+                let top3 = top_number.slice(-3); 
+                let top2 = top_number.slice(-2);
 
-                await transaction.request().input('rid', sql.Int, round.round_id).input('s8', sql.VarChar, super_number).input('t4', sql.VarChar, top_number).input('t3', sql.VarChar, top3).input('b2', sql.VarChar, bottom_number)
-                    .query(`UPDATE Yeeki_Rounds SET result_8_super = @s8, result_4_top = @t4, result_3_top = @t3, result_2_bottom = @b2, status = 'Completed' WHERE round_id = @rid`);
+                // 🌟 แก้ไข: สั่งบอทให้บันทึก result_6_top ลง Database ด้วย
+                await transaction.request()
+                    .input('rid', sql.Int, round.round_id)
+                    .input('s8', sql.VarChar, super_number)
+                    .input('t6', sql.VarChar, top6) // 👈 เพิ่ม input
+                    .input('t4', sql.VarChar, top_number)
+                    .input('t3', sql.VarChar, top3)
+                    .input('b2', sql.VarChar, bottom_number)
+                    .query(`
+                        UPDATE Yeeki_Rounds 
+                        SET result_8_super = @s8, result_6_top = @t6, result_4_top = @t4, result_3_top = @t3, result_2_bottom = @b2, status = 'Completed' 
+                        WHERE round_id = @rid
+                    `);
 
                 for (let item of items) {
                     let isWin = false; let num = item.selected_number;
                     switch (item.lottery_type) {
                         case '8 ตัว (Super)': if (num === super_number) isWin = true; break;
+                        case '6 ตัว': if (num === top6) isWin = true; break; // 👈 แก้ไข: เพิ่มเงื่อนไขแจกเงินรางวัล 6 ตัว
                         case '4 ตัวท้าย': if (num === top_number) isWin = true; break;
                         case '3 ตัวบน': if (num === top3) isWin = true; break;
                         case '3 ตัวโต๊ด': if (num.split('').sort().join('') === top3.split('').sort().join('')) isWin = true; break;
@@ -3570,14 +3587,12 @@ setInterval(async () => {
                     if (isWin) {
                         let prize = item.price * (rates[item.lottery_type] || 0);
                         
-                        // 🌟 แก้ไขให้ใช้ item_id ป้องกันการอัปเดตผิดบิล
                         await transaction.request().input('itemId', sql.Int, item.item_id).input('prize', sql.Decimal(18,2), prize)
                             .query(`UPDATE Yeeki_Order_Items SET status = 'Win', prize_amount = @prize WHERE item_id = @itemId`);
                         
                         await transaction.request().input('uid', sql.Int, item.user_id).input('prizeAmount', sql.Decimal(18,2), prize)
                             .query(`UPDATE Users SET wallet_balance = wallet_balance + @prizeAmount WHERE user_id = @uid`);
                             
-                        // 🌟🌟🌟 ไฮไลท์สำคัญ: เพิ่มระบบบันทึกประวัติให้หุ่นยนต์ 🌟🌟🌟
                         await transaction.request()
                             .input('uid', sql.Int, item.user_id)
                             .input('prizeAmount', sql.Decimal(18,2), prize)
@@ -3602,6 +3617,8 @@ setInterval(async () => {
         console.error("Auto draw interval error:", err);
     }
 }, 30000);
+
+
 // ==========================================
 // 🌟 API 2: ค้นหาคนซื้อจากเลข (ด้านล่างสุด)
 // ==========================================
