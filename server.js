@@ -3378,7 +3378,8 @@ app.post('/api/admin/yeeki/suggest-draw', async (req, res) => {
 // 3. API: ประกาศผลและตรวจบิลจริง (Execute Draw) - Manual โดย Admin
 // ==========================================
 app.post('/api/admin/execute-yeeki-draw', async (req, res) => {
-    const { round_id, super_number, top_6, bottom_2 } = req.body;
+    // 🌟 รับมาแค่ 8 ตัว (Super) กับ 2 ตัวล่าง (ระบบหลังบ้านจะหั่นเลขอื่นๆ ออกมาเอง)
+    const { round_id, super_number, bottom_2 } = req.body; 
     let pool;
     try {
         pool = await sql.connect(dbConfig);
@@ -3386,10 +3387,13 @@ app.post('/api/admin/execute-yeeki-draw', async (req, res) => {
         await transaction.begin();
 
         try {
-            const top_4 = top_6.slice(-4);
-            const top_3 = top_6.slice(-3);
-            const top_2 = top_6.slice(-2);
+            // 🌟 ให้ระบบหั่นเลขเอง เพื่อให้มั่นใจว่าเลขทุกตัว (6, 4, 3, 2 บน) สัมพันธ์กับเลข 8 ตัวแน่นอน
+            const top_6 = super_number.slice(-6);
+            const top_4 = super_number.slice(-4);
+            const top_3 = super_number.slice(-3);
+            const top_2 = super_number.slice(-2);
 
+            // 🌟 บันทึกเฉพาะคอลัมน์ที่มีอยู่ใน Database ของคุณพี่จริงๆ
             await transaction.request()
                 .input('roundId', sql.Int, round_id)
                 .input('res8', sql.VarChar(8), super_number)
@@ -3398,7 +3402,12 @@ app.post('/api/admin/execute-yeeki-draw', async (req, res) => {
                 .input('res2bot', sql.VarChar(2), bottom_2)
                 .query(`
                     UPDATE Yeeki_Rounds 
-                    SET result_8_super = @res8, result_4_top = @res4, result_3_top = @res3, result_2_bottom = @res2bot, status = 'Completed' 
+                    SET 
+                        result_8_super = @res8, 
+                        result_4_top = @res4, 
+                        result_3_top = @res3, 
+                        result_2_bottom = @res2bot, 
+                        status = 'Completed' 
                     WHERE round_id = @roundId
                 `);
 
@@ -3419,8 +3428,9 @@ app.post('/api/admin/execute-yeeki-draw', async (req, res) => {
                 const type = item.lottery_type;
                 const num = item.selected_number;
 
+                // 🌟 ตรวจสอบการถูกรางวัล โดยอ้างอิงจากเลขที่หั่นมาจาก 8 ตัว
                 if (type === '8 ตัว (Super)' && num === super_number) isWin = true;
-                else if (type === '6 ตัว' && num === top_6) isWin = true;
+                else if (type === '6 ตัว' && num === top_6) isWin = true; 
                 else if (type === '4 ตัวท้าย' && num === top_4) isWin = true;
                 else if (type === '3 ตัวบน' && num === top_3) isWin = true;
                 else if (type === '3 ตัวโต๊ด') {
