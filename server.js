@@ -5469,27 +5469,25 @@ app.get('/api/admin/yeeki/history', async (req, res) => {
     try {
         const pool = await sql.connect(dbConfig);
         
- let query = `
+        let query = `
             SELECT 
                 round_id, 
                 round_number, 
                 draw_time, 
-                result_8_super,  
-                /* ลบ result_6_top ออกไปก่อน เพราะฐานข้อมูลยังไม่มีคอลัมน์นี้ */
+                result_8_super, 
                 result_4_top, 
                 result_3_top, 
                 result_2_bottom, 
                 status 
             FROM Yeeki_Rounds
-            WHERE status = 'Completed'
+            WHERE status = 'Completed' 
         `;
 
-        // ถ้ามีการส่งวันที่มา ให้กรองเฉพาะวันนั้น (จัดการ Timezone)
         if (date) {
-            query += ` AND CAST(DATEADD(hour, 7, draw_time) AS DATE) = @targetDate `;
+            // 🌟 แก้ไขตรงนี้: ลบ DATEADD ออก เพราะเวลาใน DB เป็นเวลาไทยอยู่แล้ว
+            query += ` AND CAST(draw_time AS DATE) = @targetDate `;
         }
         
-        // เรียงจากรอบล่าสุดลงไป (เช่น รอบ 88 อยู่บนสุด)
         query += ` ORDER BY round_number DESC`;
 
         const request = pool.request();
