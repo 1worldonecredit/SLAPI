@@ -2842,9 +2842,8 @@ app.get('/api/admin/daily-sales', async (req, res) => {
 });
 
 //==============================
-
 // ==========================================
-// 🌟 API 1: ดึงการตั้งค่าระบบ (รวมเวลา 3 อย่าง)
+// ⚙️ API: ดึงข้อมูลการตั้งค่าระบบ (GET)
 // ==========================================
 app.get('/api/admin/settings', async (req, res) => {
     try {
@@ -2854,33 +2853,42 @@ app.get('/api/admin/settings', async (req, res) => {
                 CONVERT(varchar(5), close_time, 108) as close_time,
                 CONVERT(varchar(5), open_time, 108) as open_time,
                 CONVERT(varchar(5), draw_time, 108) as draw_time,
-                is_sales_open 
+                is_sales_open,
+                is_auto_draw,
+                auto_draw_percent
             FROM System_Settings 
             WHERE id = 1
         `);
-        res.json({ success: true, data: result.recordset[0] });
-    } catch (err) { 
-        console.error(err);
-        res.status(500).json({ success: false }); 
+
+        if (result.recordset.length > 0) {
+            res.json({ success: true, data: result.recordset[0] });
+        } else {
+            res.json({ success: false, message: "ไม่พบการตั้งค่าในระบบ" });
+        }
+    } catch (err) {
+        console.error("Error fetching settings:", err);
+        res.status(500).json({ success: false, message: err.message });
     }
 });
+
 // ==========================================
-// 🌟 API: บันทึกการตั้งค่าระบบและเวลา 3 อย่าง (แก้ไขให้เซฟลง Database 100%)
+// 🌟 API: บันทึกการตั้งค่าระบบและเวลา (POST)
 // ==========================================
 app.post('/api/admin/settings', async (req, res) => {
-    const { close_time, open_time, draw_time, is_sales_open } = req.body;
+    const { close_time, open_time, draw_time, is_sales_open, is_auto_draw, auto_draw_percent } = req.body;
     
-    // พิมพ์ค่าที่รับมาออกหน้าจอดำๆ (Terminal) จะได้รู้ว่าส่งมาถูกไหม
+    // พิมพ์ค่าที่รับมาออกหน้าจอดำๆ เพื่อเช็คข้อมูล
     console.log("📥 ข้อมูลที่หน้าเว็บส่งมาบันทึก:", req.body); 
 
     try {
         const pool = await sql.connect(dbConfig);
         await pool.request()
-            // 🌟 แก้ตรงนี้: เปลี่ยนจาก sql.Time เป็น sql.VarChar เพื่อตัดปัญหา Error
             .input('closeTime', sql.VarChar, close_time) 
             .input('openTime', sql.VarChar, open_time)
             .input('drawTime', sql.VarChar, draw_time)
-            .input('isOpen', sql.Bit, is_sales_open)
+            .input('isOpen', sql.Bit, is_sales_open ? 1 : 0)
+            .input('isAuto', sql.Bit, is_auto_draw ? 1 : 0)
+            .input('percent', sql.Int, parseInt(auto_draw_percent) || 50) 
             .query(`
                 UPDATE System_Settings 
                 SET 
@@ -2888,14 +2896,16 @@ app.post('/api/admin/settings', async (req, res) => {
                     open_time = CAST(@openTime AS TIME), 
                     draw_time = CAST(@drawTime AS TIME), 
                     is_sales_open = @isOpen,
+                    is_auto_draw = @isAuto,
+                    auto_draw_percent = @percent,
                     last_updated = GETDATE()
                 WHERE id = 1
             `);
             
-        console.log("✅ บันทึกเวลาลงฐานข้อมูลสำเร็จ!");
+        console.log("✅ บันทึกเวลา ระบบออโต้ และ % สกอร์ ลงฐานข้อมูลสำเร็จ!");
         res.json({ success: true, message: 'บันทึกสำเร็จ' });
     } catch (err) { 
-        console.error("❌ Error ตอนบันทึก:", err);
+        console.error("❌ Error ตอนบันทึก:", err.message);
         res.status(500).json({ success: false, message: 'บันทึกไม่สำเร็จ' }); 
     }
 });
