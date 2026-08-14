@@ -3171,20 +3171,20 @@ app.post('/api/admin/analyze-draw', async (req, res) => {
 // ==========================================
 // 🧠 API: ระบบ AI ค้นหาเลขหวยเวียดนามจากโพยจริง (Risk Management)
 // ==========================================
-app.post('/api/admin/lottery/suggest-draw', async (req, res) => {
+app.post('/api/admin/suggest-draw', async (req, res) => {
     const { targetPercent } = req.body;
     try {
         const pool = await sql.connect(dbConfig);
         
-        // 1. ดึงข้อมูลเรทแลกเปลี่ยน และ อัตราจ่าย
+        // 1. ดึงเรทแลกเปลี่ยน และอัตราจ่าย
         const exReq = await pool.request().query(`SELECT rate FROM ExchangeRates WHERE currency_pair = 'THB_LAK'`);
-        const lakRate = exReq.recordset[0]?.rate || 620;
+        const lakRate = exReq.recordset.length > 0 ? exReq.recordset[0].rate : 620;
 
         const ratesReq = await pool.request().query(`SELECT lottery_type, multiplier FROM Lottery_Prize_Rates`);
         const prizeRates = {};
         ratesReq.recordset.forEach(r => prizeRates[r.lottery_type] = r.multiplier);
 
-        // 2. ดึงโพยจริงทั้งหมดที่สถานะ 'รอผลตรวจ'
+        // 2. ดึงโพยจริงของงวดนี้
         const ordersReq = await pool.request().query(`
             SELECT i.lottery_type, i.selected_number, i.price, o.currency_code
             FROM Lottery_Order_Items i
@@ -3194,77 +3194,84 @@ app.post('/api/admin/lottery/suggest-draw', async (req, res) => {
         const items = ordersReq.recordset;
 
         let totalSalesTHB = 0;
+        let boughtNumbers = []; 
         items.forEach(item => {
             let thbPrice = (item.currency_code === 'LAK' || item.currency_code === '₭') ? (item.price / lakRate) : item.price;
             totalSalesTHB += thbPrice;
+            boughtNumbers.push(item);
         });
 
-        // 3. กำหนดเพดานการจ่ายเงิน (Target Payout)
         const targetPayoutTHB = totalSalesTHB * (targetPercent / 100);
-        
         const pad = (num, len) => num.toString().padStart(len, '0');
-        let bestSet = { top_6: pad(Math.floor(Math.random() * 1000000), 6), bottom_2: pad(Math.floor(Math.random() * 100), 2) };
+        
+        let bestNumber = pad(Math.floor(Math.random() * 1000000), 6);
         let maxFoundPayout = -1;
         let minFoundPayout = Infinity;
+        let bestAnalysis = [];
 
-        // 4. AI Engine: จำลองผล 5,000 รูปแบบ เพื่อหาเลขที่ตรงเงื่อนไขที่สุด
+        // 3. AI สุ่มจำลองหาเลขที่ดีที่สุด 5,000 รูปแบบ
         for (let i = 0; i < 5000; i++) {
-            // สร้าง Candidate จากการสุ่มผสมกับการหยิบเลขที่มีคนซื้อ
             let sim6 = pad(Math.floor(Math.random() * 1000000), 6);
-            let simb2 = pad(Math.floor(Math.random() * 100), 2);
             
-            // เพื่อให้โอกาสถูกรางวัลมีสูงขึ้น (ถ้าเป้า > 0%) ให้ดึงเลขที่ลูกค้าซื้อมาเป็นแกนนำ
-            if (targetPercent > 0 && items.length > 0 && Math.random() > 0.3) {
-                let randomItem = items[Math.floor(Math.random() * items.length)];
-                if (randomItem.lottery_type === '3 ตัวบน') sim6 = pad(Math.floor(Math.random() * 1000), 3) + randomItem.selected_number;
-                else if (randomItem.lottery_type === '2 ตัวบน') sim6 = pad(Math.floor(Math.random() * 10000), 4) + randomItem.selected_number;
-                else if (randomItem.lottery_type === '2 ตัวล่าง') simb2 = randomItem.selected_number;
+            // ถ้าเป้า > 0% พยายามหยิบเลขที่ลูกค้าซื้อมาตั้งเป็นผลรางวัล
+            if (targetPercent > 0 && boughtNumbers.length > 0 && Math.random() > 0.4) {
+                let rItem = boughtNumbers[Math.floor(Math.random() * boughtNumbers.length)];
+                if (rItem.lottery_type === '3') sim6 = pad(Math.floor(Math.random() * 1000), 3) + rItem.selected_number;
+                else if (rItem.lottery_type === '2' || rItem.lottery_type === '2 ล่าง') sim6 = pad(Math.floor(Math.random() * 10000), 4) + rItem.selected_number;
             }
 
-            let sim4 = sim6.slice(-4);
-            let sim3 = sim6.slice(-3);
-            let sim2 = sim6.slice(-2);
+            let sim4 = sim6.slice(-4), sim3 = sim6.slice(-3), sim2 = sim6.slice(-2);
             let currentPayoutTHB = 0;
+            let tempAnalysis = { '6': { count: 0, payout: 0 }, '4': { count: 0, payout: 0 }, '3': { count: 0, payout: 0 }, '2': { count: 0, payout: 0 } };
 
-            // ตรวจโพยจำลอง
             for (let item of items) {
                 let thbPrice = (item.currency_code === 'LAK' || item.currency_code === '₭') ? (item.price / lakRate) : item.price;
                 let isWin = false;
                 
-                // เช็คเงื่อนไขหวยเวียดนามพื้นฐาน (ปรับแก้ Type ตามฐานข้อมูลของคุณพี่ได้เลย)
                 if (item.lottery_type === '6' && item.selected_number === sim6) isWin = true;
                 else if (item.lottery_type === '4' && item.selected_number === sim4) isWin = true;
                 else if (item.lottery_type === '3' && item.selected_number === sim3) isWin = true;
-                else if (item.lottery_type === '2' && item.selected_number === sim2) isWin = true;
-                else if (item.lottery_type === '2 ล่าง' && item.selected_number === simb2) isWin = true;
-                // เพิ่มเงื่อนไข โต๊ด, วิ่ง ตามต้องการได้ที่นี่
+                else if ((item.lottery_type === '2' || item.lottery_type === '2 ล่าง') && item.selected_number === sim2) {
+                    isWin = true; 
+                    item.lottery_type = '2'; // รวบ 2 บนล่างเพื่อวิเคราะห์
+                }
 
-                if (isWin) currentPayoutTHB += (thbPrice * (prizeRates[item.lottery_type] || 0));
+                if (isWin) {
+                    let prize = thbPrice * (prizeRates[item.lottery_type] || 0);
+                    currentPayoutTHB += prize;
+                    if (tempAnalysis[item.lottery_type]) {
+                        tempAnalysis[item.lottery_type].count += 1;
+                        tempAnalysis[item.lottery_type].payout += prize;
+                    }
+                }
             }
 
-            // 5. ตัดสินใจเลือกเลข
-            if (targetPercent === 0) {
-                if (currentPayoutTHB === 0) { bestSet = { top_6: sim6, bottom_2: simb2 }; break; } // เจอเลขที่ไม่มีคนถูกเลย จบการทำงาน
+            if (targetPercent == 0) {
+                if (currentPayoutTHB === 0) { bestNumber = sim6; bestAnalysis = tempAnalysis; break; }
             } else {
-                // ถ้ามีเป้า ให้หาตัวที่ยอดจ่ายใกล้เคียงเป้าที่สุด แต่ "ไม่เกิน" เป้า
                 if (currentPayoutTHB <= targetPayoutTHB && currentPayoutTHB > maxFoundPayout) {
                     maxFoundPayout = currentPayoutTHB;
-                    bestSet = { top_6: sim6, bottom_2: simb2 };
+                    bestNumber = sim6;
+                    bestAnalysis = tempAnalysis;
                 }
-                // กรณีฉุกเฉิน (หาตัวที่ไม่เกินเป้าไม่ได้เลย) เก็บตัวที่จ่ายน้อยสุดไว้ก่อน
-                if (currentPayoutTHB < minFoundPayout) {
-                    minFoundPayout = currentPayoutTHB;
-                }
+                if (currentPayoutTHB < minFoundPayout) minFoundPayout = currentPayoutTHB;
             }
         }
 
-        // กรณีฉุกเฉินจริงๆ ถ้าเป้า > 0 แต่หาเลขไม่เกินเป้าไม่ได้ ให้ใช้เลขที่เสียน้อยที่สุด
-        if (targetPercent > 0 && maxFoundPayout === -1) {
-            // (ลอจิกนี้จะป้องกันระบบขาดทุนเกินเป้า 100%)
-            // ใช้ fallback ที่หาได้ หรือ สุ่มใหม่
-        }
+        // แปลงรูปแบบ Analysis ให้ตรงกับที่หน้าบ้านรอรับ (Array)
+        const formatAnalysis = Object.keys(bestAnalysis).map(key => ({
+            lottery_type: key,
+            winner_count: bestAnalysis[key].count,
+            total_payout: bestAnalysis[key].payout
+        }));
 
-        res.json({ success: true, top_6: bestSet.top_6, bottom_2: bestSet.bottom_2, expectedPayoutTHB: maxFoundPayout });
+        res.json({ 
+            success: true, 
+            suggestedNumber: bestNumber, 
+            totalSales: totalSalesTHB, 
+            analysis: formatAnalysis 
+        });
+
     } catch (err) {
         console.error(err);
         res.status(500).json({ success: false, message: err.message });
@@ -3384,33 +3391,46 @@ app.post('/api/admin/lottery/execute-draw', async (req, res) => {
 // ==========================================
 // 🤖 Worker: หุ่นยนต์ออกรางวัลอัตโนมัติ (หวยเวียดนาม)
 // ==========================================
+// (หาก Server ของคุณพี่ใช้ Node เวอร์ชันเก่ากว่า 18 ให้เอาคอมเมนต์บรรทัดล่างนี้ออกครับ)
+// const fetch = require('node-fetch'); 
+
 setInterval(async () => {
     try {
-        const pool = await sql.connect(dbConfig);
-        
-        // 1. ดึงการตั้งค่า
-        const settingsReq = await pool.request().query("SELECT * FROM App_Settings WHERE id = 1"); // สมมติว่าเก็บการตั้งค่าไว้ ID 1
-        if (settingsReq.recordset.length === 0) return;
-        const settings = settingsReq.recordset[0];
-        
-        // ถ้าปิดระบบออโต้ไว้ ให้ข้ามไป
-        if (!settings.is_auto_draw) return;
+        // 🌟 1. ดึงเวลาปัจจุบัน บังคับโซนเวลา "ประเทศไทย (Asia/Bangkok)" เสมอ
+        const options = { timeZone: 'Asia/Bangkok', hour: '2-digit', minute: '2-digit', hour12: false };
+        const nowBKK = new Intl.DateTimeFormat('en-GB', options).format(new Date()); 
+        // จะได้ผลลัพธ์เป็น "HH:mm" เช่น "10:00"
 
-        // เช็คว่าถึงเวลาออกรางวัลหรือยัง (เทียบชั่วโมง:นาที)
-        const now = new Date();
-        const currentTime = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`;
-        const drawTime = settings.draw_time.substring(0, 5); // เช่น "17:30"
+        // 🌟 2. ใช้ URL จริงของเซิร์ฟเวอร์เพื่อป้องกันปัญหา Localhost
+        const BASE_URL = 'https://api.salapi.company'; 
 
-        if (currentTime === drawTime) {
-            // ป้องกันการออกซ้ำ เช็คว่าวันนี้ออกผลไปหรือยัง
-            const checkDraw = await pool.request().query(`SELECT id FROM Lottery_Draw_Results WHERE draw_date = CAST(GETDATE() AS DATE)`);
+        // 🌟 3. ดึงค่าการตั้งค่าจาก API 
+        const settingsRes = await fetch(`${BASE_URL}/api/admin/settings`);
+        if (!settingsRes.ok) return;
+        const settingsData = await settingsRes.json();
+        const settings = settingsData.data;
+
+        // ตรวจสอบว่าเปิดระบบออโต้ไว้หรือไม่
+        if (!settings || !settings.is_auto_draw) return; 
+
+        const drawTime = settings.draw_time.substring(0, 5); // หั่นให้เหลือแค่ HH:mm
+
+        // 🌟 4. ตรวจสอบเวลาให้ตรงกัน (ระดับนาที)
+        if (nowBKK === drawTime) {
+            const pool = await sql.connect(dbConfig);
+            
+            // ป้องกันหุ่นยนต์ทำงานซ้ำรัวๆ เช็คว่าวันนี้มีข้อมูลผลรางวัลหรือยัง
+            const checkDraw = await pool.request().query(`
+                SELECT TOP 1 id FROM Lottery_Draw_Results 
+                WHERE draw_date = CAST(GETDATE() AS DATE)
+            `);
+            
             if (checkDraw.recordset.length > 0) return; // วันนี้ออกไปแล้ว ข้ามเลย
 
-            console.log(`🤖 [AUTO] ถึงเวลา ${drawTime} ระบบกำลังคำนวณเลขหวยเวียดนามด้วยเป้าหมาย ${settings.auto_draw_percent}%...`);
+            console.log(`🤖 [AUTO] เวลา ${nowBKK} น. ตรงกับเวลาตั้งค่า หุ่นยนต์เริ่มทำงาน!`);
 
-            // 2. เรียกใช้ AI ภายในเครื่องเพื่อหาเลข
-            const fetch = require('node-fetch'); // ตรวจสอบว่าในไฟล์มี import นี้หรือยัง
-            const suggestRes = await fetch(`http://localhost:${process.env.PORT || 5000}/api/admin/lottery/suggest-draw`, {
+            // 🌟 5. เรียก AI ให้ค้นหาและแนะนำเลขตาม % เป้าหมาย
+            const suggestRes = await fetch(`${BASE_URL}/api/admin/suggest-draw`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ targetPercent: settings.auto_draw_percent })
@@ -3418,23 +3438,27 @@ setInterval(async () => {
             const suggestData = await suggestRes.json();
 
             if (suggestData.success) {
-                console.log(`🤖 [AUTO] ได้เลข 6 ตัว: ${suggestData.top_6}, 2 ตัวล่าง: ${suggestData.bottom_2} กำลังทำการจ่ายเงิน...`);
+                console.log(`🤖 [AUTO] AI แนะนำเลข: ${suggestData.suggestedNumber} กำลังนำไปออกผลและโอนเงิน...`);
                 
-                // 3. สั่ง Execute จ่ายเงินทันที
-                await fetch(`http://localhost:${process.env.PORT || 5000}/api/admin/lottery/execute-draw`, {
+                // 🌟 6. ยืนยันผลและจ่ายเงินให้ลูกค้า
+                const executeRes = await fetch(`${BASE_URL}/api/admin/execute-draw`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ top_6: suggestData.top_6, bottom_2: suggestData.bottom_2 })
+                    body: JSON.stringify({ number6: suggestData.suggestedNumber })
                 });
-
-                console.log('✅ [AUTO] ออกรางวัลอัตโนมัติประจำวันสำเร็จ!');
+                
+                const executeData = await executeRes.json();
+                if (executeData.success) {
+                    console.log('✅ [AUTO] ระบบออกผลและจ่ายเงินให้ทุกคนเรียบร้อยแล้ว!');
+                } else {
+                    console.error('❌ [AUTO] เกิดข้อผิดพลาดตอนจ่ายเงิน:', executeData.message);
+                }
             }
         }
     } catch (err) {
-        console.error("Auto draw interval error:", err);
+        console.error("🤖 [AUTO] Worker Error:", err.message);
     }
-}, 60000); // เช็คทุกๆ 1 นาที (60000 ms)
-
+}, 30000); // ตรวจสอบทุกๆ 30 วินาที
 
 
 
