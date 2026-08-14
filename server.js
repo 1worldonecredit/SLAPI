@@ -3401,21 +3401,25 @@ app.post('/api/admin/execute-draw', async (req, res) => {
     }
 });
 
+// 🌟 นำตัวแปรนี้ไปวางไว้บนสุดของไฟล์ server.js (หรือวางไว้เหนือ setInterval) 
+// เพื่อให้หุ่นยนต์จำว่าวันนี้ออกผลไปแล้วหรือยัง
+let lastAutoDrawDate = ''; 
+
 // ==========================================
-// 🤖 3. Worker: หุ่นยนต์ออกรางวัลอัตโนมัติ (เพิ่มเครื่องดักฟังเวลา)
+// 🤖 3. Worker: หุ่นยนต์ออกรางวัลอัตโนมัติ (แก้บั๊ก Database)
 // ==========================================
 setInterval(async () => {
     try {
         const options = { timeZone: 'Asia/Bangkok', hour: '2-digit', minute: '2-digit', hour12: false };
         const nowBKK = new Intl.DateTimeFormat('en-GB', options).format(new Date()); 
         
+        // ดึงวันที่ปัจจุบัน (YYYY-MM-DD) โซนไทย
+        const todayDate = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Bangkok' }).format(new Date());
+
         const API_URL = 'https://api.salapi.company'; 
 
         const settingsRes = await fetch(`${API_URL}/api/admin/settings`);
-        if (!settingsRes.ok) {
-            console.error(`❌ [AUTO ERROR] เชื่อมต่อ API ไม่สำเร็จ สถานะ: ${settingsRes.status}`);
-            return;
-        }
+        if (!settingsRes.ok) return;
         
         const settingsData = await settingsRes.json();
         const settings = settingsData.data;
@@ -3424,21 +3428,14 @@ setInterval(async () => {
 
         const drawTime = settings.draw_time ? settings.draw_time.substring(0, 5) : ''; 
 
-        // 🌟 ติดเครื่องดักฟัง: ให้หุ่นยนต์รายงานตัวทุก 30 วินาที จะได้รู้ว่ามันเห็นเวลาตรงกันไหม!
-        console.log(`⏱️ [AUTO TICK] นาฬิกาหุ่นยนต์: ${nowBKK} น. | เวลาตั้งออกผล: ${drawTime} น.`);
+        console.log(`⏱️ [AUTO TICK] นาฬิกา: ${nowBKK} | เวลาออกผล: ${drawTime} | ล่าสุด: ${lastAutoDrawDate || 'ยังไม่มี'}`);
 
-        if (nowBKK === drawTime) {
-            const pool = await sql.connect(dbConfig);
-            const checkDraw = await pool.request().query(`
-                SELECT TOP 1 id FROM Draw_Results 
-                WHERE draw_date = CAST(GETDATE() AS DATE)
-            `);
+        // 🌟 ถ้าเวลาตรงกันเป๊ะ และ วันนี้ยังไม่ได้ออกผล
+        if (nowBKK === drawTime && lastAutoDrawDate !== todayDate) {
             
-            if (checkDraw.recordset.length > 0) {
-                console.log(`⚠️ [AUTO] วันนี้ (${nowBKK}) มีผลรางวัลแล้ว หุ่นยนต์จึงข้ามการทำงาน`);
-                return; 
-            }
-
+            // ล็อกคอไว้ก่อนเลยว่าวันนี้กำลังจะออกผล (กันมันรันซ้ำ 2 รอบในนาทีเดียวกัน)
+            lastAutoDrawDate = todayDate;
+            
             console.log(`🤖 [AUTO] เวลา ${nowBKK} น. ตรงเป้าหมาย! เริ่มออกผลรางวัล...`);
 
             const suggestRes = await fetch(`${API_URL}/api/admin/suggest-draw`, {
@@ -3462,16 +3459,17 @@ setInterval(async () => {
                     console.log('✅ [AUTO] ออกผลและโอนเงินเข้า Wallet ลูกค้าเรียบร้อย!');
                 } else {
                     console.error('❌ [AUTO ERROR] แจกเงินไม่สำเร็จ:', executeData.message);
+                    lastAutoDrawDate = ''; // ปลดล็อกถ้าแจกเงินพลาด เผื่อให้รันใหม่
                 }
             } else {
                 console.error('❌ [AUTO ERROR] สุ่มเลขไม่สำเร็จ:', suggestData.message);
+                lastAutoDrawDate = ''; // ปลดล็อกถ้าสุ่มพลาด
             }
         }
     } catch (err) {
         console.error("❌ [AUTO CRITICAL ERROR]:", err.message);
     }
 }, 30000);
-
 
 
 // ==========================================
