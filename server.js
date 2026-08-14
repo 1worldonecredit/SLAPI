@@ -3021,7 +3021,7 @@ app.get('/api/lottery/status', async (req, res) => {
 });
 
 // ==========================================
-// 🌟 API: ดึงประวัติผลการออกรางวัลและรายชื่อคนถูกรางวัล ย้อนหลังตามวันที่
+// 🌟 API: ดึงประวัติผลการออกรางวัลและรายชื่อคนถูกรางวัล ย้อนหลังตามวันที่ (เพิ่มยอดขาย)
 // ==========================================
 app.get('/api/admin/draw-history', async (req, res) => {
     const { date } = req.query; // คาดหวัง Format: YYYY-MM-DD (ค.ศ.)
@@ -3037,19 +3037,46 @@ app.get('/api/admin/draw-history', async (req, res) => {
         const winnersRes = await pool.request()
             .input('dDate', sql.Date, date)
             .query(`
-                SELECT u.username, i.lottery_type, i.selected_number, i.price, i.prize_amount, o.currency_code
+                SELECT i.item_id as order_item_id, u.username, i.lottery_type, i.selected_number, i.price, i.prize_amount, o.currency_code
                 FROM Lottery_Order_Items i
                 JOIN Lottery_Orders o ON i.order_id = o.order_id
                 JOIN Users u ON o.user_id = u.user_id
                 WHERE o.draw_date = @dDate AND i.status = N'ถูกรางวัล'
             `);
 
+        // 3. 🌟 (เพิ่มใหม่) ดึงยอดขายรวมทั้งหมดของงวดนั้น แยกตามสกุลเงิน THB และ LAK
+        const salesRes = await pool.request()
+            .input('dDate', sql.Date, date)
+            .query(`
+                SELECT o.currency_code, SUM(i.price) as total_sales
+                FROM Lottery_Order_Items i
+                JOIN Lottery_Orders o ON i.order_id = o.order_id
+                WHERE o.draw_date = @dDate
+                GROUP BY o.currency_code
+            `);
+
+        let total_sales_thb = 0;
+        let total_sales_lak = 0;
+
+        // แยกตะกร้ายอดขายเงินบาท กับ เงินกีบ
+        salesRes.recordset.forEach(row => {
+            if (row.currency_code === 'THB') {
+                total_sales_thb += row.total_sales;
+            } else if (row.currency_code === 'LAK' || row.currency_code === '₭') {
+                total_sales_lak += row.total_sales;
+            }
+        });
+
+        // 4. ส่งแพ็คเกจข้อมูลกลับไปให้หน้าเว็บ
         res.json({ 
             success: true, 
             results: resultRes.recordset.length > 0 ? resultRes.recordset[0] : null,
-            winners: winnersRes.recordset 
+            winners: winnersRes.recordset,
+            total_sales_thb: total_sales_thb, // 🌟 ยอดขาย THB
+            total_sales_lak: total_sales_lak  // 🌟 ยอดขาย LAK
         });
     } catch (err) {
+        console.error("Error fetching draw history:", err);
         res.status(500).json({ success: false });
     }
 });
