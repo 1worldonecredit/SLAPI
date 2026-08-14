@@ -3402,19 +3402,17 @@ app.post('/api/admin/execute-draw', async (req, res) => {
 });
 
 // ==========================================
-// 🤖 3. Worker: หุ่นยนต์ออกรางวัลอัตโนมัติ (ใช้โดเมนจริง Railway แบบที่เจ้านายต้องการ)
+// 🤖 3. Worker: หุ่นยนต์ออกรางวัลอัตโนมัติ (เพิ่มเครื่องดักฟังเวลา)
 // ==========================================
 setInterval(async () => {
     try {
         const options = { timeZone: 'Asia/Bangkok', hour: '2-digit', minute: '2-digit', hour12: false };
         const nowBKK = new Intl.DateTimeFormat('en-GB', options).format(new Date()); 
         
-        // 🌟 ใช้โดเมนจริงของระบบบน Railway เลยครับ
         const API_URL = 'https://api.salapi.company'; 
 
         const settingsRes = await fetch(`${API_URL}/api/admin/settings`);
         if (!settingsRes.ok) {
-            // ถ้าดึงข้อมูลไม่ได้ จะพ่น Error สีแดงออก Railway Logs ทันที
             console.error(`❌ [AUTO ERROR] เชื่อมต่อ API ไม่สำเร็จ สถานะ: ${settingsRes.status}`);
             return;
         }
@@ -3426,6 +3424,9 @@ setInterval(async () => {
 
         const drawTime = settings.draw_time ? settings.draw_time.substring(0, 5) : ''; 
 
+        // 🌟 ติดเครื่องดักฟัง: ให้หุ่นยนต์รายงานตัวทุก 30 วินาที จะได้รู้ว่ามันเห็นเวลาตรงกันไหม!
+        console.log(`⏱️ [AUTO TICK] นาฬิกาหุ่นยนต์: ${nowBKK} น. | เวลาตั้งออกผล: ${drawTime} น.`);
+
         if (nowBKK === drawTime) {
             const pool = await sql.connect(dbConfig);
             const checkDraw = await pool.request().query(`
@@ -3433,9 +3434,12 @@ setInterval(async () => {
                 WHERE draw_date = CAST(GETDATE() AS DATE)
             `);
             
-            if (checkDraw.recordset.length > 0) return; // วันนี้ออกไปแล้ว ให้ข้าม
+            if (checkDraw.recordset.length > 0) {
+                console.log(`⚠️ [AUTO] วันนี้ (${nowBKK}) มีผลรางวัลแล้ว หุ่นยนต์จึงข้ามการทำงาน`);
+                return; 
+            }
 
-            console.log(`🤖 [AUTO] เวลา ${nowBKK} น. เริ่มทำงาน! เชื่อมต่อไปที่: ${API_URL}`);
+            console.log(`🤖 [AUTO] เวลา ${nowBKK} น. ตรงเป้าหมาย! เริ่มออกผลรางวัล...`);
 
             const suggestRes = await fetch(`${API_URL}/api/admin/suggest-draw`, {
                 method: 'POST',
@@ -3445,7 +3449,7 @@ setInterval(async () => {
             const suggestData = await suggestRes.json();
 
             if (suggestData.success) {
-                console.log(`🤖 [AUTO] AI แนะนำเลข: ${suggestData.suggestedNumber} กำลังออกผลและโอนเงิน...`);
+                console.log(`🤖 [AUTO] AI แนะนำเลข: ${suggestData.suggestedNumber} กำลังบันทึกและโอนเงิน...`);
                 
                 const executeRes = await fetch(`${API_URL}/api/admin/execute-draw`, {
                     method: 'POST',
@@ -3464,11 +3468,9 @@ setInterval(async () => {
             }
         }
     } catch (err) {
-        // 🌟 บันทึก Error ทุกอย่างลง Railway Logs (เจ้านายเปิดรอดูได้เลย)
         console.error("❌ [AUTO CRITICAL ERROR]:", err.message);
     }
 }, 30000);
-
 
 
 
