@@ -3284,62 +3284,6 @@ app.post('/api/admin/suggest-draw', async (req, res) => {
 });
 
 
-// ==========================================
-// ⚙️ 1. API: ดึงและบันทึกการตั้งค่าระบบ (GET & POST)
-// ==========================================
-app.get('/api/admin/settings', async (req, res) => {
-    try {
-        const pool = await sql.connect(dbConfig);
-        const result = await pool.request().query(`
-            SELECT 
-                CONVERT(varchar(5), close_time, 108) as close_time,
-                CONVERT(varchar(5), open_time, 108) as open_time,
-                CONVERT(varchar(5), draw_time, 108) as draw_time,
-                is_sales_open, is_auto_draw, auto_draw_percent
-            FROM System_Settings WHERE id = 1
-        `);
-
-        if (result.recordset.length > 0) {
-            res.json({ success: true, data: result.recordset[0] });
-        } else {
-            res.json({ success: false, message: "ไม่พบข้อมูลตั้งค่า" });
-        }
-    } catch (err) {
-        console.error("❌ GET Settings Error:", err);
-        res.status(500).json({ success: false, message: err.message });
-    }
-});
-
-app.post('/api/admin/settings', async (req, res) => {
-    console.log("📥 [POST] รับค่าตั้งค่า:", req.body); 
-    const { close_time, open_time, draw_time, is_sales_open, is_auto_draw, auto_draw_percent } = req.body;
-
-    try {
-        const pool = await sql.connect(dbConfig);
-        await pool.request()
-            .input('closeTime', sql.VarChar, close_time || '17:00') 
-            .input('openTime', sql.VarChar, open_time || '18:00')
-            .input('drawTime', sql.VarChar, draw_time || '17:30')
-            .input('isOpen', sql.Bit, is_sales_open ? 1 : 0)
-            .input('isAuto', sql.Bit, is_auto_draw ? 1 : 0)
-            .input('percent', sql.Int, parseInt(auto_draw_percent) || 50)
-            .query(`
-                UPDATE System_Settings 
-                SET close_time = CAST(@closeTime AS TIME), 
-                    open_time = CAST(@openTime AS TIME), 
-                    draw_time = CAST(@drawTime AS TIME), 
-                    is_sales_open = @isOpen, is_auto_draw = @isAuto, auto_draw_percent = @percent,
-                    last_updated = GETDATE()
-                WHERE id = 1
-            `);
-            
-        console.log("✅ [POST] บันทึกตั้งค่าสำเร็จ!");
-        res.json({ success: true, message: 'บันทึกสำเร็จ' });
-    } catch (err) { 
-        console.error("❌ [POST] Error ตอนบันทึก Settings:", err);
-        res.status(500).json({ success: false, message: err.message }); 
-    }
-});
 
 // ==========================================
 // 🇻🇳 2. API: ยืนยันผล จ่ายรางวัล และโอนเงิน (หวยเวียดนาม)
