@@ -3402,21 +3402,22 @@ app.post('/api/admin/execute-draw', async (req, res) => {
 });
 
 // ==========================================
-// 🤖 3. Worker: หุ่นยนต์ออกรางวัลอัตโนมัติ (แก้ไขให้วิ่งเข้า Localhost)
+// 🤖 3. Worker: หุ่นยนต์ออกรางวัลอัตโนมัติ (ใช้โดเมนจริง Railway แบบที่เจ้านายต้องการ)
 // ==========================================
 setInterval(async () => {
     try {
-        // 1. ดึงเวลาปัจจุบัน (โซนไทย)
         const options = { timeZone: 'Asia/Bangkok', hour: '2-digit', minute: '2-digit', hour12: false };
         const nowBKK = new Intl.DateTimeFormat('en-GB', options).format(new Date()); 
         
-        // 🌟 ทริคสำคัญ: ให้หุ่นยนต์เรียก API ภายในเครื่องตัวเอง (Localhost) 
-        // เพื่อดึง Logic การแจกเงินตัวเต็มมาใช้ โดยไม่ต้องวิ่งออกเน็ตเวิร์กข้างนอก
-        const PORT = process.env.PORT || 3000; // ใช้พอร์ตที่เซิร์ฟเวอร์ตั้งไว้
-        const LOCAL_URL = `http://localhost:${PORT}`; 
+        // 🌟 ใช้โดเมนจริงของระบบบน Railway เลยครับ
+        const API_URL = 'https://api.salapi.company'; 
 
-        const settingsRes = await fetch(`${LOCAL_URL}/api/admin/settings`);
-        if (!settingsRes.ok) return;
+        const settingsRes = await fetch(`${API_URL}/api/admin/settings`);
+        if (!settingsRes.ok) {
+            // ถ้าดึงข้อมูลไม่ได้ จะพ่น Error สีแดงออก Railway Logs ทันที
+            console.error(`❌ [AUTO ERROR] เชื่อมต่อ API ไม่สำเร็จ สถานะ: ${settingsRes.status}`);
+            return;
+        }
         
         const settingsData = await settingsRes.json();
         const settings = settingsData.data;
@@ -3425,21 +3426,18 @@ setInterval(async () => {
 
         const drawTime = settings.draw_time ? settings.draw_time.substring(0, 5) : ''; 
 
-        // 2. เช็คเวลาว่าตรงกับที่ตั้งไว้หรือไม่
         if (nowBKK === drawTime) {
-            // 3. ป้องกันการออกรางวัลซ้ำในวันเดียวกัน
             const pool = await sql.connect(dbConfig);
             const checkDraw = await pool.request().query(`
                 SELECT TOP 1 id FROM Draw_Results 
                 WHERE draw_date = CAST(GETDATE() AS DATE)
             `);
             
-            if (checkDraw.recordset.length > 0) return; // วันนี้ออกไปแล้ว ให้ข้ามเลย
+            if (checkDraw.recordset.length > 0) return; // วันนี้ออกไปแล้ว ให้ข้าม
 
-            console.log(`🤖 [AUTO] เวลา ${nowBKK} น. หุ่นยนต์เริ่มทำงาน! (เป้าหมาย: ${settings.auto_draw_percent}%)`);
+            console.log(`🤖 [AUTO] เวลา ${nowBKK} น. เริ่มทำงาน! เชื่อมต่อไปที่: ${API_URL}`);
 
-            // 4. สุ่มเลขเด็ด
-            const suggestRes = await fetch(`${LOCAL_URL}/api/admin/suggest-draw`, {
+            const suggestRes = await fetch(`${API_URL}/api/admin/suggest-draw`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ targetPercent: settings.auto_draw_percent })
@@ -3447,10 +3445,9 @@ setInterval(async () => {
             const suggestData = await suggestRes.json();
 
             if (suggestData.success) {
-                console.log(`🤖 [AUTO] AI แนะนำเลข: ${suggestData.suggestedNumber} กำลังออกผลและจ่ายเงิน...`);
+                console.log(`🤖 [AUTO] AI แนะนำเลข: ${suggestData.suggestedNumber} กำลังออกผลและโอนเงิน...`);
                 
-                // 5. ออกผลและโอนเงินเข้า Wallet (เรียก API ตัวเดียวกับปุ่มกด Manual)
-                const executeRes = await fetch(`${LOCAL_URL}/api/admin/execute-draw`, {
+                const executeRes = await fetch(`${API_URL}/api/admin/execute-draw`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ number6: suggestData.suggestedNumber })
@@ -3458,16 +3455,19 @@ setInterval(async () => {
                 
                 const executeData = await executeRes.json();
                 if (executeData.success) {
-                    console.log('✅ [AUTO] ออกผลและจ่ายเงินเรียบร้อย!');
+                    console.log('✅ [AUTO] ออกผลและโอนเงินเข้า Wallet ลูกค้าเรียบร้อย!');
                 } else {
-                    console.error('❌ [AUTO] เกิดข้อผิดพลาดตอนจ่ายเงิน:', executeData.message);
+                    console.error('❌ [AUTO ERROR] แจกเงินไม่สำเร็จ:', executeData.message);
                 }
+            } else {
+                console.error('❌ [AUTO ERROR] สุ่มเลขไม่สำเร็จ:', suggestData.message);
             }
         }
     } catch (err) {
-        // console.error("Worker Error:", err.message);
+        // 🌟 บันทึก Error ทุกอย่างลง Railway Logs (เจ้านายเปิดรอดูได้เลย)
+        console.error("❌ [AUTO CRITICAL ERROR]:", err.message);
     }
-}, 30000); // เช็คทุกๆ 30 วินาที
+}, 30000);
 
 
 
