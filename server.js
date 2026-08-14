@@ -3488,8 +3488,78 @@ setInterval(async () => {
 // 🌟 API จบ API หวยเวียดนาม
 // // ==========================================
 
+// ==========================================
+// 🌟 API: บันทึกการตั้งค่าระบบ (รวมเวลา, การเปิด/ปิดรับซื้อ, ระบบออโต้ และ % สกอร์)
+// ==========================================
+app.post('/api/admin/settings', async (req, res) => {
+    // 🌟 รับค่ามาให้ครบทั้งของเก่า (เวลา) และของใหม่ (% สกอร์)
+    const { close_time, open_time, draw_time, is_sales_open, is_auto_draw, auto_draw_percent } = req.body;
+    
+    // พิมพ์ค่าที่รับมาออกหน้าจอดำๆ (Terminal) จะได้รู้ว่าส่งมาถูกไหม
+    console.log("📥 ข้อมูลที่หน้าเว็บส่งมาบันทึก:", req.body); 
 
+    try {
+        const pool = await sql.connect(dbConfig);
+        await pool.request()
+            // ของเดิมที่คุณพี่มี
+            .input('closeTime', sql.VarChar, close_time) 
+            .input('openTime', sql.VarChar, open_time)
+            .input('drawTime', sql.VarChar, draw_time)
+            .input('isOpen', sql.Bit, is_sales_open)
+            
+            // 🌟 เพิ่มของใหม่ 2 ตัวนี้เข้าไป
+            .input('isAuto', sql.Bit, is_auto_draw)
+            .input('percent', sql.Int, auto_draw_percent)
+            
+            .query(`
+                UPDATE System_Settings 
+                SET 
+                    close_time = CAST(@closeTime AS TIME), 
+                    open_time = CAST(@openTime AS TIME), 
+                    draw_time = CAST(@drawTime AS TIME), 
+                    is_sales_open = @isOpen,
+                    is_auto_draw = @isAuto,           /* 👈 บันทึกสถานะระบบออโต้ */
+                    auto_draw_percent = @percent,     /* 👈 บันทึก % สกอร์ */
+                    last_updated = GETDATE()
+                WHERE id = 1
+            `);
+            
+        console.log("✅ บันทึกเวลาและ % สกอร์ ลงฐานข้อมูลสำเร็จ!");
+        res.json({ success: true, message: 'บันทึกสำเร็จ' });
+    } catch (err) { 
+        console.error("❌ Error ตอนบันทึก:", err);
+        res.status(500).json({ success: false, message: 'บันทึกไม่สำเร็จ' }); 
+    }
+});
 
+// ==========================================
+// ⚙️ API: ดึงข้อมูลการตั้งค่าระบบ 
+// ==========================================
+app.get('/api/admin/settings', async (req, res) => {
+    try {
+        const pool = await sql.connect(dbConfig);
+        const result = await pool.request().query(`
+            SELECT 
+                CONVERT(varchar(5), close_time, 108) as close_time,
+                CONVERT(varchar(5), open_time, 108) as open_time,
+                CONVERT(varchar(5), draw_time, 108) as draw_time,
+                is_sales_open,
+                is_auto_draw,
+                auto_draw_percent
+            FROM System_Settings 
+            WHERE id = 1
+        `);
+
+        if (result.recordset.length > 0) {
+            res.json({ success: true, data: result.recordset[0] });
+        } else {
+            res.json({ success: false, message: "ไม่พบการตั้งค่าในระบบ" });
+        }
+    } catch (err) {
+        console.error("Error fetching settings:", err);
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
 
 // ==========================================
 // 🌟 API สุ่มเลขแนะนำ (AI V19: Elastic Buffer - ลดความตึงเครียดของเพดาน ยอมให้ทะลุได้ 15% เพื่อดัน % ให้ใกล้เคียงเป้าที่สุด)
