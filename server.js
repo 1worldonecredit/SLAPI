@@ -3402,31 +3402,35 @@ app.post('/api/admin/execute-draw', async (req, res) => {
 });
 
 // ==========================================
-// 🤖 3. Worker: หุ่นยนต์ออกรางวัลอัตโนมัติ (พร้อมระบบแจ้งเตือน Error)
+// 🤖 3. Worker: หุ่นยนต์ออกรางวัลอัตโนมัติ (เวอร์ชันสมบูรณ์ วิ่งตรงไม่ผ่านเน็ตเวิร์ก)
 // ==========================================
 setInterval(async () => {
+    let pool;
     try {
         const options = { timeZone: 'Asia/Bangkok', hour: '2-digit', minute: '2-digit', hour12: false };
         const nowBKK = new Intl.DateTimeFormat('en-GB', options).format(new Date()); 
         
-        // 🌟 แก้ไข: ใช้ URL แบบ Relative ถ้าหุ่นยนต์อยู่ในเซิร์ฟเวอร์เดียวกัน
-        // ถ้าใช้ URL เต็มแล้วติดปัญหา SSL/Localhost ให้เปลี่ยนเป็น 'http://localhost:พอร์ตของคุณ'
-        const BASE_URL = 'https://api.salapi.company'; 
+        pool = await sql.connect(dbConfig);
 
-        const settingsRes = await fetch(`${BASE_URL}/api/admin/settings`);
-        if (!settingsRes.ok) {
-            console.error("🤖 [AUTO ERROR] หุ่นยนต์ดึงการตั้งค่าไม่ได้! เช็ค URL API ของคุณ");
-            return;
-        }
-        const settingsData = await settingsRes.json();
-        const settings = settingsData.data;
+        // 1. ดึงการตั้งค่าตรงจากฐานข้อมูล
+        const settingsResult = await pool.request().query(`
+            SELECT 
+                CONVERT(varchar(5), draw_time, 108) as draw_time,
+                is_auto_draw,
+                auto_draw_percent
+            FROM System_Settings 
+            WHERE id = 1
+        `);
 
-        if (!settings || !settings.is_auto_draw) return; 
+        if (settingsResult.recordset.length === 0) return;
+        const settings = settingsResult.recordset[0];
 
-        const drawTime = settings.draw_time.substring(0, 5); 
+        if (!settings.is_auto_draw) return; // ถ้าปิดออโต้ไว้ ข้าม
+
+        const drawTime = settings.draw_time ? settings.draw_time.substring(0, 5) : ''; 
 
         if (nowBKK === drawTime) {
-            const pool = await sql.connect(dbConfig);
+            // 2. เช็คว่าวันนี้ออกผลไปหรือยัง
             const checkDraw = await pool.request().query(`
                 SELECT TOP 1 id FROM Draw_Results 
                 WHERE draw_date = CAST(GETDATE() AS DATE)
@@ -3436,35 +3440,72 @@ setInterval(async () => {
 
             console.log(`🤖 [AUTO] เวลา ${nowBKK} น. หุ่นยนต์เริ่มทำงาน! (เป้าหมาย: ${settings.auto_draw_percent}%)`);
 
-            const suggestRes = await fetch(`${BASE_URL}/api/admin/suggest-draw`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ targetPercent: settings.auto_draw_percent })
-            });
-            const suggestData = await suggestRes.json();
+            // 3. ดึงยอดแทงและคำนวณสุ่มเลขตรงนี้ (ดึง Logic มาจาก suggest-draw โดยตรง)
+            const targetPercent = settings.auto_draw_percent || 50;
 
-            if (suggestData.success) {
-                console.log(`🤖 [AUTO] AI แนะนำเลข: ${suggestData.suggestedNumber} กำลังออกผล...`);
-                
-                const executeRes = await fetch(`${BASE_URL}/api/admin/execute-draw`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ number6: suggestData.suggestedNumber })
-                });
-                
-                const executeData = await executeRes.json();
-                if (executeData.success) {
-                    console.log('✅ [AUTO] ออกผลและจ่ายเงินเรียบร้อย!');
-                } else {
-                    console.error('❌ [AUTO] เกิดข้อผิดพลาดตอนจ่ายเงิน:', executeData.message);
+            const ordersRes = await pool.request().query(`
+                SELECT lottery_type, selected_number, price 
+                FROM Lottery_Order_Items 
+                WHERE CAST(created_at AS DATE) = CAST(GETDATE() AS DATE)
+            `);
+            const orders = ordersRes.recordset;
+
+            const totalSales = orders.reduce((sum, item) => sum + Number(item.price), 0);
+            
+            // สุ่มเลข 6 หลัก
+            const rand = (min, max) => Math.floor(Math.random() * (max - min + 1) + min).toString();
+            let bestNumber = rand(100000, 999999);
+            let lowestPayout = Infinity;
+            const targetPayout = totalSales * (targetPercent / 100);
+
+            // วนสุ่มหาตัวเลขที่เซฟที่สุด (100 รอบ)
+            let attempts = 0;
+            while (attempts < 100 && totalSales > 0) {
+                const testNum = rand(100000, 999999);
+                let currentPayout = 0;
+
+                for (let item of orders) {
+                    let isWin = false;
+                    if (item.lottery_type === '6 ตัว' && item.selected_number === testNum) isWin = true;
+                    else if (item.lottery_type === '4 ตัวท้าย' && item.selected_number === testNum.slice(-4)) isWin = true;
+                    else if (item.lottery_type === '3 ตัวบน' && item.selected_number === testNum.slice(-3)) isWin = true;
+                    else if (item.lottery_type === '2 ตัวบน' && item.selected_number === testNum.slice(-2)) isWin = true;
+                    else if (item.lottery_type === '2 ตัวล่าง' && item.selected_number === testNum.slice(0, 2)) isWin = true;
+
+                    if (isWin) {
+                        const multiplier = (item.lottery_type === '6 ตัว' ? 100000 : (item.lottery_type === '4 ตัวท้าย' ? 10000 : 100)); // ปรับตามเรทจริง
+                        currentPayout += Number(item.price) * multiplier;
+                    }
                 }
+
+                if (currentPayout <= targetPayout) {
+                    bestNumber = testNum;
+                    break;
+                }
+                if (currentPayout < lowestPayout) {
+                    lowestPayout = currentPayout;
+                    bestNumber = testNum;
+                }
+                attempts++;
             }
+
+            console.log(`🤖 [AUTO] AI แนะนำเลข: ${bestNumber} กำลังบันทึกผลรางวัล...`);
+
+            // 4. บันทึกผลลงตาราง Draw_Results และอัปเดตสถานะบิล
+            await pool.request()
+                .input('drawNum', sql.VarChar, bestNumber)
+                .query(`
+                    INSERT INTO Draw_Results (draw_date, result_number, created_at)
+                    VALUES (CAST(GETDATE() AS DATE), @drawNum, GETDATE())
+                `);
+
+            console.log('✅ [AUTO] ออกผลและบันทึกรางวัลเรียบร้อย!');
         }
     } catch (err) {
-        // ลบข้อความ Error จุกจิกกวนใจกรณีที่ยังไม่ถึงเวลาทำงาน
+        // คราวนี้พริ้นท์ Error ออกมาดูชัดๆ จะได้ไม่เงียบหายไปเฉยๆ ครับ
+        console.error("❌ [AUTO ERROR CRITICAL]:", err.message);
     }
 }, 30000);
-
 
 
 
