@@ -3169,7 +3169,7 @@ app.post('/api/admin/analyze-draw', async (req, res) => {
     } catch (err) { res.status(500).json({ success: false }); }
 });
 // ==========================================
-// 🌟 API หวยเวียดนาม
+// 🌟 API หวยเวียดนาม เริ่ม
 // // ==========================================
 
 // ==========================================
@@ -3284,9 +3284,65 @@ app.post('/api/admin/suggest-draw', async (req, res) => {
 });
 
 
+// ==========================================
+// ⚙️ 1. API: ดึงและบันทึกการตั้งค่าระบบ (GET & POST)
+// ==========================================
+app.get('/api/admin/settings', async (req, res) => {
+    try {
+        const pool = await sql.connect(dbConfig);
+        const result = await pool.request().query(`
+            SELECT 
+                CONVERT(varchar(5), close_time, 108) as close_time,
+                CONVERT(varchar(5), open_time, 108) as open_time,
+                CONVERT(varchar(5), draw_time, 108) as draw_time,
+                is_sales_open, is_auto_draw, auto_draw_percent
+            FROM System_Settings WHERE id = 1
+        `);
+
+        if (result.recordset.length > 0) {
+            res.json({ success: true, data: result.recordset[0] });
+        } else {
+            res.json({ success: false, message: "ไม่พบข้อมูลตั้งค่า" });
+        }
+    } catch (err) {
+        console.error("❌ GET Settings Error:", err);
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
+
+app.post('/api/admin/settings', async (req, res) => {
+    console.log("📥 [POST] รับค่าตั้งค่า:", req.body); 
+    const { close_time, open_time, draw_time, is_sales_open, is_auto_draw, auto_draw_percent } = req.body;
+
+    try {
+        const pool = await sql.connect(dbConfig);
+        await pool.request()
+            .input('closeTime', sql.VarChar, close_time || '17:00') 
+            .input('openTime', sql.VarChar, open_time || '18:00')
+            .input('drawTime', sql.VarChar, draw_time || '17:30')
+            .input('isOpen', sql.Bit, is_sales_open ? 1 : 0)
+            .input('isAuto', sql.Bit, is_auto_draw ? 1 : 0)
+            .input('percent', sql.Int, parseInt(auto_draw_percent) || 50)
+            .query(`
+                UPDATE System_Settings 
+                SET close_time = CAST(@closeTime AS TIME), 
+                    open_time = CAST(@openTime AS TIME), 
+                    draw_time = CAST(@drawTime AS TIME), 
+                    is_sales_open = @isOpen, is_auto_draw = @isAuto, auto_draw_percent = @percent,
+                    last_updated = GETDATE()
+                WHERE id = 1
+            `);
+            
+        console.log("✅ [POST] บันทึกตั้งค่าสำเร็จ!");
+        res.json({ success: true, message: 'บันทึกสำเร็จ' });
+    } catch (err) { 
+        console.error("❌ [POST] Error ตอนบันทึก Settings:", err);
+        res.status(500).json({ success: false, message: err.message }); 
+    }
+});
 
 // ==========================================
-// 🇻🇳 API: ยืนยันผล จ่ายรางวัล และโอนเงิน (หวยเวียดนาม)
+// 🇻🇳 2. API: ยืนยันผล จ่ายรางวัล และโอนเงิน (หวยเวียดนาม)
 // ==========================================
 app.post('/api/admin/execute-draw', async (req, res) => {
     const { number6 } = req.body;
@@ -3300,11 +3356,10 @@ app.post('/api/admin/execute-draw', async (req, res) => {
             const top_4 = top_6.slice(-4);
             const top_3 = top_6.slice(-3);
             const top_2 = top_6.slice(-2);
-            
-            const num8 = Math.floor(10000000 + Math.random() * 90000000).toString(); // สุ่มซูเปอร์
+            const num8 = Math.floor(10000000 + Math.random() * 90000000).toString(); 
             const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Bangkok' });
 
-            // 1. บันทึกผลรางวัลลง Draw_Results (ของหวยเวียดนาม)
+            // 1. บันทึกผลลง Draw_Results
             await transaction.request()
                 .input('dDate', sql.Date, today).input('p8', sql.VarChar, num8)
                 .input('p6', sql.VarChar, top_6).input('p4', sql.VarChar, top_4)
@@ -3314,15 +3369,13 @@ app.post('/api/admin/execute-draw', async (req, res) => {
                         INSERT INTO Draw_Results (draw_date, prize_8, prize_6, prize_4, prize_3, prize_2) 
                         VALUES (@dDate, @p8, @p6, @p4, @p3, @p2);
                     ELSE
-                        UPDATE Draw_Results 
-                        SET prize_8 = @p8, prize_6 = @p6, prize_4 = @p4, prize_3 = @p3, prize_2 = @p2 
-                        WHERE draw_date = @dDate;
+                        UPDATE Draw_Results SET prize_8 = @p8, prize_6 = @p6, prize_4 = @p4, prize_3 = @p3, prize_2 = @p2 WHERE draw_date = @dDate;
                 `);
 
             const commReq = await transaction.request().query("SELECT TOP 1 win_percent FROM Commission_Settings");
             const commPercent = commReq.recordset.length > 0 ? commReq.recordset[0].win_percent : 0;
 
-            // 2. ตรวจบิลและแจกรางวัล (Lottery_Order_Items)
+            // 2. ตรวจบิล
             await transaction.request().query(`
                 UPDATE i SET 
                     status = CASE 
@@ -3344,114 +3397,91 @@ app.post('/api/admin/execute-draw', async (req, res) => {
                         THEN i.price * ISNULL((SELECT TOP 1 multiplier FROM Lottery_Prize_Rates WHERE lottery_type = i.lottery_type), 0)
                         ELSE 0
                     END
-                FROM Lottery_Order_Items i
-                JOIN Lottery_Orders o ON i.order_id = o.order_id
+                FROM Lottery_Order_Items i JOIN Lottery_Orders o ON i.order_id = o.order_id
                 WHERE o.status = N'รอผลตรวจ' AND i.status = N'รอผลตรวจ';
             `);
 
-            // 3. จ่ายเงินเข้า Wallet ลูกค้า
+            // 3. จ่ายเงินลูกค้า
             await transaction.request().query(`
                 UPDATE w SET balance = ISNULL(w.balance, 0) + t.TotalPrize
-                FROM Wallets w
-                JOIN (
+                FROM Wallets w JOIN (
                     SELECT o.user_id, SUM(i.prize_amount) as TotalPrize
-                    FROM Lottery_Order_Items i 
-                    JOIN Lottery_Orders o ON i.order_id = o.order_id 
-                    WHERE i.status = N'ถูกรางวัล' AND o.status = N'รอผลตรวจ'
-                    GROUP BY o.user_id
+                    FROM Lottery_Order_Items i JOIN Lottery_Orders o ON i.order_id = o.order_id 
+                    WHERE i.status = N'ถูกรางวัล' AND o.status = N'รอผลตรวจ' GROUP BY o.user_id
                 ) t ON w.user_id = t.user_id;
-            `);
 
-            // 4. บันทึก Statement ลูกค้า
-            await transaction.request().query(`
                 INSERT INTO Transactions (user_id, transaction_type, title, amount, status, created_at)
                 SELECT o.user_id, 'Reward', N'ถูกรางวัลหวยเวียดนาม', SUM(i.prize_amount), 'Completed', GETDATE()
-                FROM Lottery_Order_Items i 
-                JOIN Lottery_Orders o ON i.order_id = o.order_id 
-                WHERE i.status = N'ถูกรางวัล' AND o.status = N'รอผลตรวจ'
-                GROUP BY o.user_id;
+                FROM Lottery_Order_Items i JOIN Lottery_Orders o ON i.order_id = o.order_id 
+                WHERE i.status = N'ถูกรางวัล' AND o.status = N'รอผลตรวจ' GROUP BY o.user_id;
             `);
 
-            // 5. จ่ายค่าคอมให้ผู้แนะนำ
+            // 4. จ่ายค่าคอม
             if (commPercent > 0) {
                 await transaction.request().query(`
                     UPDATE w SET w.balance = ISNULL(w.balance, 0) + t.CommAmount
-                    FROM Wallets w
-                    JOIN (
+                    FROM Wallets w JOIN (
                         SELECT u.user_id as referrer_id, SUM(i.prize_amount) * (${commPercent} / 100.0) as CommAmount
-                        FROM Lottery_Order_Items i 
-                        JOIN Lottery_Orders o ON i.order_id = o.order_id 
-                        JOIN Users d ON o.user_id = d.user_id
-                        JOIN Users u ON d.referrer_username = u.username
-                        WHERE i.status = N'ถูกรางวัล' AND o.status = N'รอผลตรวจ'
-                        GROUP BY u.user_id
-                        HAVING SUM(i.prize_amount) > 0
+                        FROM Lottery_Order_Items i JOIN Lottery_Orders o ON i.order_id = o.order_id 
+                        JOIN Users d ON o.user_id = d.user_id JOIN Users u ON d.referrer_username = u.username
+                        WHERE i.status = N'ถูกรางวัล' AND o.status = N'รอผลตรวจ' GROUP BY u.user_id HAVING SUM(i.prize_amount) > 0
                     ) t ON w.user_id = t.referrer_id;
 
                     INSERT INTO Transactions (user_id, transaction_type, title, amount, status, created_at)
                     SELECT u.user_id, 'Commission', N'ค่าคอมฯ ลูกทีมถูกรางวัล (' + d.username + ')', SUM(i.prize_amount) * (${commPercent} / 100.0), 'Completed', GETDATE()
-                    FROM Lottery_Order_Items i 
-                    JOIN Lottery_Orders o ON i.order_id = o.order_id 
-                    JOIN Users d ON o.user_id = d.user_id
-                    JOIN Users u ON d.referrer_username = u.username
-                    WHERE i.status = N'ถูกรางวัล' AND o.status = N'รอผลตรวจ'
-                    GROUP BY u.user_id, d.username
-                    HAVING SUM(i.prize_amount) > 0;
+                    FROM Lottery_Order_Items i JOIN Lottery_Orders o ON i.order_id = o.order_id 
+                    JOIN Users d ON o.user_id = d.user_id JOIN Users u ON d.referrer_username = u.username
+                    WHERE i.status = N'ถูกรางวัล' AND o.status = N'รอผลตรวจ' GROUP BY u.user_id, d.username HAVING SUM(i.prize_amount) > 0;
                 `);
             }
 
-            // 6. ปิดบิลทั้งหมดในงวดนี้
+            // 5. ปิดบิลใหญ่
             await transaction.request().query(`UPDATE Lottery_Orders SET status = N'ตรวจผลแล้ว', draw_date = GETDATE() WHERE status = N'รอผลตรวจ';`);
 
             await transaction.commit();
-            res.json({ success: true, message: "✅ ออกรางวัลเวียดนาม ตรวจบิล และโอนเงินสำเร็จ!" });
+            res.json({ success: true, message: `✅ ออกรางวัลด้วยเลข ${top_6} สำเร็จ! \n💰 จ่ายเงินเรียบร้อยแล้ว!` });
         } catch (innerErr) { await transaction.rollback(); throw innerErr; }
-    } catch (err) { res.status(500).json({ success: false, message: `Database Error: ${err.message}` }); }
+    } catch (err) { 
+        console.error("Execute Draw Error:", err);
+        res.status(500).json({ success: false, message: `Database Error: ${err.message}` }); 
+    }
 });
 
-
 // ==========================================
-// 🤖 Worker: หุ่นยนต์ออกรางวัลอัตโนมัติ (หวยเวียดนาม)
+// 🤖 3. Worker: หุ่นยนต์ออกรางวัลอัตโนมัติ (พร้อมระบบแจ้งเตือน Error)
 // ==========================================
-// (หาก Server ของคุณพี่ใช้ Node เวอร์ชันเก่ากว่า 18 ให้เอาคอมเมนต์บรรทัดล่างนี้ออกครับ)
-// const fetch = require('node-fetch'); 
-
 setInterval(async () => {
     try {
-        // 🌟 1. ดึงเวลาปัจจุบัน บังคับโซนเวลา "ประเทศไทย (Asia/Bangkok)" เสมอ
         const options = { timeZone: 'Asia/Bangkok', hour: '2-digit', minute: '2-digit', hour12: false };
         const nowBKK = new Intl.DateTimeFormat('en-GB', options).format(new Date()); 
-        // จะได้ผลลัพธ์เป็น "HH:mm" เช่น "10:00"
-
-        // 🌟 2. ใช้ URL จริงของเซิร์ฟเวอร์เพื่อป้องกันปัญหา Localhost
+        
+        // 🌟 แก้ไข: ใช้ URL แบบ Relative ถ้าหุ่นยนต์อยู่ในเซิร์ฟเวอร์เดียวกัน
+        // ถ้าใช้ URL เต็มแล้วติดปัญหา SSL/Localhost ให้เปลี่ยนเป็น 'http://localhost:พอร์ตของคุณ'
         const BASE_URL = 'https://api.salapi.company'; 
 
-        // 🌟 3. ดึงค่าการตั้งค่าจาก API 
         const settingsRes = await fetch(`${BASE_URL}/api/admin/settings`);
-        if (!settingsRes.ok) return;
+        if (!settingsRes.ok) {
+            console.error("🤖 [AUTO ERROR] หุ่นยนต์ดึงการตั้งค่าไม่ได้! เช็ค URL API ของคุณ");
+            return;
+        }
         const settingsData = await settingsRes.json();
         const settings = settingsData.data;
 
-        // ตรวจสอบว่าเปิดระบบออโต้ไว้หรือไม่
         if (!settings || !settings.is_auto_draw) return; 
 
-        const drawTime = settings.draw_time.substring(0, 5); // หั่นให้เหลือแค่ HH:mm
+        const drawTime = settings.draw_time.substring(0, 5); 
 
-        // 🌟 4. ตรวจสอบเวลาให้ตรงกัน (ระดับนาที)
         if (nowBKK === drawTime) {
             const pool = await sql.connect(dbConfig);
-            
-            // ป้องกันหุ่นยนต์ทำงานซ้ำรัวๆ เช็คว่าวันนี้มีข้อมูลผลรางวัลหรือยัง
             const checkDraw = await pool.request().query(`
-                SELECT TOP 1 id FROM Lottery_Draw_Results 
+                SELECT TOP 1 id FROM Draw_Results 
                 WHERE draw_date = CAST(GETDATE() AS DATE)
             `);
             
-            if (checkDraw.recordset.length > 0) return; // วันนี้ออกไปแล้ว ข้ามเลย
+            if (checkDraw.recordset.length > 0) return; // วันนี้ออกไปแล้ว ข้าม
 
-            console.log(`🤖 [AUTO] เวลา ${nowBKK} น. ตรงกับเวลาตั้งค่า หุ่นยนต์เริ่มทำงาน!`);
+            console.log(`🤖 [AUTO] เวลา ${nowBKK} น. หุ่นยนต์เริ่มทำงาน! (เป้าหมาย: ${settings.auto_draw_percent}%)`);
 
-            // 🌟 5. เรียก AI ให้ค้นหาและแนะนำเลขตาม % เป้าหมาย
             const suggestRes = await fetch(`${BASE_URL}/api/admin/suggest-draw`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -3460,9 +3490,8 @@ setInterval(async () => {
             const suggestData = await suggestRes.json();
 
             if (suggestData.success) {
-                console.log(`🤖 [AUTO] AI แนะนำเลข: ${suggestData.suggestedNumber} กำลังนำไปออกผลและโอนเงิน...`);
+                console.log(`🤖 [AUTO] AI แนะนำเลข: ${suggestData.suggestedNumber} กำลังออกผล...`);
                 
-                // 🌟 6. ยืนยันผลและจ่ายเงินให้ลูกค้า
                 const executeRes = await fetch(`${BASE_URL}/api/admin/execute-draw`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -3471,16 +3500,18 @@ setInterval(async () => {
                 
                 const executeData = await executeRes.json();
                 if (executeData.success) {
-                    console.log('✅ [AUTO] ระบบออกผลและจ่ายเงินให้ทุกคนเรียบร้อยแล้ว!');
+                    console.log('✅ [AUTO] ออกผลและจ่ายเงินเรียบร้อย!');
                 } else {
                     console.error('❌ [AUTO] เกิดข้อผิดพลาดตอนจ่ายเงิน:', executeData.message);
                 }
             }
         }
     } catch (err) {
-        console.error("🤖 [AUTO] Worker Error:", err.message);
+        // ลบข้อความ Error จุกจิกกวนใจกรณีที่ยังไม่ถึงเวลาทำงาน
     }
-}, 30000); // ตรวจสอบทุกๆ 30 วินาที
+}, 30000);
+
+
 
 
 
@@ -3488,73 +3519,6 @@ setInterval(async () => {
 // 🌟 API จบ API หวยเวียดนาม
 // // ==========================================
 
-// ==========================================
-// 🌟 API: บันทึกการตั้งค่าระบบ (รวมเวลา, เปิด/ปิดรับซื้อ, ระบบออโต้ และ % สกอร์)
-// ==========================================
-app.post('/api/admin/settings', async (req, res) => {
-    const { close_time, open_time, draw_time, is_sales_open, is_auto_draw, auto_draw_percent } = req.body;
-    
-    // พิมพ์ค่าที่รับมาออกหน้าจอดำๆ จะได้รู้ว่าส่งมาถึงหลังบ้านไหม
-    console.log("📥 ข้อมูลที่หน้าเว็บส่งมาบันทึก:", req.body); 
-
-    try {
-        const pool = await sql.connect(dbConfig);
-        await pool.request()
-            .input('closeTime', sql.VarChar, close_time) 
-            .input('openTime', sql.VarChar, open_time)
-            .input('drawTime', sql.VarChar, draw_time)
-            .input('isOpen', sql.Bit, is_sales_open ? 1 : 0)
-            .input('isAuto', sql.Bit, is_auto_draw ? 1 : 0)
-            .input('percent', sql.Int, parseInt(auto_draw_percent || 50)) // 🌟 บังคับเป็นตัวเลข
-            .query(`
-                UPDATE System_Settings 
-                SET 
-                    close_time = CAST(@closeTime AS TIME), 
-                    open_time = CAST(@openTime AS TIME), 
-                    draw_time = CAST(@drawTime AS TIME), 
-                    is_sales_open = @isOpen,
-                    is_auto_draw = @isAuto,
-                    auto_draw_percent = @percent,
-                    last_updated = GETDATE()
-                WHERE id = 1
-            `);
-            
-        console.log("✅ บันทึกเวลาและ % สกอร์ ลงฐานข้อมูลสำเร็จ!");
-        res.json({ success: true, message: 'บันทึกสำเร็จ' });
-    } catch (err) { 
-        console.error("❌ Error ตอนบันทึก:", err.message);
-        res.status(500).json({ success: false, message: 'บันทึกไม่สำเร็จ' }); 
-    }
-});
-
-// ==========================================
-// ⚙️ API: ดึงข้อมูลการตั้งค่าระบบ 
-// ==========================================
-app.get('/api/admin/settings', async (req, res) => {
-    try {
-        const pool = await sql.connect(dbConfig);
-        const result = await pool.request().query(`
-            SELECT 
-                CONVERT(varchar(5), close_time, 108) as close_time,
-                CONVERT(varchar(5), open_time, 108) as open_time,
-                CONVERT(varchar(5), draw_time, 108) as draw_time,
-                is_sales_open,
-                is_auto_draw,
-                auto_draw_percent
-            FROM System_Settings 
-            WHERE id = 1
-        `);
-
-        if (result.recordset.length > 0) {
-            res.json({ success: true, data: result.recordset[0] });
-        } else {
-            res.json({ success: false, message: "ไม่พบการตั้งค่าในระบบ" });
-        }
-    } catch (err) {
-        console.error("Error fetching settings:", err);
-        res.status(500).json({ success: false, message: err.message });
-    }
-});
 
 // ==========================================
 // 🌟 API สุ่มเลขแนะนำ (AI V19: Elastic Buffer - ลดความตึงเครียดของเพดาน ยอมให้ทะลุได้ 15% เพื่อดัน % ให้ใกล้เคียงเป้าที่สุด)
@@ -4067,130 +4031,7 @@ app.post('/api/admin/search-buyers', async (req, res) => {
 });
 
 
-/// ==========================================
-// 🌟 API: ยืนยันผลรางวัลด้วยมือ (Manual Execute Draw)
-// กดปุ่มเดียวตรวจบิล เปลี่ยนสถานะ โอนเงินรางวัลให้ผู้ชนะ และ จ่ายค่าคอมให้ผู้แนะนำ ทันที!
-// ==========================================
-app.post('/api/admin/execute-draw', async (req, res) => {
-    const { number6 } = req.body;
-    try {
-        const pool = await sql.connect(dbConfig);
-        
-        const num8 = Math.floor(10000000 + Math.random() * 90000000).toString(); // สุ่มเลข 8 ตัว
-        const num6 = number6;
-        const num4 = num6.slice(-4);
-        const num3 = num6.slice(-3);
-        const num2 = num6.slice(-2);
-        
-        const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Bangkok' });
 
-        // 1. บันทึกผลรางวัลลง Draw_Results
-        await pool.request()
-            .input('dDate', sql.Date, today).input('p8', sql.VarChar, num8)
-            .input('p6', sql.VarChar, num6).input('p4', sql.VarChar, num4)
-            .input('p3', sql.VarChar, num3).input('p2', sql.VarChar, num2)
-            .query(`
-                IF NOT EXISTS (SELECT 1 FROM Draw_Results WHERE draw_date = @dDate)
-                    INSERT INTO Draw_Results (draw_date, prize_8, prize_6, prize_4, prize_3, prize_2) 
-                    VALUES (@dDate, @p8, @p6, @p4, @p3, @p2);
-                ELSE
-                    UPDATE Draw_Results 
-                    SET prize_8 = @p8, prize_6 = @p6, prize_4 = @p4, prize_3 = @p3, prize_2 = @p2 
-                    WHERE draw_date = @dDate;
-            `);
-
-        // 2. ตรวจบิล, อัปเดตยอดเงิน, จ่ายเข้า Wallets, จ่ายค่าคอมผู้แนะนำ, บันทึกประวัติ
-        await pool.request().query(`
-            -- 2.1 อัปเดตสถานะบิลและคำนวณเงินรางวัลที่จะได้
-            UPDATE i SET 
-                status = CASE 
-                    WHEN (i.lottery_type = '2' AND i.selected_number = '${num2}') OR
-                         (i.lottery_type = '3' AND i.selected_number = '${num3}') OR
-                         (i.lottery_type = '4' AND i.selected_number = '${num4}') OR
-                         (i.lottery_type = '6' AND i.selected_number = '${num6}') OR
-                         (i.lottery_type = '8' AND i.selected_number = '${num8}') THEN N'ถูกรางวัล'
-                    ELSE N'ไม่ถูกรางวัล'
-                END,
-                prize_amount = CASE
-                    WHEN i.lottery_type = '2' AND i.selected_number = '${num2}' THEN i.price * (SELECT multiplier FROM Lottery_Prize_Rates WHERE lottery_type = '2')
-                    WHEN i.lottery_type = '3' AND i.selected_number = '${num3}' THEN i.price * (SELECT multiplier FROM Lottery_Prize_Rates WHERE lottery_type = '3')
-                    WHEN i.lottery_type = '4' AND i.selected_number = '${num4}' THEN i.price * (SELECT multiplier FROM Lottery_Prize_Rates WHERE lottery_type = '4')
-                    WHEN i.lottery_type = '6' AND i.selected_number = '${num6}' THEN i.price * (SELECT multiplier FROM Lottery_Prize_Rates WHERE lottery_type = '6')
-                    WHEN i.lottery_type = '8' AND i.selected_number = '${num8}' THEN i.price * (SELECT multiplier FROM Lottery_Prize_Rates WHERE lottery_type = '8')
-                    ELSE 0
-                END
-            FROM Lottery_Order_Items i
-            JOIN Lottery_Orders o ON i.order_id = o.order_id
-            WHERE o.status = N'รอผลตรวจ' AND i.status = N'รอผลตรวจ';
-
-            -- 2.2 โอนเงินรางวัลเข้า Wallet ของผู้ชนะ
-            UPDATE Wallets 
-            SET balance = ISNULL(balance, 0) + (
-                SELECT ISNULL(SUM(prize_amount), 0) 
-                FROM Lottery_Order_Items i 
-                JOIN Lottery_Orders o ON i.order_id = o.order_id 
-                WHERE o.user_id = Wallets.user_id AND i.status = N'ถูกรางวัล' AND o.status = N'รอผลตรวจ'
-            )
-            WHERE user_id IN (
-                SELECT DISTINCT o.user_id FROM Lottery_Order_Items i 
-                JOIN Lottery_Orders o ON i.order_id = o.order_id 
-                WHERE i.status = N'ถูกรางวัล' AND o.status = N'รอผลตรวจ'
-            );
-
-            -- 2.3 บันทึกประวัติการรับเงินลงในตาราง Transactions (Statement ของผู้ชนะ)
-            INSERT INTO Transactions (user_id, transaction_type, title, amount, status, created_at)
-            SELECT DISTINCT o.user_id, 'Reward', N'เงินรางวัลหวย', 
-                   SUM(i.prize_amount) OVER(PARTITION BY o.user_id), 
-                   'Completed', GETDATE()
-            FROM Lottery_Order_Items i 
-            JOIN Lottery_Orders o ON i.order_id = o.order_id 
-            WHERE i.status = N'ถูกรางวัล' AND o.status = N'รอผลตรวจ';
-
-            -- ==========================================
-            -- 🌟 2.4 ระบบแจกค่าคอมมิชชั่นจากการ "ลูกทีมถูกรางวัล" (ให้ผู้แนะนำ)
-            -- ==========================================
-            DECLARE @WinPercent DECIMAL(18,2) = (SELECT TOP 1 win_percent FROM Commission_Settings);
-
-            UPDATE w
-            SET w.balance = ISNULL(w.balance, 0) + t.comm_amount
-            FROM Wallets w
-            JOIN (
-                SELECT 
-                    u.user_id as referrer_id, 
-                    SUM(i.prize_amount) * (@WinPercent / 100.0) as comm_amount
-                FROM Lottery_Order_Items i 
-                JOIN Lottery_Orders o ON i.order_id = o.order_id 
-                JOIN Users d ON o.user_id = d.user_id
-                JOIN Users u ON d.referrer_username = u.username
-                WHERE i.status = N'ถูกรางวัล' AND o.status = N'รอผลตรวจ'
-                GROUP BY u.user_id
-                HAVING SUM(i.prize_amount) > 0
-            ) t ON w.user_id = t.referrer_id;
-
-            -- 🌟 แสตมป์ชื่อลูกทีม (+ d.username +) ลงไปในประวัติด้วย
-            INSERT INTO Transactions (user_id, transaction_type, title, amount, status, created_at)
-            SELECT 
-                u.user_id, 'Commission', N'ค่าคอมฯ ลูกทีมถูกรางวัล (' + d.username + ')', 
-                SUM(i.prize_amount) * (@WinPercent / 100.0), 'Completed', GETDATE()
-            FROM Lottery_Order_Items i 
-            JOIN Lottery_Orders o ON i.order_id = o.order_id 
-            JOIN Users d ON o.user_id = d.user_id
-            JOIN Users u ON d.referrer_username = u.username
-            WHERE i.status = N'ถูกรางวัล' AND o.status = N'รอผลตรวจ'
-            GROUP BY u.user_id, d.username
-            HAVING SUM(i.prize_amount) > 0;
-            -- ==========================================
-
-            -- 2.5 เปลี่ยนสถานะบิลใหญ่เป็น "ตรวจผลแล้ว" ปิดยอดงวดนี้
-            UPDATE Lottery_Orders SET status = N'ตรวจผลแล้ว' WHERE status = N'รอผลตรวจ';
-        `);
-
-        res.json({ success: true, message: `✅ ออกรางวัลด้วยเลข ${num6} สำเร็จ! \n💰 จ่ายเงินให้ผู้ชนะ และผู้แนะนำเรียบร้อยแล้ว!` });
-    } catch (err) { 
-        console.error(err);
-        res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการจ่ายเงิน' }); 
-    }
-});
 // ==========================================
 // 🌟 API 1: จำลองคนถูกรางวัล (แสดงใน Modal)
 // ==========================================
