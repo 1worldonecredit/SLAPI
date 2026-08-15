@@ -3270,6 +3270,36 @@ app.post('/api/admin/thai-lottery/create-round', async (req, res) => {
     }
 });
 
+// ==========================================
+// 🇹🇭 API: ดึงข้อมูลหวยไทยงวดปัจจุบัน (สำหรับหน้าเว็บฝั่งลูกค้า)
+// ==========================================
+app.get('/api/thai-lottery/current-round', async (req, res) => {
+    try {
+        const pool = await sql.connect(dbConfig);
+        
+        // ดึงงวดหวยไทยที่ใกล้ที่สุด (ที่ยังไม่ออกผล) โดยดึงชื่อภาษาไทย (round_name) มาใช้งานด้วย
+        const roundReq = await pool.request().query(`
+            SELECT TOP 1 
+                round_id, 
+                ISNULL(round_name, CAST(round_number AS NVARCHAR(100))) as round_number, 
+                open_time, close_time, draw_time, status 
+            FROM Yeeki_Rounds 
+            WHERE category = 'THAI' AND status != 'Completed' 
+            ORDER BY close_time ASC
+        `);
+
+        if (roundReq.recordset.length > 0) {
+            res.json({ success: true, round: roundReq.recordset[0] });
+        } else {
+            res.json({ success: true, round: null, message: 'ยังไม่มีการเปิดรับแทงหวยไทยในขณะนี้' });
+        }
+    } catch (err) {
+        console.error("Error fetching current Thai round:", err);
+        res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาด: ' + err.message });
+    }
+});
+
+
 // 3. 🇹🇭 ประกาศผลหวยไทย + จ่ายเงินรางวัลและค่าคอมมิชชัน
 app.post('/api/admin/thai-lottery/execute-draw', async (req, res) => {
     const { round_id, number6, number2bot } = req.body;
