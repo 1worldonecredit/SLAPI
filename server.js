@@ -3503,16 +3503,33 @@ setInterval(async () => {
 // 🌟 API จบ API หวยเวียดนาม
 // // ==========================================
 
-
 // ==========================================
-// 🌟 API สุ่มเลขแนะนำ (AI V20: Monte Carlo Simulation 5000 รอบ คุมเป้าหมาย % เป๊ะ!)
+// 🌟 API สุ่มเลขแนะนำ (AI V21: Auto-Detect Round ID แก้บั๊กหุ่นยนต์ลืมส่งรอบ)
 // ==========================================
 app.post('/api/admin/yeeki/suggest-draw', async (req, res) => {
-    const { target_percent, round_id } = req.body;
+    // 🌟 รองรับชื่อตัวแปรทุกรูปแบบ ทั้งจากหน้าเว็บ และจากหุ่นยนต์หลังบ้าน
+    let target_percent = req.body.target_percent !== undefined ? req.body.target_percent : req.body.targetPercent;
+    let round_id = req.body.round_id !== undefined ? req.body.round_id : req.body.roundId;
+
     try {
         const pool = await sql.connect(dbConfig);
 
-        // 1. ดึงบิลทั้งหมดของรอบนั้นมา
+        // 🌟 จุดแก้ปัญหา: ถ้าไม่มี round_id ส่งมา ให้ไปค้นหารอบล่าสุดที่รอออกผลเอง
+        if (!round_id) {
+            const activeRoundReq = await pool.request().query(`
+                SELECT TOP 1 round_id, round_number FROM Yeeki_Rounds 
+                WHERE status = 'Closed' OR status = 'Pending' 
+                ORDER BY round_number ASC
+            `);
+            if (activeRoundReq.recordset.length > 0) {
+                round_id = activeRoundReq.recordset[0].round_id;
+                console.log(`🤖 [AI] หุ่นยนต์ไม่ได้ส่งรอบมา ดึงรอบอัตโนมัติ: รอบที่ ${activeRoundReq.recordset[0].round_number}`);
+            } else {
+                return res.json({ success: false, message: 'ไม่มีรอบที่รอออกผล' });
+            }
+        }
+
+        // 1. ดึงบิลทั้งหมดของรอบนั้นมา (ตอนนี้ AI จะมองเห็นบิลลูกค้าแล้ว!)
         const ordersReq = await pool.request()
             .input('roundId', sql.Int, round_id)
             .query(`
@@ -3533,7 +3550,7 @@ app.post('/api/admin/yeeki/suggest-draw', async (req, res) => {
 
         let totalSalesTHB = 0;
         
-        // 3. จัดกลุ่มบิลทั้งหมดลง Hash Map (เพื่อความไวในการวนลูปตรวจ 5,000 ครั้ง)
+        // 3. จัดกลุ่มบิลลงตะกร้าเพื่อจำลอง 5,000 รอบ
         let bets = { t6: {}, t4: {}, t3: {}, tTode: {}, t2: {}, tRun: {}, b2: {}, bRun: {}, s8: {} };
 
         orders.forEach(o => {
@@ -3560,13 +3577,11 @@ app.post('/api/admin/yeeki/suggest-draw', async (req, res) => {
             else if (t === '8 ตัว (Super)') addBet(bets.s8, n);
         });
 
-        // 🎯 กำหนดเป้าหมาย และเพดานยืดหยุ่น (Buffer ยอมให้เกินได้ 15% เพื่อให้หาเลขง่ายขึ้น)
-        const targetPayoutTHB = totalSalesTHB * (target_percent / 100);
+        // 🎯 กำหนดเป้าหมาย
+        const targetPayoutTHB = totalSalesTHB * ((target_percent || 0) / 100);
         const maxAllowedPayoutTHB = targetPayoutTHB * 1.15; 
-        
         const pad = (num, len) => num.toString().padStart(len, '0');
 
-        // ดึงเลขที่คนแทงมาเป็นเชื้อเพลิงในการสุ่ม (เพื่อให้มีคนถูกรางวัลบ้าง)
         let bought8 = Object.keys(bets.s8);
         let bought4 = Object.keys(bets.t4);
         let bought3 = Object.keys(bets.t3);
@@ -3579,15 +3594,13 @@ app.post('/api/admin/yeeki/suggest-draw', async (req, res) => {
         let bestMinCombination = null;
 
         // ==========================================
-        // 🌟 เริ่มต้น Monte Carlo Simulation: สุ่มและตรวจรางวัล 5,000 รอบ
+        // 🌟 Monte Carlo Simulation: สแกน 5,000 รอบเพื่อหลบยอดจ่าย
         // ==========================================
         for (let i = 0; i < 5000; i++) {
             let sim8, sim4, sim2bot;
 
-            // โอกาส 60% ที่จะเอาเลขที่คนซื้อมาผสมเป็นผลรางวัล (ถ้าเป้า > 0)
             if (target_percent > 0 && Math.random() > 0.4) {
                 sim8 = bought8.length > 0 && Math.random() > 0.5 ? bought8[Math.floor(Math.random() * bought8.length)] : pad(Math.floor(Math.random() * 100000000), 8);
-                
                 if (bought4.length > 0 && Math.random() > 0.3) {
                     sim4 = bought4[Math.floor(Math.random() * bought4.length)];
                 } else if (bought3.length > 0 && Math.random() > 0.3) {
@@ -3597,16 +3610,13 @@ app.post('/api/admin/yeeki/suggest-draw', async (req, res) => {
                 } else {
                     sim4 = pad(Math.floor(Math.random() * 10000), 4);
                 }
-
                 sim2bot = bought2bot.length > 0 && Math.random() > 0.5 ? bought2bot[Math.floor(Math.random() * bought2bot.length)] : pad(Math.floor(Math.random() * 100), 2);
             } else {
-                // โอกาส 40% (หรือ 100% ถ้าเป้ากินรวบ 0%) สุ่มเลขใหม่ 100% เพื่อหลบรางวัล
                 sim8 = pad(Math.floor(Math.random() * 100000000), 8);
                 sim4 = pad(Math.floor(Math.random() * 10000), 4);
                 sim2bot = pad(Math.floor(Math.random() * 100), 2);
             }
 
-            // ถอดรหัสชุดตัวเลขเพื่อตรวจรางวัลทุกรูปแบบ
             let sim6 = sim2bot + sim4;
             let sim3 = sim4.slice(-3);
             let sim2top = sim4.slice(-2);
@@ -3614,7 +3624,6 @@ app.post('/api/admin/yeeki/suggest-draw', async (req, res) => {
             let simRunBot = sim2bot.slice(-1);
             let sim3Tode = sim3.split('').sort().join('');
 
-            // 💰 คำนวณยอดจ่ายของลูปนี้
             let currentPayout = 0;
             if (bets.s8[sim8]) currentPayout += bets.s8[sim8].p;
             if (bets.t6[sim6]) currentPayout += bets.t6[sim6].p;
@@ -3626,23 +3635,20 @@ app.post('/api/admin/yeeki/suggest-draw', async (req, res) => {
             if (bets.tRun[simRunTop]) currentPayout += bets.tRun[simRunTop].p;
             if (bets.bRun[simRunBot]) currentPayout += bets.bRun[simRunBot].p;
 
-            // 📊 ประเมินผลลัพธ์
             if (target_percent == 0) {
                 if (currentPayout === 0) {
                     bestCombination = { sim8, sim4, sim2bot };
-                    break; // เจอ 0% แบบสะอาดหมดจด ออกลูปทันที
+                    break; // เจอเพอร์เฟกต์ 0% สะอาดหมดจด เบรกออกทันที
                 }
                 if (currentPayout < minFoundPayout) {
                     minFoundPayout = currentPayout;
                     bestCombination = { sim8, sim4, sim2bot };
                 }
             } else {
-                // พยายามหาตัวที่จ่ายเยอะที่สุด แต่ "ห้ามทะลุเพดาน"
                 if (currentPayout <= maxAllowedPayoutTHB && currentPayout > maxUnderTarget) {
                     maxUnderTarget = currentPayout;
                     bestCombination = { sim8, sim4, sim2bot };
                 }
-                // เก็บตัวที่ต่ำที่สุดสำรองไว้ เผื่อลูปนี้ไม่มีตัวไหนรอดเพดานเลย
                 if (currentPayout < minFoundPayout) {
                     minFoundPayout = currentPayout;
                     bestMinCombination = { sim8, sim4, sim2bot };
@@ -3650,11 +3656,7 @@ app.post('/api/admin/yeeki/suggest-draw', async (req, res) => {
             }
         }
 
-        // ==========================================
-        // 🌟 ตัดสินใจขั้นสุดท้าย
-        // ==========================================
         if (target_percent > 0 && !bestCombination) {
-            // ถ้าหาตัวที่ต่ำกว่าเป้าไม่ได้เลย ให้ยอมใช้ตัวที่บริษัทเจ็บตัวน้อยที่สุด (minPayout)
             bestCombination = bestMinCombination || { 
                 sim8: pad(Math.floor(Math.random() * 100000000), 8), 
                 sim4: pad(Math.floor(Math.random() * 10000), 4), 
@@ -3662,7 +3664,6 @@ app.post('/api/admin/yeeki/suggest-draw', async (req, res) => {
             };
         }
 
-        // กรณีที่รอบนั้นไม่มีใครแทงเลยแม้แต่คนเดียว
         if (orders.length === 0) {
             bestCombination = { 
                 sim8: pad(Math.floor(Math.random() * 100000000), 8), 
@@ -3671,7 +3672,6 @@ app.post('/api/admin/yeeki/suggest-draw', async (req, res) => {
             };
         }
 
-        // 🚀 ส่งผลลัพธ์ที่ดีที่สุดกลับไปให้หน้าเว็บ
         res.json({
             success: true,
             suggestedSuper: bestCombination.sim8,
