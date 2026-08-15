@@ -3437,6 +3437,55 @@ app.post('/api/admin/thai-lottery/execute-draw', async (req, res) => {
 });
 
 // ==========================================
+// 6. 🇹🇭 API: ดึงรายงานยอดขายหวยไทย (สำหรับหน้า Admin Report)
+// ==========================================
+app.get('/api/admin/thai-lottery/sales-report', async (req, res) => {
+    try {
+        const pool = await sql.connect(dbConfig);
+        
+        // 🌟 ดึงข้อมูลสรุปยอดขายแยกตามงวด แยกสกุลเงิน (THB/LAK) และสถานะการตรวจรางวัล
+        const reportReq = await pool.request().query(`
+            SELECT 
+                r.round_id, 
+                r.round_number, 
+                FORMAT(r.open_time, 'yyyy-MM-ddTHH:mm:ss') AS open_time, 
+                FORMAT(r.close_time, 'yyyy-MM-ddTHH:mm:ss') AS close_time, 
+                FORMAT(r.draw_time, 'yyyy-MM-ddTHH:mm:ss') AS draw_time, 
+                r.status, 
+                r.result_8_super as result_6, 
+                r.result_2_bottom,
+                
+                -- สรุปยอดขาย (THB และ LAK)
+                ISNULL(SUM(CASE WHEN o.currency_code IN ('THB', '฿') THEN i.price ELSE 0 END), 0) as total_sales_thb,
+                ISNULL(SUM(CASE WHEN o.currency_code IN ('LAK', '₭') THEN i.price ELSE 0 END), 0) as total_sales_lak,
+                
+                -- สรุปยอดจ่ายรางวัล (THB และ LAK)
+                ISNULL(SUM(CASE WHEN o.currency_code IN ('THB', '฿') AND i.status = N'ชนะ' THEN i.prize_amount ELSE 0 END), 0) as total_payout_thb,
+                ISNULL(SUM(CASE WHEN o.currency_code IN ('LAK', '₭') AND i.status = N'ชนะ' THEN i.prize_amount ELSE 0 END), 0) as total_payout_lak,
+                
+                -- สรุปสถานะบิล
+                COUNT(i.item_id) as total_tickets,
+                COUNT(CASE WHEN i.status = N'ชนะ' THEN 1 END) as winners_count,
+                COUNT(CASE WHEN i.status = N'รอผลตรวจ' THEN 1 END) as pending_count,
+                COUNT(CASE WHEN i.status = N'ไม่ถูกรางวัล' THEN 1 END) as lost_count
+                
+            FROM Yeeki_Rounds r
+            LEFT JOIN Yeeki_Orders o ON r.round_id = o.round_id
+            LEFT JOIN Yeeki_Order_Items i ON o.order_id = i.order_id
+            WHERE r.category = 'THAI'
+            GROUP BY r.round_id, r.round_number, r.open_time, r.close_time, r.draw_time, r.status, r.result_8_super, r.result_2_bottom
+            ORDER BY r.draw_time DESC
+        `);
+
+        res.json({ success: true, reports: reportReq.recordset });
+    } catch (err) {
+        console.error("Sales Report Error:", err);
+        res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการดึงรายงาน' });
+    }
+});
+
+
+// ==========================================
 // 5. 🇹🇭 API: แก้ไขข้อมูลงวดหวยไทย (ป้องกันงวดขยะ)
 // ==========================================
 app.post('/api/admin/thai-lottery/edit-round', async (req, res) => {
