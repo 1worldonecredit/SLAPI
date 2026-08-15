@@ -3230,7 +3230,7 @@ app.get('/api/admin/thai-lottery/rounds', async (req, res) => {
     }
 });
 
-// 2. 🇹🇭 สร้างงวดหวยไทยใหม่ (แก้ปัญหา Error Type INT และภาษาไทย)
+// 2. 🇹🇭 สร้างงวดหวยไทยใหม่ (แก้ปัญหา Error Type INT, ภาษาไทย และ draw_date NULL)
 app.post('/api/admin/thai-lottery/create-round', async (req, res) => {
     const { round_number, open_time, close_time, draw_time } = req.body;
     if (!round_number || !open_time || !close_time || !draw_time) {
@@ -3254,15 +3254,15 @@ app.post('/api/admin/thai-lottery/create-round', async (req, res) => {
             
         if (checkReq.recordset.length > 0) return res.status(400).json({ success: false, message: 'งวดหวยไทยนี้ถูกสร้างไว้แล้ว' });
 
-        // บันทึกลงฐานข้อมูล (แยกเก็บ INT และ NVARCHAR ภาษาไทย)
+        // 🌟 3. บันทึกลงฐานข้อมูล (สั่งให้ SQL คัดลอกวันที่จาก @dTime ไปใส่ใน draw_date ด้วย CAST)
         await pool.request()
             .input('rNumInt', sql.Int, fakeIntRound)
             .input('rName', sql.NVarChar, roundNameText)
             .input('oTime', sql.DateTime, open_time)
             .input('cTime', sql.DateTime, close_time)
             .input('dTime', sql.DateTime, draw_time)
-            .query(`INSERT INTO Yeeki_Rounds (round_number, round_name, open_time, close_time, draw_time, status, category)
-                    VALUES (@rNumInt, @rName, @oTime, @cTime, @dTime, 'Pending', 'THAI')`);
+            .query(`INSERT INTO Yeeki_Rounds (round_number, round_name, open_time, close_time, draw_time, draw_date, status, category)
+                    VALUES (@rNumInt, @rName, @oTime, @cTime, @dTime, CAST(@dTime AS DATE), 'Pending', 'THAI')`);
 
         res.json({ success: true, message: `✅ สร้างงวดหวยไทย (${roundNameText}) สำเร็จ!` });
     } catch (err) { 
