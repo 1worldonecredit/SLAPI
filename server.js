@@ -3206,80 +3206,184 @@ app.post('/api/admin/analyze-draw', async (req, res) => {
     } catch (err) { res.status(500).json({ success: false }); }
 });
 
-// ==========================================
-// 🌟 API หวยไทย    เริ่ม
-// // ==========================================
+
 
 // ==========================================
-// 🇹🇭 API: สร้างงวดหวยไทย (ควบคุมเวลาเปิด-ปิดรับแทง)
+// 🌟 API หวยไทย เริ่ม
 // ==========================================
+
+// 1. 🇹🇭 ดึงข้อมูลรอบหวยไทยทั้งหมด
+app.get('/api/admin/thai-lottery/rounds', async (req, res) => {
+    try {
+        const pool = await sql.connect(dbConfig);
+        const result = await pool.request().query(`
+            SELECT round_id, round_number, open_time, close_time, draw_time, status, result_8_super as result_6, result_2_bottom 
+            FROM Yeeki_Rounds 
+            WHERE category = 'THAI' 
+            ORDER BY draw_time DESC
+        `);
+        res.json({ success: true, rounds: result.recordset });
+    } catch (err) {
+        console.error("Error fetching Thai rounds:", err);
+        res.status(500).json({ success: false });
+    }
+});
+
+// 2. 🇹🇭 สร้างงวดหวยไทยใหม่ (แอดมินตั้งเวลาเปิด-ปิดเอง)
 app.post('/api/admin/thai-lottery/create-round', async (req, res) => {
     const { round_number, open_time, close_time, draw_time } = req.body;
-    
-    // ตรวจสอบข้อมูลให้ครบถ้วน
     if (!round_number || !open_time || !close_time || !draw_time) {
         return res.status(400).json({ success: false, message: 'กรุณากรอกข้อมูล วันเวลาเปิด-ปิด ให้ครบถ้วน' });
     }
 
     try {
         const pool = await sql.connect(dbConfig);
-        
-        // ตรวจสอบว่ามีงวดนี้อยู่แล้วหรือไม่
         const checkReq = await pool.request()
             .input('rNum', sql.VarChar, round_number)
-            .input('cat', sql.VarChar, 'THAI')
-            .query(`SELECT 1 FROM Yeeki_Rounds WHERE round_number = @rNum AND category = @cat`);
+            .query(`SELECT 1 FROM Yeeki_Rounds WHERE round_number = @rNum AND category = 'THAI'`);
             
-        if (checkReq.recordset.length > 0) {
-            return res.status(400).json({ success: false, message: 'งวดหวยไทยนี้ถูกสร้างไว้แล้วในระบบ' });
-        }
+        if (checkReq.recordset.length > 0) return res.status(400).json({ success: false, message: 'งวดหวยไทยนี้ถูกสร้างไว้แล้ว' });
 
-        // สร้างงวดหวยไทยใหม่ลงในตารางเดียวกับยี่กี แต่แยก Category เป็น 'THAI'
         await pool.request()
-            .input('rNum', sql.VarChar, round_number)
-            .input('oTime', sql.DateTime, open_time)
-            .input('cTime', sql.DateTime, close_time)
-            .input('dTime', sql.DateTime, draw_time)
-            .input('cat', sql.VarChar, 'THAI')
-            .query(`
-                INSERT INTO Yeeki_Rounds (round_number, open_time, close_time, draw_time, status, category)
-                VALUES (@rNum, @oTime, @cTime, @dTime, 'Pending', @cat)
-            `);
+            .input('rNum', sql.VarChar, round_number).input('oTime', sql.DateTime, open_time)
+            .input('cTime', sql.DateTime, close_time).input('dTime', sql.DateTime, draw_time)
+            .query(`INSERT INTO Yeeki_Rounds (round_number, open_time, close_time, draw_time, status, category)
+                    VALUES (@rNum, @oTime, @cTime, @dTime, 'Pending', 'THAI')`);
 
-        res.json({ success: true, message: `✅ สร้างงวดหวยไทย (งวด ${round_number}) สำเร็จ! ระบบจะเปิด-ปิดรับแทงตามเวลาที่กำหนดอัตโนมัติ` });
-    } catch (err) {
-        console.error("Error creating Thai Lottery round:", err);
-        res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาด: ' + err.message });
-    }
+        res.json({ success: true, message: `✅ สร้างงวดหวยไทย (งวด ${round_number}) สำเร็จ!` });
+    } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 });
 
-// ==========================================
-// 🇹🇭 API: ดึงข้อมูลหวยไทยงวดปัจจุบัน (สำหรับฝั่งลูกค้าแสดงเวลานับถอยหลัง)
-// ==========================================
-app.get('/api/thai-lottery/current-round', async (req, res) => {
+// 3. 🇹🇭 ประกาศผลหวยไทย + จ่ายเงินรางวัลและค่าคอมมิชชัน
+app.post('/api/admin/thai-lottery/execute-draw', async (req, res) => {
+    const { round_id, number6, number2bot } = req.body;
+    
+    if (!round_id || !number6 || !number2bot || number6.length !== 6 || number2bot.length !== 2) {
+        return res.status(400).json({ success: false, message: 'ข้อมูลไม่ครบถ้วน กรุณากรอกเลขให้ถูกต้อง' });
+    }
+
+    let pool;
     try {
-        const pool = await sql.connect(dbConfig);
+        pool = await sql.connect(dbConfig);
         
-        // ดึงงวดหวยไทยที่ใกล้ที่สุด (ที่ยังไม่ออกผล)
-        const roundReq = await pool.request().query(`
-            SELECT TOP 1 round_id, round_number, open_time, close_time, draw_time, status 
-            FROM Yeeki_Rounds 
-            WHERE category = 'THAI' AND status != 'Completed' 
-            ORDER BY close_time ASC
-        `);
+        // แตกตัวเลขตามกติกาหวยใต้ดินไทย
+        const top_6 = number6;
+        const top_4 = top_6.slice(-4);
+        const top_3 = top_6.slice(-3);
+        const top_2 = top_6.slice(-2);
+        const bot_2 = number2bot;
+        const top_3_sorted = top_3.split('').sort().join('');
 
-        if (roundReq.recordset.length > 0) {
-            res.json({ success: true, round: roundReq.recordset[0] });
-        } else {
-            res.json({ success: true, round: null, message: 'ยังไม่มีการเปิดรับแทงหวยไทยในขณะนี้' });
-        }
+        // ดึงเรทจ่ายหวยยี่กีมาใช้ (เพราะกติกาและประเภทหวยเหมือนกัน)
+        const ratesReq = await pool.request().query(`SELECT lottery_type, multiplier FROM Yeeki_Prize_Rates`);
+        const prizeRates = {};
+        ratesReq.recordset.forEach(r => prizeRates[r.lottery_type] = r.multiplier);
+
+        let winCommissionPercent = 0;
+        try {
+            const commReq = await pool.request().query(`SELECT TOP 1 win_percent FROM Commission_Settings`);
+            if (commReq.recordset.length > 0) winCommissionPercent = commReq.recordset[0].win_percent || 0;
+        } catch (e) {}
+
+        const transaction = new sql.Transaction(pool);
+        await transaction.begin();
+
+        try {
+            const request = new sql.Request(transaction);
+
+            // 3.1 บันทึกเลขที่ออกลงตารางรอบหวย (ใช้ช่องที่มีอยู่ของ Yeeki)
+            await request
+                .input('rId', sql.Int, round_id)
+                .input('p6', sql.VarChar, top_6).input('p4', sql.VarChar, top_4)
+                .input('p3', sql.VarChar, top_3).input('p2b', sql.VarChar, bot_2)
+                .query(`UPDATE Yeeki_Rounds SET result_8_super = @p6, result_4_top = @p4, result_3_top = @p3, result_2_bottom = @p2b, status = 'Completed' WHERE round_id = @rId`);
+
+            // 3.2 ดึงบิลหวยไทยที่รอตรวจทั้งหมดของรอบนี้
+            const ordersReq = await request.input('roundId', sql.Int, round_id).query(`
+                SELECT i.item_id, o.user_id, i.lottery_type, i.selected_number, i.price, o.currency_code
+                FROM Yeeki_Order_Items i JOIN Yeeki_Orders o ON i.order_id = o.order_id
+                WHERE o.round_id = @roundId AND i.status = N'รอผลตรวจ'
+            `);
+            
+            let totalWinners = 0;
+
+            // 3.3 ตรวจบิล จ่ายเงิน จ่ายค่าคอมฯ ทีละใบ
+            for (let item of ordersReq.recordset) {
+                let isWin = false;
+                let t = item.lottery_type;
+                let n = item.selected_number;
+
+                // กติกาตรวจหวยไทย
+                if (t === '6 ตัว' && n === top_6) isWin = true;
+                else if (t === '4 ตัวท้าย' && n === top_4) isWin = true;
+                else if (t === '3 ตัวบน' && n === top_3) isWin = true;
+                else if (t === '3 ตัวโต๊ด' && n.split('').sort().join('') === top_3_sorted) isWin = true;
+                else if (t === '2 ตัวบน' && n === top_2) isWin = true;
+                else if ((t === '2 ตัวล่าง' || t === '2 ล่าง') && n === bot_2) isWin = true;
+                else if (t === 'วิ่งบน' && top_3.includes(n)) isWin = true;
+                else if (t === 'วิ่งล่าง' && bot_2.includes(n)) isWin = true;
+
+                if (isWin) {
+                    totalWinners++;
+                    let prizeAmount = item.price * (prizeRates[item.lottery_type] || 0);
+                    let isLAK = (item.currency_code === 'LAK' || item.currency_code === '₭');
+                    let currency = isLAK ? 'LAK' : 'THB';
+
+                    await request
+                        .input('itemId', sql.Int, item.item_id).input('prizeAmt', sql.Decimal(18, 2), prizeAmount)
+                        .query(`UPDATE Yeeki_Order_Items SET status = N'ชนะ', prize_amount = @prizeAmt WHERE item_id = @itemId`);
+
+                    let updateWalletQuery = isLAK 
+                        ? `UPDATE Wallets SET balance_lak = balance_lak + @wAmt WHERE user_id = @uId`
+                        : `UPDATE Wallets SET balance_thb = balance_thb + @wAmt WHERE user_id = @uId`;
+                    
+                    await request.input('uId', sql.Int, item.user_id).input('wAmt', sql.Decimal(18, 2), prizeAmount).query(updateWalletQuery);
+
+                    await request
+                        .input('txUid', sql.Int, item.user_id).input('txAmt', sql.Decimal(18, 2), prizeAmount)
+                        .input('txCur', sql.VarChar, currency).input('txNote', sql.NVarChar, `ถูกรางวัลหวยไทย ${item.lottery_type}`)
+                        .query(`INSERT INTO Transactions (user_id, amount, currency_code, transaction_type, status, note, created_at) VALUES (@txUid, @txAmt, @txCur, 'deposit', 'Completed', @txNote, GETDATE())`);
+
+                    // 💵 จ่ายค่าคอมฯ ผู้แนะนำ
+                    if (winCommissionPercent > 0) {
+                        const refReq = await request.input('childId', sql.Int, item.user_id).query(`SELECT referrer_id FROM User_Referrals WHERE user_id = @childId`);
+                        if (refReq.recordset.length > 0) {
+                            let refId = refReq.recordset[0].referrer_id;
+                            let commAmt = prizeAmount * (winCommissionPercent / 100);
+                            
+                            let updateCommWalletQuery = isLAK 
+                                ? `UPDATE Wallets SET balance_lak = balance_lak + @cAmt WHERE user_id = @rId`
+                                : `UPDATE Wallets SET balance_thb = balance_thb + @cAmt WHERE user_id = @rId`;
+                                
+                            await request.input('rId', sql.Int, refId).input('cAmt', sql.Decimal(18, 2), commAmt).query(updateCommWalletQuery);
+
+                            await request
+                                .input('cTxUid', sql.Int, refId).input('cTxAmt', sql.Decimal(18, 2), commAmt)
+                                .input('cTxCur', sql.VarChar, currency).input('cTxNote', sql.NVarChar, `ค่าคอมหวยไทยลูกทีมถูกรางวัล ${winCommissionPercent}%`)
+                                .query(`INSERT INTO Transactions (user_id, amount, currency_code, transaction_type, status, note, created_at) VALUES (@cTxUid, @cTxAmt, @cTxCur, 'commission', 'Completed', @cTxNote, GETDATE())`);
+                        }
+                    }
+                } else {
+                    await request.input('itemIdLoss', sql.Int, item.item_id).query(`UPDATE Yeeki_Order_Items SET status = N'ไม่ถูกรางวัล', prize_amount = 0 WHERE item_id = @itemIdLoss`);
+                }
+            }
+
+            // 3.4 ปิดบิลใหญ่
+            await request.input('rIdMaster', sql.Int, round_id).query(`UPDATE Yeeki_Orders SET status = N'ตรวจผลแล้ว' WHERE round_id = @rIdMaster`);
+
+            await transaction.commit();
+            res.json({ success: true, message: `✅ ประกาศผลหวยไทยสำเร็จ! จ่ายเงินผู้ชนะ ${totalWinners} รายการ` });
+
+        } catch (transErr) { await transaction.rollback(); throw transErr; }
     } catch (err) {
+        console.error("Execute Thai Draw Error:", err);
         res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาด: ' + err.message });
     }
 });
 
-
-
+// ==========================================
+// 🌟 API หวยไทย จบ
+// ==========================================
 
 
 
