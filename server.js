@@ -3505,13 +3505,14 @@ setInterval(async () => {
 
 
 // ==========================================
-// 🌟 API สุ่มเลขแนะนำ (AI V19: Elastic Buffer - ลดความตึงเครียดของเพดาน ยอมให้ทะลุได้ 15% เพื่อดัน % ให้ใกล้เคียงเป้าที่สุด)
+// 🌟 API สุ่มเลขแนะนำ (AI V20: Monte Carlo Simulation 5000 รอบ คุมเป้าหมาย % เป๊ะ!)
 // ==========================================
 app.post('/api/admin/yeeki/suggest-draw', async (req, res) => {
     const { target_percent, round_id } = req.body;
     try {
         const pool = await sql.connect(dbConfig);
 
+        // 1. ดึงบิลทั้งหมดของรอบนั้นมา
         const ordersReq = await pool.request()
             .input('roundId', sql.Int, round_id)
             .query(`
@@ -3522,6 +3523,7 @@ app.post('/api/admin/yeeki/suggest-draw', async (req, res) => {
             `);
         const orders = ordersReq.recordset;
 
+        // 2. ดึงเรทเงินและอัตราจ่าย
         const exReq = await pool.request().query(`SELECT rate FROM ExchangeRates WHERE currency_pair = 'THB_LAK'`);
         const lakRate = exReq.recordset[0]?.rate || 620;
 
@@ -3530,25 +3532,21 @@ app.post('/api/admin/yeeki/suggest-draw', async (req, res) => {
         ratesReq.recordset.forEach(r => prizeRates[r.lottery_type] = r.multiplier);
 
         let totalSalesTHB = 0;
-        let hasBets = false;
-
-        // จัดกลุ่มบิลทั้งหมดเพื่อการค้นหาอย่างรวดเร็ว
+        
+        // 3. จัดกลุ่มบิลทั้งหมดลง Hash Map (เพื่อความไวในการวนลูปตรวจ 5,000 ครั้ง)
         let bets = { t6: {}, t4: {}, t3: {}, tTode: {}, t2: {}, tRun: {}, b2: {}, bRun: {}, s8: {} };
 
         orders.forEach(o => {
-            hasBets = true;
             let thbPrice = (o.currency_code === 'LAK' || o.currency_code === '₭') ? (o.price / lakRate) : o.price;
             totalSalesTHB += thbPrice;
             
             let payoutTHB = thbPrice * (prizeRates[o.lottery_type] || 0);
-            let isLAK = (o.currency_code === 'LAK' || o.currency_code === '₭');
             let n = o.selected_number;
             let t = o.lottery_type;
 
             const addBet = (obj, key) => {
-                if (!obj[key]) obj[key] = { p: 0, thb: 0, lak: 0 };
+                if (!obj[key]) obj[key] = { p: 0 };
                 obj[key].p += payoutTHB;
-                if (isLAK) obj[key].lak += payoutTHB; else obj[key].thb += payoutTHB;
             };
 
             if (t === '6 ตัว') addBet(bets.t6, n);
@@ -3562,150 +3560,123 @@ app.post('/api/admin/yeeki/suggest-draw', async (req, res) => {
             else if (t === '8 ตัว (Super)') addBet(bets.s8, n);
         });
 
-        // 🎯 เป้าหมายหลัก
+        // 🎯 กำหนดเป้าหมาย และเพดานยืดหยุ่น (Buffer ยอมให้เกินได้ 15% เพื่อให้หาเลขง่ายขึ้น)
         const targetPayoutTHB = totalSalesTHB * (target_percent / 100);
-        // 🔥 ปลดเงื่อนไขให้อ่อนลง: อนุญาตให้ทะลุเป้าหมายได้สูงสุด 15% (Buffer 1.15)
         const maxAllowedPayoutTHB = targetPayoutTHB * 1.15; 
         
         const pad = (num, len) => num.toString().padStart(len, '0');
 
+        // ดึงเลขที่คนแทงมาเป็นเชื้อเพลิงในการสุ่ม (เพื่อให้มีคนถูกรางวัลบ้าง)
+        let bought8 = Object.keys(bets.s8);
+        let bought4 = Object.keys(bets.t4);
+        let bought3 = Object.keys(bets.t3);
+        let bought2top = Object.keys(bets.t2);
+        let bought2bot = Object.keys(bets.b2);
+
+        let bestCombination = null;
+        let maxUnderTarget = -1;
+        let minFoundPayout = Infinity;
+        let bestMinCombination = null;
+
         // ==========================================
-        // 🌟 ด่านที่ 1: กรองเลขบน (6 -> 4 -> 3) ภายใต้เงื่อนไขที่อ่อนลง
+        // 🌟 เริ่มต้น Monte Carlo Simulation: สุ่มและตรวจรางวัล 5,000 รอบ
         // ==========================================
-        let t4_pool = new Set();
-        Object.keys(bets.t4).forEach(k => t4_pool.add(k));
-        Object.keys(bets.t3).forEach(k => { for(let i=0; i<=9; i++) t4_pool.add(i.toString() + k); });
-        Object.keys(bets.t2).forEach(k => { for(let i=0; i<=99; i++) t4_pool.add(pad(i,2) + k); });
+        for (let i = 0; i < 5000; i++) {
+            let sim8, sim4, sim2bot;
 
-        if (t4_pool.size === 0) t4_pool.add(pad(Math.floor(Math.random() * 10000), 4));
-
-        let validTops = [];
-        for (let t4 of t4_pool) {
-            for (let i = 0; i <= 99; i++) {
-                let sim6 = pad(i, 2) + t4;
-                let n4 = sim6.slice(-4), n3 = sim6.slice(-3), n2 = sim6.slice(-2);
-                let sT3 = n3.split('').sort().join('');
-
-                let p = 0, thb = 0, lak = 0;
-                let has3Top = false;
-
-                if (bets.t6[sim6]) { p += bets.t6[sim6].p; thb += bets.t6[sim6].thb; lak += bets.t6[sim6].lak; }
-                if (bets.t4[n4]) { p += bets.t4[n4].p; thb += bets.t4[n4].thb; lak += bets.t4[n4].lak; }
-                if (bets.t3[n3]) { p += bets.t3[n3].p; thb += bets.t3[n3].thb; lak += bets.t3[n3].lak; has3Top = true; }
-                if (bets.tTode[sT3]) { p += bets.tTode[sT3].p; thb += bets.tTode[sT3].thb; lak += bets.tTode[sT3].lak; has3Top = true; }
-                if (bets.t2[n2]) { p += bets.t2[n2].p; thb += bets.t2[n2].thb; lak += bets.t2[n2].lak; }
+            // โอกาส 60% ที่จะเอาเลขที่คนซื้อมาผสมเป็นผลรางวัล (ถ้าเป้า > 0)
+            if (target_percent > 0 && Math.random() > 0.4) {
+                sim8 = bought8.length > 0 && Math.random() > 0.5 ? bought8[Math.floor(Math.random() * bought8.length)] : pad(Math.floor(Math.random() * 100000000), 8);
                 
-                let rSet = new Set(n3.split(''));
-                rSet.forEach(r => {
-                    if (bets.tRun[r]) { p += bets.tRun[r].p; thb += bets.tRun[r].thb; lak += bets.tRun[r].lak; }
-                });
+                if (bought4.length > 0 && Math.random() > 0.3) {
+                    sim4 = bought4[Math.floor(Math.random() * bought4.length)];
+                } else if (bought3.length > 0 && Math.random() > 0.3) {
+                    sim4 = Math.floor(Math.random() * 10).toString() + bought3[Math.floor(Math.random() * bought3.length)];
+                } else if (bought2top.length > 0 && Math.random() > 0.3) {
+                    sim4 = pad(Math.floor(Math.random() * 100), 2) + bought2top[Math.floor(Math.random() * bought2top.length)];
+                } else {
+                    sim4 = pad(Math.floor(Math.random() * 10000), 4);
+                }
 
-                // ใช้เพดานใหม่ที่ยืดหยุ่นขึ้น (maxAllowedPayoutTHB)
-                if (p <= maxAllowedPayoutTHB) {
-                    validTops.push({ sim6, p, thb, lak, has3Top, n4 });
+                sim2bot = bought2bot.length > 0 && Math.random() > 0.5 ? bought2bot[Math.floor(Math.random() * bought2bot.length)] : pad(Math.floor(Math.random() * 100), 2);
+            } else {
+                // โอกาส 40% (หรือ 100% ถ้าเป้ากินรวบ 0%) สุ่มเลขใหม่ 100% เพื่อหลบรางวัล
+                sim8 = pad(Math.floor(Math.random() * 100000000), 8);
+                sim4 = pad(Math.floor(Math.random() * 10000), 4);
+                sim2bot = pad(Math.floor(Math.random() * 100), 2);
+            }
+
+            // ถอดรหัสชุดตัวเลขเพื่อตรวจรางวัลทุกรูปแบบ
+            let sim6 = sim2bot + sim4;
+            let sim3 = sim4.slice(-3);
+            let sim2top = sim4.slice(-2);
+            let simRunTop = sim4.slice(-1);
+            let simRunBot = sim2bot.slice(-1);
+            let sim3Tode = sim3.split('').sort().join('');
+
+            // 💰 คำนวณยอดจ่ายของลูปนี้
+            let currentPayout = 0;
+            if (bets.s8[sim8]) currentPayout += bets.s8[sim8].p;
+            if (bets.t6[sim6]) currentPayout += bets.t6[sim6].p;
+            if (bets.t4[sim4]) currentPayout += bets.t4[sim4].p;
+            if (bets.t3[sim3]) currentPayout += bets.t3[sim3].p;
+            if (bets.tTode[sim3Tode]) currentPayout += bets.tTode[sim3Tode].p;
+            if (bets.t2[sim2top]) currentPayout += bets.t2[sim2top].p;
+            if (bets.b2[sim2bot]) currentPayout += bets.b2[sim2bot].p;
+            if (bets.tRun[simRunTop]) currentPayout += bets.tRun[simRunTop].p;
+            if (bets.bRun[simRunBot]) currentPayout += bets.bRun[simRunBot].p;
+
+            // 📊 ประเมินผลลัพธ์
+            if (target_percent == 0) {
+                if (currentPayout === 0) {
+                    bestCombination = { sim8, sim4, sim2bot };
+                    break; // เจอ 0% แบบสะอาดหมดจด ออกลูปทันที
+                }
+                if (currentPayout < minFoundPayout) {
+                    minFoundPayout = currentPayout;
+                    bestCombination = { sim8, sim4, sim2bot };
+                }
+            } else {
+                // พยายามหาตัวที่จ่ายเยอะที่สุด แต่ "ห้ามทะลุเพดาน"
+                if (currentPayout <= maxAllowedPayoutTHB && currentPayout > maxUnderTarget) {
+                    maxUnderTarget = currentPayout;
+                    bestCombination = { sim8, sim4, sim2bot };
+                }
+                // เก็บตัวที่ต่ำที่สุดสำรองไว้ เผื่อลูปนี้ไม่มีตัวไหนรอดเพดานเลย
+                if (currentPayout < minFoundPayout) {
+                    minFoundPayout = currentPayout;
+                    bestMinCombination = { sim8, sim4, sim2bot };
                 }
             }
         }
 
         // ==========================================
-        // 🌟 ด่านที่ 2: เตรียมเลขล่าง (2)
+        // 🌟 ตัดสินใจขั้นสุดท้าย
         // ==========================================
-        let validBots = [];
-        for (let i = 0; i <= 99; i++) {
-            let sim2 = pad(i, 2);
-            let p = 0, thb = 0, lak = 0;
-
-            if (bets.b2[sim2]) { p += bets.b2[sim2].p; thb += bets.b2[sim2].thb; lak += bets.b2[sim2].lak; }
-            let rSet = new Set(sim2.split(''));
-            rSet.forEach(r => {
-                if (bets.bRun[r]) { p += bets.bRun[r].p; thb += bets.bRun[r].thb; lak += bets.bRun[r].lak; }
-            });
-
-            if (p <= maxAllowedPayoutTHB) {
-                validBots.push({ sim2, p, thb, lak });
-            }
+        if (target_percent > 0 && !bestCombination) {
+            // ถ้าหาตัวที่ต่ำกว่าเป้าไม่ได้เลย ให้ยอมใช้ตัวที่บริษัทเจ็บตัวน้อยที่สุด (minPayout)
+            bestCombination = bestMinCombination || { 
+                sim8: pad(Math.floor(Math.random() * 100000000), 8), 
+                sim4: pad(Math.floor(Math.random() * 10000), 4), 
+                sim2bot: pad(Math.floor(Math.random() * 100), 2) 
+            };
         }
 
-        if (validTops.length === 0) validTops.push({ sim6: pad(Math.floor(Math.random() * 1000000), 6), p: 0, thb: 0, lak: 0, has3Top: false, n4: '0000' });
-        if (validBots.length === 0) validBots.push({ sim2: pad(Math.floor(Math.random() * 100), 2), p: 0, thb: 0, lak: 0 });
-
-        // ==========================================
-        // 🌟 ด่านที่ 3: จับคู่เพื่อหาความใกล้เคียงที่สุด (Absolute Closeness)
-        // ==========================================
-        let bestMatch = null;
-        let minDiff = Infinity; 
-
-        for (let top of validTops) {
-            for (let bot of validBots) {
-                let totalPayout = top.p + bot.p;
-                
-                // ถ้ายอดรวม บน+ล่าง อยู่ในบัฟเฟอร์ 115%
-                if (totalPayout <= maxAllowedPayoutTHB && totalPayout > 0) {
-                    // 🔥 หาระยะห่างแบบสัมบูรณ์ (ไม่ว่าขาดหรือเกิน ยึดตัวที่ใกล้ 100% ที่สุด)
-                    let diff = Math.abs(totalPayout - targetPayoutTHB); 
-
-                    if (diff < minDiff) {
-                        minDiff = diff;
-                        bestMatch = { top, bot, totalPayout };
-                    } 
-                    else if (diff === minDiff && bestMatch) {
-                        // ถ้าระยะห่างเท่ากัน (สูสีกัน) ให้ให้สิทธิ์ชุดที่มี 3 ตัวก่อน
-                        if (top.has3Top && !bestMatch.top.has3Top) {
-                            bestMatch = { top, bot, totalPayout };
-                        } else if (top.has3Top === bestMatch.top.has3Top) {
-                            // ถ้ามี 3 ตัวทั้งคู่ ดูความสมดุลของเงินบาทและกีบ
-                            let curBal = Math.abs(top.thb + bot.thb - (top.lak + bot.lak));
-                            let bestBal = Math.abs(bestMatch.top.thb + bestMatch.bot.thb - (bestMatch.top.lak + bestMatch.bot.lak));
-                            if (curBal < bestBal) {
-                                bestMatch = { top, bot, totalPayout };
-                            }
-                        }
-                    }
-                }
-            }
+        // กรณีที่รอบนั้นไม่มีใครแทงเลยแม้แต่คนเดียว
+        if (orders.length === 0) {
+            bestCombination = { 
+                sim8: pad(Math.floor(Math.random() * 100000000), 8), 
+                sim4: pad(Math.floor(Math.random() * 10000), 4), 
+                sim2bot: pad(Math.floor(Math.random() * 100), 2) 
+            };
         }
 
-        // กรณีฉุกเฉิน
-        if (!bestMatch) {
-            let absMinPayout = Infinity;
-            for (let top of validTops) {
-                for (let bot of validBots) {
-                    let total = top.p + bot.p;
-                    if (total < absMinPayout) {
-                        absMinPayout = total;
-                        bestMatch = { top, bot, totalPayout: total };
-                    }
-                }
-            }
-        }
-
-        // ==========================================
-        // 🌟 ด่านที่ 4: เติม 2 ตัวหน้าให้ครบ 8 ตัว
-        // ==========================================
-        let final6 = bestMatch.top.sim6;
-        let final8 = '00' + final6;
-        let min8Diff = Infinity;
-
-        for (let i = 0; i <= 99; i++) {
-            let sim8 = pad(i, 2) + final6;
-            let extraPayout = bets.s8[sim8] ? bets.s8[sim8].p : 0;
-            let newTotal = bestMatch.totalPayout + extraPayout;
-            
-            if (newTotal <= maxAllowedPayoutTHB) {
-                let diff = Math.abs(newTotal - targetPayoutTHB);
-                if (diff < min8Diff) {
-                    min8Diff = diff;
-                    final8 = sim8;
-                }
-            }
-        }
-
+        // 🚀 ส่งผลลัพธ์ที่ดีที่สุดกลับไปให้หน้าเว็บ
         res.json({
             success: true,
-            suggestedSuper: final8,
-            suggested6: final6,
-            suggestedTop: bestMatch.top.sim6.slice(-4),
-            suggestedBottom: bestMatch.bot.sim2
+            suggestedSuper: bestCombination.sim8,
+            suggestedTop: bestCombination.sim4,
+            suggestedBottom: bestCombination.sim2bot
         });
 
     } catch (err) {
