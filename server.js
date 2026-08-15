@@ -3211,14 +3211,19 @@ app.post('/api/admin/analyze-draw', async (req, res) => {
 // ==========================================
 // 🌟 API หวยไทย เริ่ม
 // ==========================================
-// 1. 🇹🇭 ดึงข้อมูลรอบหวยไทยทั้งหมด (ใช้ลูกเล่นดึง round_name มาแสดงแทน)
+// ==========================================
+// 1. 🇹🇭 API: ดึงข้อมูลรอบหวยไทยทั้งหมด (สำหรับฝั่ง Admin) -> แก้บั๊ก Timezone
+// ==========================================
 app.get('/api/admin/thai-lottery/rounds', async (req, res) => {
     try {
         const pool = await sql.connect(dbConfig);
         const result = await pool.request().query(`
             SELECT round_id, 
                    ISNULL(round_name, CAST(round_number AS NVARCHAR(100))) as round_number, 
-                   open_time, close_time, draw_time, status, result_8_super as result_6, result_2_bottom 
+                   FORMAT(open_time, 'yyyy-MM-ddTHH:mm:ss') AS open_time, 
+                   FORMAT(close_time, 'yyyy-MM-ddTHH:mm:ss') AS close_time, 
+                   FORMAT(draw_time, 'yyyy-MM-ddTHH:mm:ss') AS draw_time, 
+                   status, result_8_super as result_6, result_2_bottom 
             FROM Yeeki_Rounds 
             WHERE category = 'THAI' 
             ORDER BY draw_time DESC
@@ -3227,6 +3232,38 @@ app.get('/api/admin/thai-lottery/rounds', async (req, res) => {
     } catch (err) {
         console.error("Error fetching Thai rounds:", err);
         res.status(500).json({ success: false });
+    }
+});
+
+
+// ==========================================
+// 2. 🇹🇭 API: ดึงข้อมูลหวยไทยงวดปัจจุบัน (สำหรับหน้าเว็บลูกค้า) -> แก้บั๊ก Timezone
+// ==========================================
+app.get('/api/thai-lottery/current-round', async (req, res) => {
+    try {
+        const pool = await sql.connect(dbConfig);
+        
+        const roundReq = await pool.request().query(`
+            SELECT TOP 1 
+                round_id, 
+                ISNULL(round_name, CAST(round_number AS NVARCHAR(100))) as round_number, 
+                FORMAT(open_time, 'yyyy-MM-ddTHH:mm:ss') AS open_time, 
+                FORMAT(close_time, 'yyyy-MM-ddTHH:mm:ss') AS close_time, 
+                FORMAT(draw_time, 'yyyy-MM-ddTHH:mm:ss') AS draw_time, 
+                status 
+            FROM Yeeki_Rounds 
+            WHERE category = 'THAI' AND status != 'Completed' 
+            ORDER BY close_time ASC
+        `);
+
+        if (roundReq.recordset.length > 0) {
+            res.json({ success: true, round: roundReq.recordset[0] });
+        } else {
+            res.json({ success: true, round: null, message: 'ยังไม่มีการเปิดรับแทงหวยไทยในขณะนี้' });
+        }
+    } catch (err) {
+        console.error("Error fetching current Thai round:", err);
+        res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาด: ' + err.message });
     }
 });
 
@@ -3270,34 +3307,6 @@ app.post('/api/admin/thai-lottery/create-round', async (req, res) => {
     }
 });
 
-// ==========================================
-// 🇹🇭 API: ดึงข้อมูลหวยไทยงวดปัจจุบัน (สำหรับหน้าเว็บฝั่งลูกค้า)
-// ==========================================
-app.get('/api/thai-lottery/current-round', async (req, res) => {
-    try {
-        const pool = await sql.connect(dbConfig);
-        
-        // ดึงงวดหวยไทยที่ใกล้ที่สุด (ที่ยังไม่ออกผล) โดยดึงชื่อภาษาไทย (round_name) มาใช้งานด้วย
-        const roundReq = await pool.request().query(`
-            SELECT TOP 1 
-                round_id, 
-                ISNULL(round_name, CAST(round_number AS NVARCHAR(100))) as round_number, 
-                open_time, close_time, draw_time, status 
-            FROM Yeeki_Rounds 
-            WHERE category = 'THAI' AND status != 'Completed' 
-            ORDER BY close_time ASC
-        `);
-
-        if (roundReq.recordset.length > 0) {
-            res.json({ success: true, round: roundReq.recordset[0] });
-        } else {
-            res.json({ success: true, round: null, message: 'ยังไม่มีการเปิดรับแทงหวยไทยในขณะนี้' });
-        }
-    } catch (err) {
-        console.error("Error fetching current Thai round:", err);
-        res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาด: ' + err.message });
-    }
-});
 
 
 // 3. 🇹🇭 ประกาศผลหวยไทย + จ่ายเงินรางวัลและค่าคอมมิชชัน
