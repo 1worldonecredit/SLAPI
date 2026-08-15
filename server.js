@@ -3436,6 +3436,124 @@ app.post('/api/admin/thai-lottery/execute-draw', async (req, res) => {
     }
 });
 
+
+// ==========================================
+// 4. 🇹🇭 API: ซื้อหวยรัฐบาลไทย (แยกตาราง Yeeki_Orders และแยกบิล 100%)
+// ==========================================
+app.post('/api/thai-lottery/buy', async (req, res) => {
+    const { user_id, round_id, cart, total_price, currency, note } = req.body;
+    const pool = await sql.connect(dbConfig);
+    
+    // เช็คว่ามีงวดที่กำลังเปิดรับอยู่หรือไม่
+    const statusRes = await pool.request().input('rId', sql.Int, round_id).query("SELECT status, close_time FROM Yeeki_Rounds WHERE round_id = @rId AND category = 'THAI'");
+    if (statusRes.recordset.length === 0 || statusRes.recordset[0].status === 'Completed') {
+        return res.status(400).json({ success: false, message: 'งวดนี้ปิดรับแทงแล้ว หรือไม่มีในระบบ' });
+    }
+
+    const transaction = new sql.Transaction(pool);
+
+    try {
+        await transaction.begin();
+        const request = new sql.Request(transaction);
+
+        // 1. ดึงเรทเงิน ถ้าเป็น LAK
+        let exchangeRate = 1;
+        if (currency === 'LAK' || currency === '₭') {
+            const rateRes = await request.query("SELECT rate FROM ExchangeRates WHERE currency_pair = 'THB_LAK'");
+            if (rateRes.recordset.length > 0) exchangeRate = rateRes.recordset[0].rate;
+        }
+
+        const baseTHBAmount = total_price / exchangeRate;
+        const deductAmount = baseTHBAmount * exchangeRate; 
+
+        // 2. ตัดเงิน
+        const userRes = await request.input('userId', sql.Int, user_id).query('SELECT balance FROM Wallets WHERE user_id = @userId'); 
+        if (userRes.recordset.length === 0) throw new Error('ไม่พบกระเป๋าเงิน');
+        if (userRes.recordset[0].balance < deductAmount) throw new Error('ยอดเงินในกระเป๋าไม่เพียงพอ');
+
+        request.input('deductAmount', sql.Decimal(18,2), deductAmount);
+        await request.query(`
+            UPDATE Users SET wallet_balance = ISNULL(wallet_balance, 0) - @deductAmount WHERE user_id = @userId;
+            UPDATE Wallets SET balance = balance - @deductAmount WHERE user_id = @userId;
+        `);
+
+        // 3. บันทึกประวัติ Transaction ฝั่งหวยไทย
+        await request
+            .input('titleTH', sql.NVarChar, 'ซื้อหวยรัฐบาลไทย')
+            .input('amountTH', sql.Decimal(18,2), -deductAmount) 
+            .query(`INSERT INTO Transactions (user_id, transaction_type, title, amount, status, created_at)
+                    VALUES (@userId, 'Buy Lottery', @titleTH, @amountTH, 'Completed', GETDATE())`);
+
+        // 4. บันทึกบิลลงตาราง Yeeki_Orders (เพราะหวยไทยใช้เครื่องมือตรวจผลตัวเดียวกับยี่กี)
+        const orderRes = await request
+            .input('cur', sql.VarChar, currency)
+            .input('tPrice', sql.Decimal(18,2), deductAmount)
+            .input('rId', sql.Int, round_id)
+            .input('note', sql.NVarChar, note || null)
+            .query(`
+                DECLARE @ThaiTime DATETIME = DATEADD(HOUR, 7, GETUTCDATE());
+                INSERT INTO Yeeki_Orders (user_id, round_id, total_amount, currency_code, status, order_note, category, created_at)
+                OUTPUT INSERTED.order_id
+                VALUES (@userId, @rId, @tPrice, @cur, N'รอผลตรวจ', @note, 'THAI', @ThaiTime)
+            `);
+        
+        const orderId = orderRes.recordset[0].order_id;
+
+        // บันทึกตัวเลข
+        for (const item of cart) {
+            const itemReq = new sql.Request(transaction);
+            await itemReq
+                .input('oId', sql.Int, orderId).input('lNum', sql.VarChar, item.number).input('lType', sql.VarChar, item.type).input('price', sql.Decimal(18,2), item.price)
+                .query(`INSERT INTO Yeeki_Order_Items (order_id, lottery_type, selected_number, price, status) VALUES (@oId, @lType, @lNum, @price, N'รอผลตรวจ')`);
+        }
+
+        // 5. ระบบจ่ายค่าแนะนำหวยไทย (Cross-Currency เหมือนเวียดนาม)
+        const refReq = new sql.Request(transaction);
+        const referrerRes = await refReq.input('buyerId', sql.Int, user_id).query(`
+            SELECT u_referrer.user_id, u_buyer.username as buyer_username,
+                   ISNULL(u_buyer.currency_code, 'THB') as buyer_currency, ISNULL(u_referrer.currency_code, 'THB') as referrer_currency
+            FROM Users u_buyer JOIN Users u_referrer ON u_buyer.referrer_username = u_referrer.username WHERE u_buyer.user_id = @buyerId
+        `);
+
+        if (referrerRes.recordset.length > 0) {
+            const ref = referrerRes.recordset[0];
+            const settingRes = await (new sql.Request(transaction)).query("SELECT purchase_percent FROM Commission_Settings WHERE id = 1");
+            const purchasePercent = settingRes.recordset.length > 0 ? settingRes.recordset[0].purchase_percent : 2.00; 
+            
+            let finalCommission = deductAmount * (purchasePercent / 100); 
+
+            if (ref.buyer_currency !== ref.referrer_currency) {
+                const pair = `${ref.buyer_currency}_${ref.referrer_currency}`; 
+                const rateReq = new sql.Request(transaction);
+                const rateRes = await rateReq.input('pair', sql.VarChar, pair).query(`SELECT rate FROM ExchangeRates WHERE currency_pair = @pair`);
+                if (rateRes.recordset.length > 0) {
+                    finalCommission = finalCommission * rateRes.recordset[0].rate;
+                } else {
+                    const revRes = await (new sql.Request(transaction)).input('revPair', sql.VarChar, `${ref.referrer_currency}_${ref.buyer_currency}`).query(`SELECT rate FROM ExchangeRates WHERE currency_pair = @revPair`);
+                    if (revRes.recordset.length > 0) finalCommission = finalCommission / revRes.recordset[0].rate;
+                }
+            }
+
+            const commReq = new sql.Request(transaction);
+            await commReq
+                .input('refId', sql.Int, ref.user_id).input('comm', sql.Decimal(18,2), finalCommission)
+                .input('tTitle', sql.NVarChar, `รายได้ ${purchasePercent}% หวยไทย จากทีมงาน (${ref.buyer_username})`)
+                .query(`
+                    UPDATE Wallets SET balance = balance + @comm WHERE user_id = @refId;
+                    UPDATE Users SET total_purchase_comm = ISNULL(total_purchase_comm, 0) + @comm WHERE user_id = @refId;
+                    INSERT INTO Transactions (user_id, transaction_type, title, amount, status, created_at)
+                    VALUES (@refId, 'Affiliate Purchase', @tTitle, @comm, 'Completed', GETDATE());
+                `);
+        }
+
+        await transaction.commit();
+        res.status(200).json({ success: true, message: 'ชำระเงินหวยไทยสำเร็จ', order_id: orderId });
+
+    } catch (error) {
+        await transaction.rollback();
+        res.status(400).json({ success: false, message: error.message || 'เกิดข้อผิดพลาดในการชำระเงิน' });
+    }
+});
 // ==========================================
 // 🌟 API หวยไทย จบ
 // ==========================================
