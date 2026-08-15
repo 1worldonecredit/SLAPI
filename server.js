@@ -3455,12 +3455,12 @@ app.get('/api/admin/thai-lottery/round-tickets/:roundId', async (req, res) => {
                 i.price,
                 i.status,
                 i.prize_amount,
-                i.created_at
+                o.created_at -- 🌟 แก้ไข: ใช้เวลาจากบิลใหญ่ (o.created_at)
             FROM Yeeki_Order_Items i
             JOIN Yeeki_Orders o ON i.order_id = o.order_id
             LEFT JOIN Users u ON o.user_id = u.user_id
             WHERE o.round_id = @roundId
-            ORDER BY i.created_at DESC
+            ORDER BY o.created_at DESC -- 🌟 แก้ไข: เรียงลำดับจากบิลใหญ่
         `);
         
         res.json({ success: true, tickets: result.recordset });
@@ -3469,7 +3469,6 @@ app.get('/api/admin/thai-lottery/round-tickets/:roundId', async (req, res) => {
         res.status(500).json({ success: false, message: err.message });
     }
 });
-
 
 // ==========================================
 // 6. 🇹🇭 API: ดึงรายงานยอดขายหวยไทย (สำหรับหน้า Admin Report)
