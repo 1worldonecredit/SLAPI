@@ -3322,8 +3322,12 @@ app.post('/api/admin/suggest-draw', async (req, res) => {
 
 
 
+// 🌟 นำตัวแปรนี้ไปวางไว้บนสุดของไฟล์ server.js (หรือวางไว้เหนือ setInterval) 
+// เพื่อให้หุ่นยนต์จำว่าวันนี้ออกผลไปแล้วหรือยัง
+let lastAutoDrawDate = '';
+
 // ==========================================
-// 🇻🇳 2. API: ยืนยันผล จ่ายรางวัล และโอนเงิน (หวยเวียดนาม)
+// 🇻🇳 2. API: ยืนยันผล จ่ายรางวัล และโอนเงิน (หวยเวียดนาม - แยก THB/LAK)
 // ==========================================
 app.post('/api/admin/execute-draw', async (req, res) => {
     const { number6 } = req.body;
@@ -3356,7 +3360,7 @@ app.post('/api/admin/execute-draw', async (req, res) => {
             const commReq = await transaction.request().query("SELECT TOP 1 win_percent FROM Commission_Settings");
             const commPercent = commReq.recordset.length > 0 ? commReq.recordset[0].win_percent : 0;
 
-            // 2. ตรวจบิล
+            // 2. ตรวจบิลและตั้งค่าเงินรางวัล (คูณเรท)
             await transaction.request().query(`
                 UPDATE i SET 
                     status = CASE 
@@ -3379,58 +3383,82 @@ app.post('/api/admin/execute-draw', async (req, res) => {
                         ELSE 0
                     END
                 FROM Lottery_Order_Items i JOIN Lottery_Orders o ON i.order_id = o.order_id
-                WHERE o.status = N'รอผลตรวจ' AND i.status = N'รอผลตรวจ';
+                WHERE (o.draw_date = '${today}' OR CAST(o.created_at AS DATE) = '${today}') AND i.status = N'รอผลตรวจ';
             `);
 
-            // 3. จ่ายเงินลูกค้า
+            // 3. 💰 โอนเงินลูกค้า (แยกกระเป๋า THB / LAK อย่างเด็ดขาด!)
             await transaction.request().query(`
-                UPDATE w SET balance = ISNULL(w.balance, 0) + t.TotalPrize
-                FROM Wallets w JOIN (
-                    SELECT o.user_id, SUM(i.prize_amount) as TotalPrize
+                UPDATE w SET 
+                    balance_thb = ISNULL(w.balance_thb, 0) + ISNULL(t_thb.TotalPrizeTHB, 0),
+                    balance_lak = ISNULL(w.balance_lak, 0) + ISNULL(t_lak.TotalPrizeLAK, 0)
+                FROM Wallets w
+                LEFT JOIN (
+                    SELECT o.user_id, SUM(i.prize_amount) as TotalPrizeTHB
                     FROM Lottery_Order_Items i JOIN Lottery_Orders o ON i.order_id = o.order_id 
-                    WHERE i.status = N'ถูกรางวัล' AND o.status = N'รอผลตรวจ' GROUP BY o.user_id
-                ) t ON w.user_id = t.user_id;
+                    WHERE i.status = N'ถูกรางวัล' AND o.status = N'รอผลตรวจ' AND o.currency_code = 'THB' GROUP BY o.user_id
+                ) t_thb ON w.user_id = t_thb.user_id
+                LEFT JOIN (
+                    SELECT o.user_id, SUM(i.prize_amount) as TotalPrizeLAK
+                    FROM Lottery_Order_Items i JOIN Lottery_Orders o ON i.order_id = o.order_id 
+                    WHERE i.status = N'ถูกรางวัล' AND o.status = N'รอผลตรวจ' AND (o.currency_code = 'LAK' OR o.currency_code = N'₭') GROUP BY o.user_id
+                ) t_lak ON w.user_id = t_lak.user_id
+                WHERE t_thb.user_id IS NOT NULL OR t_lak.user_id IS NOT NULL;
 
-                INSERT INTO Transactions (user_id, transaction_type, title, amount, status, created_at)
-                SELECT o.user_id, 'Reward', N'ถูกรางวัลหวยเวียดนาม', SUM(i.prize_amount), 'Completed', GETDATE()
+                -- บันทึกประวัติ (แยก THB/LAK ชัดเจน)
+                INSERT INTO Transactions (user_id, amount, currency_code, transaction_type, status, note, created_at)
+                SELECT o.user_id, SUM(i.prize_amount), o.currency_code, 'deposit', 'Completed', N'ถูกรางวัลหวยเวียดนาม', GETDATE()
                 FROM Lottery_Order_Items i JOIN Lottery_Orders o ON i.order_id = o.order_id 
-                WHERE i.status = N'ถูกรางวัล' AND o.status = N'รอผลตรวจ' GROUP BY o.user_id;
+                WHERE i.status = N'ถูกรางวัล' AND o.status = N'รอผลตรวจ' 
+                GROUP BY o.user_id, o.currency_code;
             `);
 
-            // 4. จ่ายค่าคอม
+            // 4. 💸 จ่ายค่าคอมผู้แนะนำ (แยกกระเป๋า THB / LAK เช่นกัน!)
             if (commPercent > 0) {
                 await transaction.request().query(`
-                    UPDATE w SET w.balance = ISNULL(w.balance, 0) + t.CommAmount
-                    FROM Wallets w JOIN (
-                        SELECT u.user_id as referrer_id, SUM(i.prize_amount) * (${commPercent} / 100.0) as CommAmount
-                        FROM Lottery_Order_Items i JOIN Lottery_Orders o ON i.order_id = o.order_id 
-                        JOIN Users d ON o.user_id = d.user_id JOIN Users u ON d.referrer_username = u.username
-                        WHERE i.status = N'ถูกรางวัล' AND o.status = N'รอผลตรวจ' GROUP BY u.user_id HAVING SUM(i.prize_amount) > 0
-                    ) t ON w.user_id = t.referrer_id;
+                    UPDATE w SET 
+                        balance_thb = ISNULL(w.balance_thb, 0) + ISNULL(c_thb.CommTHB, 0),
+                        balance_lak = ISNULL(w.balance_lak, 0) + ISNULL(c_lak.CommLAK, 0)
+                    FROM Wallets w
+                    LEFT JOIN (
+                        SELECT r.referrer_id, SUM(i.prize_amount) * (${commPercent} / 100.0) as CommTHB
+                        FROM Lottery_Order_Items i JOIN Lottery_Orders o ON i.order_id = o.order_id JOIN User_Referrals r ON o.user_id = r.user_id
+                        WHERE i.status = N'ถูกรางวัล' AND o.status = N'รอผลตรวจ' AND o.currency_code = 'THB' GROUP BY r.referrer_id HAVING SUM(i.prize_amount) > 0
+                    ) c_thb ON w.user_id = c_thb.referrer_id
+                    LEFT JOIN (
+                        SELECT r.referrer_id, SUM(i.prize_amount) * (${commPercent} / 100.0) as CommLAK
+                        FROM Lottery_Order_Items i JOIN Lottery_Orders o ON i.order_id = o.order_id JOIN User_Referrals r ON o.user_id = r.user_id
+                        WHERE i.status = N'ถูกรางวัล' AND o.status = N'รอผลตรวจ' AND (o.currency_code = 'LAK' OR o.currency_code = N'₭') GROUP BY r.referrer_id HAVING SUM(i.prize_amount) > 0
+                    ) c_lak ON w.user_id = c_lak.referrer_id
+                    WHERE c_thb.referrer_id IS NOT NULL OR c_lak.referrer_id IS NOT NULL;
 
-                    INSERT INTO Transactions (user_id, transaction_type, title, amount, status, created_at)
-                    SELECT u.user_id, 'Commission', N'ค่าคอมฯ ลูกทีมถูกรางวัล (' + d.username + ')', SUM(i.prize_amount) * (${commPercent} / 100.0), 'Completed', GETDATE()
+                    -- บันทึกประวัติค่าคอมให้ผู้แนะนำ
+                    INSERT INTO Transactions (user_id, amount, currency_code, transaction_type, status, note, created_at)
+                    SELECT r.referrer_id, SUM(i.prize_amount) * (${commPercent} / 100.0), o.currency_code, 'commission', 'Completed', N'ค่าคอมฯ ลูกทีมถูกรางวัล (' + u.username + ')', GETDATE()
                     FROM Lottery_Order_Items i JOIN Lottery_Orders o ON i.order_id = o.order_id 
-                    JOIN Users d ON o.user_id = d.user_id JOIN Users u ON d.referrer_username = u.username
-                    WHERE i.status = N'ถูกรางวัล' AND o.status = N'รอผลตรวจ' GROUP BY u.user_id, d.username HAVING SUM(i.prize_amount) > 0;
+                    JOIN User_Referrals r ON o.user_id = r.user_id JOIN Users u ON o.user_id = u.user_id
+                    WHERE i.status = N'ถูกรางวัล' AND o.status = N'รอผลตรวจ' 
+                    GROUP BY r.referrer_id, o.currency_code, u.username HAVING SUM(i.prize_amount) > 0;
                 `);
             }
 
-            // 5. ปิดบิลใหญ่
-            await transaction.request().query(`UPDATE Lottery_Orders SET status = N'ตรวจผลแล้ว', draw_date = GETDATE() WHERE status = N'รอผลตรวจ';`);
+            // 5. ปิดบิลแม่
+            await transaction.request().query(`
+                UPDATE Lottery_Orders 
+                SET status = N'ตรวจผลแล้ว', draw_date = '${today}' 
+                WHERE (draw_date = '${today}' OR CAST(created_at AS DATE) = '${today}') AND status = N'รอผลตรวจ';
+            `);
 
             await transaction.commit();
-            res.json({ success: true, message: `✅ ออกรางวัลด้วยเลข ${top_6} สำเร็จ! \n💰 จ่ายเงินเรียบร้อยแล้ว!` });
-        } catch (innerErr) { await transaction.rollback(); throw innerErr; }
+            res.json({ success: true, message: `✅ ออกรางวัลด้วยเลข ${top_6} สำเร็จ! \n💰 จ่ายเงินลูกค้า และผู้แนะนำเรียบร้อยแล้ว!` });
+        } catch (innerErr) { 
+            await transaction.rollback(); 
+            throw innerErr; 
+        }
     } catch (err) { 
         console.error("Execute Draw Error:", err);
         res.status(500).json({ success: false, message: `Database Error: ${err.message}` }); 
     }
 });
-
-// 🌟 นำตัวแปรนี้ไปวางไว้บนสุดของไฟล์ server.js (หรือวางไว้เหนือ setInterval) 
-// เพื่อให้หุ่นยนต์จำว่าวันนี้ออกผลไปแล้วหรือยัง
-let lastAutoDrawDate = ''; 
 
 // ==========================================
 // 🤖 3. Worker: หุ่นยนต์ออกรางวัลอัตโนมัติ (แก้บั๊ก Database)
