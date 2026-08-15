@@ -3630,11 +3630,14 @@ app.post('/api/thai-lottery/buy', async (req, res) => {
         
         const orderId = orderRes.recordset[0].order_id;
 
-        // บันทึกตัวเลข
+       // บันทึกตัวเลข
         for (const item of cart) {
             const itemReq = new sql.Request(transaction);
             await itemReq
-                .input('oId', sql.Int, orderId).input('lNum', sql.VarChar, item.number).input('lType', sql.VarChar, item.type).input('price', sql.Decimal(18,2), item.price)
+                .input('oId', sql.Int, orderId)
+                .input('lNum', sql.VarChar, item.number)
+                .input('lType', sql.NVarChar, item.type) // 🌟 แก้ตรงนี้: เติม N เข้าไปหน้า VarChar
+                .input('price', sql.Decimal(18,2), item.price)
                 .query(`INSERT INTO Yeeki_Order_Items (order_id, lottery_type, selected_number, price, status) VALUES (@oId, @lType, @lNum, @price, N'รอผลตรวจ')`);
         }
 
