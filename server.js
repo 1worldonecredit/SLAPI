@@ -3436,6 +3436,41 @@ app.post('/api/admin/thai-lottery/execute-draw', async (req, res) => {
     }
 });
 
+
+// ==========================================
+// 7. 🇹🇭 API: ดึงรายการบิลลูกค้าหวยไทยรายงวด (สำหรับหน้ารายงาน)
+// ==========================================
+app.get('/api/admin/thai-lottery/round-tickets/:roundId', async (req, res) => {
+    try {
+        const pool = await sql.connect(dbConfig);
+        const request = pool.request();
+        request.input('roundId', sql.Int, req.params.roundId);
+        
+        const result = await request.query(`
+            SELECT 
+                u.username,
+                o.currency_code,
+                i.lottery_type,
+                i.selected_number,
+                i.price,
+                i.status,
+                i.prize_amount,
+                i.created_at
+            FROM Yeeki_Order_Items i
+            JOIN Yeeki_Orders o ON i.order_id = o.order_id
+            LEFT JOIN Users u ON o.user_id = u.user_id
+            WHERE o.round_id = @roundId
+            ORDER BY i.created_at DESC
+        `);
+        
+        res.json({ success: true, tickets: result.recordset });
+    } catch (err) {
+        console.error("Fetch Tickets Error:", err);
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
+
+
 // ==========================================
 // 6. 🇹🇭 API: ดึงรายงานยอดขายหวยไทย (สำหรับหน้า Admin Report)
 // ==========================================
