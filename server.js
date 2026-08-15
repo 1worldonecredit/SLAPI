@@ -3205,6 +3205,89 @@ app.post('/api/admin/analyze-draw', async (req, res) => {
         res.json({ success: true, totalSales, analysis: analysisRes.recordset });
     } catch (err) { res.status(500).json({ success: false }); }
 });
+
+// ==========================================
+// 🌟 API หวยไทย    เริ่ม
+// // ==========================================
+
+// ==========================================
+// 🇹🇭 API: สร้างงวดหวยไทย (ควบคุมเวลาเปิด-ปิดรับแทง)
+// ==========================================
+app.post('/api/admin/thai-lottery/create-round', async (req, res) => {
+    const { round_number, open_time, close_time, draw_time } = req.body;
+    
+    // ตรวจสอบข้อมูลให้ครบถ้วน
+    if (!round_number || !open_time || !close_time || !draw_time) {
+        return res.status(400).json({ success: false, message: 'กรุณากรอกข้อมูล วันเวลาเปิด-ปิด ให้ครบถ้วน' });
+    }
+
+    try {
+        const pool = await sql.connect(dbConfig);
+        
+        // ตรวจสอบว่ามีงวดนี้อยู่แล้วหรือไม่
+        const checkReq = await pool.request()
+            .input('rNum', sql.VarChar, round_number)
+            .input('cat', sql.VarChar, 'THAI')
+            .query(`SELECT 1 FROM Yeeki_Rounds WHERE round_number = @rNum AND category = @cat`);
+            
+        if (checkReq.recordset.length > 0) {
+            return res.status(400).json({ success: false, message: 'งวดหวยไทยนี้ถูกสร้างไว้แล้วในระบบ' });
+        }
+
+        // สร้างงวดหวยไทยใหม่ลงในตารางเดียวกับยี่กี แต่แยก Category เป็น 'THAI'
+        await pool.request()
+            .input('rNum', sql.VarChar, round_number)
+            .input('oTime', sql.DateTime, open_time)
+            .input('cTime', sql.DateTime, close_time)
+            .input('dTime', sql.DateTime, draw_time)
+            .input('cat', sql.VarChar, 'THAI')
+            .query(`
+                INSERT INTO Yeeki_Rounds (round_number, open_time, close_time, draw_time, status, category)
+                VALUES (@rNum, @oTime, @cTime, @dTime, 'Pending', @cat)
+            `);
+
+        res.json({ success: true, message: `✅ สร้างงวดหวยไทย (งวด ${round_number}) สำเร็จ! ระบบจะเปิด-ปิดรับแทงตามเวลาที่กำหนดอัตโนมัติ` });
+    } catch (err) {
+        console.error("Error creating Thai Lottery round:", err);
+        res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาด: ' + err.message });
+    }
+});
+
+// ==========================================
+// 🇹🇭 API: ดึงข้อมูลหวยไทยงวดปัจจุบัน (สำหรับฝั่งลูกค้าแสดงเวลานับถอยหลัง)
+// ==========================================
+app.get('/api/thai-lottery/current-round', async (req, res) => {
+    try {
+        const pool = await sql.connect(dbConfig);
+        
+        // ดึงงวดหวยไทยที่ใกล้ที่สุด (ที่ยังไม่ออกผล)
+        const roundReq = await pool.request().query(`
+            SELECT TOP 1 round_id, round_number, open_time, close_time, draw_time, status 
+            FROM Yeeki_Rounds 
+            WHERE category = 'THAI' AND status != 'Completed' 
+            ORDER BY close_time ASC
+        `);
+
+        if (roundReq.recordset.length > 0) {
+            res.json({ success: true, round: roundReq.recordset[0] });
+        } else {
+            res.json({ success: true, round: null, message: 'ยังไม่มีการเปิดรับแทงหวยไทยในขณะนี้' });
+        }
+    } catch (err) {
+        res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาด: ' + err.message });
+    }
+});
+
+
+
+
+
+
+
+// ==========================================
+// 🌟 API หวยไทย    จบ
+// // ==========================================
+
 // ==========================================
 // 🌟 API หวยเวียดนาม เริ่ม
 // // ==========================================
