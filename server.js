@@ -4243,7 +4243,7 @@ app.post('/api/admin/execute-yeeki-draw', async (req, res) => {
                         result_3_top = @res3, 
                         result_2_bottom = @res2bot, 
                         status = 'Completed' 
-                    WHERE round_id = @roundId
+                    WHERE round_id = @roundId AND category != 'THAI'
                 `);
 
             const ratesReq = await transaction.request().query(`SELECT lottery_type, multiplier FROM Yeeki_Prize_Rates`);
