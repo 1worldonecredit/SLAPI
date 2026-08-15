@@ -1368,7 +1368,7 @@ app.put('/api/admin/animal-numbers/:id', async (req, res) => {
 });
 
 // ==========================================
-// 🌟 API: สำหรับการซื้อหวย (ตัดเงิน/คำนวณวัน/จ่ายค่าคอม/แสตมป์ชื่อลูกทีม)
+// 🌟 API: สำหรับการซื้อหวย (อัปเกรดแยกบิล ไทย/เวียดนาม + ระบบเดิมครบ 100%)
 // ==========================================
 app.post('/api/lottery/buy', async (req, res) => {
     // 🌟 อัปเกรด 1: รับค่า note เข้ามาจากฝั่งหน้าบ้าน
@@ -1420,51 +1420,96 @@ app.post('/api/lottery/buy', async (req, res) => {
             UPDATE Wallets SET balance = balance - @deductAmount WHERE user_id = @userId;
         `);
 
-        // 5. บันทึกประวัติ
-        await request
-            .input('title', sql.NVarChar, 'ซื้อหวยเวียดนาม')
-            .input('amount', sql.Decimal(18,2), -deductAmount) 
-            .query(`INSERT INTO Transactions (user_id, transaction_type, title, amount, status, created_at)
-                    VALUES (@userId, 'Buy Lottery', @title, @amount, 'Completed', GETDATE())`);
-
         // ==========================================
-        // 🌟 แทรกระบบคำนวณ งวดวันที่ (draw_date) เข้าไปในบิล
+        // 🌟 5. SMART ROUTER: แยกประเภทหวย และเขียนประวัติ Transactions ให้ถูกต้อง
         // ==========================================
-        const orderRes = await request
-            .input('currency', sql.VarChar, currency)
-            .input('totalPrice', sql.Decimal(18,2), deductAmount)
-            .input('note', sql.NVarChar, note || null) // 🌟 อัปเกรด 2: เตรียมค่า note ลงตัวแปร SQL
-            .query(`
-                DECLARE @TargetDrawDate DATE;
-                
-                DECLARE @ThaiTime DATETIME = DATEADD(HOUR, 7, GETUTCDATE());
-                DECLARE @CurrentTime TIME = CAST(@ThaiTime AS TIME);
-                DECLARE @CurrentDate DATE = CAST(@ThaiTime AS DATE);
-                
-                DECLARE @DB_CloseTime TIME = (SELECT TOP 1 close_time FROM System_Settings);
-                
-                IF @CurrentTime >= @DB_CloseTime
-                    SET @TargetDrawDate = DATEADD(day, 1, @CurrentDate);
-                ELSE
-                    SET @TargetDrawDate = @CurrentDate;
+        const thaiItems = cart.filter(c => c.category === 'THAI');
+        const vietItems = cart.filter(c => c.category !== 'THAI');
+        let finalOrderId = Date.now().toString().slice(-6);
+        let thaiTimeQuery = `DECLARE @ThaiTime DATETIME = DATEADD(HOUR, 7, GETUTCDATE());`;
 
-                -- 🌟 อัปเกรด 3: เพิ่มคอลัมน์ order_note ลงไปตอน INSERT
-                INSERT INTO Lottery_Orders (user_id, total_amount, currency_code, status, draw_date, created_at, order_note)
-                OUTPUT INSERTED.order_id
-                VALUES (@userId, @totalPrice, @currency, N'รอผลตรวจ', @TargetDrawDate, @ThaiTime, @note)
-            `);
-        
-        const orderId = orderRes.recordset[0].order_id;
+        // 🇹🇭 5.1 ถ้ามีหวยไทยในตะกร้า -> ลงตาราง Yeeki_Orders
+        if (thaiItems.length > 0) {
+            const thaiDeductAmount = thaiItems.reduce((sum, item) => sum + Number(item.price), 0);
+            const roundId = thaiItems[0].round_id;
+            
+            if (!roundId) throw new Error('ไม่พบข้อมูลงวดหวยไทย กรุณารีเฟรชหน้าเว็บ');
 
-        for (const item of cart) {
-            const itemReq = new sql.Request(transaction);
-            await itemReq
-                .input('orderId', sql.Int, orderId)
-                .input('lotteryNumber', sql.VarChar, item.number)
-                .input('lotteryType', sql.VarChar, item.type)
-                .input('price', sql.Decimal(18,2), item.price)
-                .query(`INSERT INTO Lottery_Order_Items (order_id, lottery_type, selected_number, price, status)
-                        VALUES (@orderId, @lotteryType, @lotteryNumber, @price, N'รอผลตรวจ')`);
+            const tReq = new sql.Request(transaction);
+            const tOrderRes = await tReq
+                .input('uId', sql.Int, user_id)
+                .input('tPrice', sql.Decimal(18,2), thaiDeductAmount)
+                .input('cur', sql.VarChar, currency)
+                .input('note', sql.NVarChar, note || null)
+                .input('rId', sql.Int, roundId)
+                .input('titleTH', sql.NVarChar, 'ซื้อหวยรัฐบาลไทย')
+                .input('amtTH', sql.Decimal(18,2), -thaiDeductAmount)
+                .query(`
+                    ${thaiTimeQuery}
+                    -- 📝 สร้างบิลหวยไทย
+                    INSERT INTO Yeeki_Orders (user_id, round_id, total_amount, currency_code, status, order_note, category, created_at)
+                    OUTPUT INSERTED.order_id
+                    VALUES (@uId, @rId, @tPrice, @cur, N'รอผลตรวจ', @note, 'THAI', @ThaiTime);
+                    
+                    -- 📝 บันทึกประวัติ Transaction เป็น "ซื้อหวยรัฐบาลไทย"
+                    INSERT INTO Transactions (user_id, transaction_type, title, amount, status, created_at)
+                    VALUES (@uId, 'Buy Lottery', @titleTH, @amtTH, 'Completed', @ThaiTime);
+                `);
+            
+            const thaiOrderId = tOrderRes.recordset[0].order_id;
+            finalOrderId = thaiOrderId;
+
+            // บันทึกเลขหวยไทย
+            for (const item of thaiItems) {
+                const iReq = new sql.Request(transaction);
+                await iReq.input('oId', sql.Int, thaiOrderId).input('lNum', sql.VarChar, item.number).input('lType', sql.VarChar, item.type).input('p', sql.Decimal(18,2), item.price)
+                    .query(`INSERT INTO Yeeki_Order_Items (order_id, lottery_type, selected_number, price, status) VALUES (@oId, @lType, @lNum, @p, N'รอผลตรวจ')`);
+            }
+        }
+
+        // 🇻🇳 5.2 ถ้ามีหวยเวียดนามในตะกร้า -> ลงตาราง Lottery_Orders
+        if (vietItems.length > 0) {
+            const vietDeductAmount = vietItems.reduce((sum, item) => sum + Number(item.price), 0);
+
+            const vReq = new sql.Request(transaction);
+            const vOrderRes = await vReq
+                .input('uId', sql.Int, user_id)
+                .input('tPrice', sql.Decimal(18,2), vietDeductAmount)
+                .input('cur', sql.VarChar, currency)
+                .input('note', sql.NVarChar, note || null)
+                .input('titleVN', sql.NVarChar, 'ซื้อหวยเวียดนาม')
+                .input('amtVN', sql.Decimal(18,2), -vietDeductAmount)
+                .query(`
+                    ${thaiTimeQuery}
+                    DECLARE @TargetDrawDate DATE;
+                    DECLARE @CurrentTime TIME = CAST(@ThaiTime AS TIME);
+                    DECLARE @CurrentDate DATE = CAST(@ThaiTime AS DATE);
+                    DECLARE @DB_CloseTime TIME = (SELECT TOP 1 close_time FROM System_Settings);
+                    
+                    IF @CurrentTime >= @DB_CloseTime
+                        SET @TargetDrawDate = DATEADD(day, 1, @CurrentDate);
+                    ELSE
+                        SET @TargetDrawDate = @CurrentDate;
+
+                    -- 📝 สร้างบิลหวยเวียดนาม
+                    INSERT INTO Lottery_Orders (user_id, total_amount, currency_code, status, draw_date, created_at, order_note)
+                    OUTPUT INSERTED.order_id
+                    VALUES (@uId, @tPrice, @cur, N'รอผลตรวจ', @TargetDrawDate, @ThaiTime, @note);
+
+                    -- 📝 บันทึกประวัติ Transaction เป็น "ซื้อหวยเวียดนาม"
+                    INSERT INTO Transactions (user_id, transaction_type, title, amount, status, created_at)
+                    VALUES (@uId, 'Buy Lottery', @titleVN, @amtVN, 'Completed', @ThaiTime);
+                `);
+            
+            const vietOrderId = vOrderRes.recordset[0].order_id;
+            finalOrderId = vietOrderId;
+
+            // บันทึกเลขหวยเวียดนาม
+            for (const item of vietItems) {
+                const iReq = new sql.Request(transaction);
+                await iReq.input('oId', sql.Int, vietOrderId).input('lNum', sql.VarChar, item.number).input('lType', sql.VarChar, item.type).input('p', sql.Decimal(18,2), item.price)
+                    .query(`INSERT INTO Lottery_Order_Items (order_id, lottery_type, selected_number, price, status) VALUES (@oId, @lType, @lNum, @p, N'รอผลตรวจ')`);
+            }
         }
 
         // ==========================================
@@ -1533,7 +1578,7 @@ app.post('/api/lottery/buy', async (req, res) => {
         }
 
         await transaction.commit();
-        res.status(200).json({ success: true, message: 'ชำระเงินสำเร็จ', order_id: orderId });
+        res.status(200).json({ success: true, message: 'ชำระเงินสำเร็จ', order_id: finalOrderId });
 
     } catch (error) {
         await transaction.rollback();
