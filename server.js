@@ -3436,6 +3436,54 @@ app.post('/api/admin/thai-lottery/execute-draw', async (req, res) => {
     }
 });
 
+// ==========================================
+// 5. 🇹🇭 API: แก้ไขข้อมูลงวดหวยไทย (ป้องกันงวดขยะ)
+// ==========================================
+app.post('/api/admin/thai-lottery/edit-round', async (req, res) => {
+    const { round_id, round_number, open_time, close_time, draw_time } = req.body;
+    
+    if (!round_id || !round_number || !open_time || !close_time || !draw_time) {
+        return res.status(400).json({ success: false, message: 'กรุณากรอกข้อมูลให้ครบถ้วน' });
+    }
+
+    try {
+        const pool = await sql.connect(dbConfig);
+        
+        // เช็คสถานะก่อนว่ามีสิทธิ์แก้ไหม (ถ้าออกผลแล้วห้ามแก้)
+        const check = await pool.request().input('rId', sql.Int, round_id).query(`SELECT status FROM Yeeki_Rounds WHERE round_id = @rId`);
+        if (check.recordset.length === 0) return res.status(404).json({ success: false, message: 'ไม่พบงวดนี้ในระบบ' });
+        if (check.recordset[0].status === 'Completed') return res.status(400).json({ success: false, message: 'งวดนี้ประกาศผลไปแล้ว ไม่สามารถแก้ไขได้' });
+
+        // แปลงข้อมูลให้ตรงฟอร์แมต
+        const roundNameText = round_number; 
+        const d = new Date(draw_time);
+        const fakeIntRound = parseInt(`${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`);
+
+        // อัปเดตข้อมูล
+        await pool.request()
+            .input('rId', sql.Int, round_id)
+            .input('rNumInt', sql.Int, fakeIntRound)
+            .input('rName', sql.NVarChar, roundNameText)
+            .input('oTime', sql.DateTime, open_time)
+            .input('cTime', sql.DateTime, close_time)
+            .input('dTime', sql.DateTime, draw_time)
+            .query(`
+                UPDATE Yeeki_Rounds 
+                SET round_number = @rNumInt, 
+                    round_name = @rName, 
+                    open_time = @oTime, 
+                    close_time = @cTime, 
+                    draw_time = @dTime, 
+                    draw_date = CAST(@dTime AS DATE)
+                WHERE round_id = @rId
+            `);
+
+        res.json({ success: true, message: '✅ อัปเดตข้อมูลสำเร็จ!' });
+    } catch (err) {
+        console.error("Edit Round Error:", err);
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
 
 // ==========================================
 // 4. 🇹🇭 API: ซื้อหวยรัฐบาลไทย (แยกตาราง Yeeki_Orders และแยกบิล 100%)
