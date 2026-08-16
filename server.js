@@ -53,7 +53,7 @@ app.use(cors({
     }
     return callback(null, true);
   },
-  credentials: true // อนุญาตให้ส่ง Cookie หรือ Header ยืนยันตัวตนได้
+  credentials: true // อนุญาตให้ส่ง Cookie หรือ Header ยืนยันตัวตนได้ภ
 }));
 // ขยายขีดจำกัดให้รองรับรูปภาพสลิปที่แปลงเป็น Base64 (ตั้งไว้ที่ 50MB)
 app.use(express.json({ limit: '50mb' }));
