@@ -6541,11 +6541,41 @@ app.put('/api/admin/p2p-settings', async (req, res) => {
 // 🌟 สิ้นสุด  API P2P
 // ==========================================
 // ==========================================
-// 🌟 [ADMIN] ADS โปรโมชั้น  เริ่ม
+// 🌟 [ADMIN] ADS และ โปรโมชั่น  เริ่ม
 // ==========================================
-// ==========================================
-// 🌟 [ADMIN] จัดการป้ายโฆษณาคั่นเวลา (ADS)
-// ==========================================
+
+// 1. จัดการคิวโปรโมชั่น (แจกโบนัสฝาก)
+app.get('/api/admin/promotions', async (req, res) => {
+    try {
+        const pool = await sql.connect(dbConfig);
+        const result = await pool.request().query('SELECT * FROM P2P_Promotions ORDER BY start_time ASC');
+        res.json({ success: true, promotions: result.recordset });
+    } catch (err) { res.status(500).json({ success: false, message: err.message }); }
+});
+
+app.post('/api/admin/promotions', async (req, res) => {
+    try {
+        const { title, bonus_percent, start_time, end_time } = req.body;
+        const pool = await sql.connect(dbConfig);
+        await pool.request()
+            .input('title', sql.NVarChar, title)
+            .input('bonus', sql.Decimal(5,2), bonus_percent)
+            .input('start', sql.DateTime, start_time)
+            .input('end', sql.DateTime, end_time)
+            .query('INSERT INTO P2P_Promotions (title, bonus_percent, start_time, end_time) VALUES (@title, @bonus, @start, @end)');
+        res.json({ success: true, message: 'เพิ่มโปรโมชั่นสำเร็จ' });
+    } catch (err) { res.status(500).json({ success: false, message: err.message }); }
+});
+
+app.delete('/api/admin/promotions/:id', async (req, res) => {
+    try {
+        const pool = await sql.connect(dbConfig);
+        await pool.request().input('id', sql.Int, req.params.id).query('DELETE FROM P2P_Promotions WHERE promo_id = @id');
+        res.json({ success: true, message: 'ลบสำเร็จ' });
+    } catch (err) { res.status(500).json({ success: false, message: err.message }); }
+});
+
+// 2. จัดการป้ายโฆษณาคั่นเวลา (ADS)
 app.get('/api/admin/ads', async (req, res) => {
     try {
         const pool = await sql.connect(dbConfig);
@@ -6559,8 +6589,8 @@ app.post('/api/admin/ads', async (req, res) => {
         const { title, description, media_type, media_url } = req.body;
         const pool = await sql.connect(dbConfig);
         await pool.request()
-            .input('title', sql.NVarChar, title || '') // 🌟 เปลี่ยนเป็น NVarChar รองรับภาษาไทย
-            .input('desc', sql.NVarChar, description || '') // 🌟 เปลี่ยนเป็น NVarChar รองรับภาษาไทย
+            .input('title', sql.NVarChar, title || '') // รองรับภาษาไทย
+            .input('desc', sql.NVarChar, description || '') // รองรับภาษาไทย
             .input('type', sql.VarChar, media_type)
             .input('url', sql.VarChar, media_url)
             .query('INSERT INTO P2P_Ads (title, description, media_type, media_url) VALUES (@title, @desc, @type, @url)');
@@ -6578,18 +6608,9 @@ app.delete('/api/admin/ads/:id', async (req, res) => {
     } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 });
 
-
-
-
-
-
-
-
-
 // ==========================================
-// 🌟 [ADMIN] ADS โปรโมชั้น  สิ้นสุด
+// 🌟 [ADMIN] ADS และ โปรโมชั่น  สิ้นสุด
 // ==========================================
-
 
 app.listen(port, () => {
     console.log(`🚀 Server เปิดทำงานแล้วที่พอร์ต ${port}`);
