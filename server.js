@@ -6457,7 +6457,65 @@ app.get('/api/p2p/board', async (req, res) => {
     }
 });
 
+// ==========================================
+// 🌟 [ADMIN] ดึงข้อมูลตั้งค่า P2P และโปรโมชั่น
+// ==========================================
+app.get('/api/admin/p2p-settings', async (req, res) => {
+    try {
+        const pool = await sql.connect(dbConfig);
+        const result = await pool.request().query('SELECT TOP 1 * FROM P2P_Settings ORDER BY id ASC');
+        
+        if (result.recordset.length > 0) {
+            res.json({ success: true, settings: result.recordset[0] });
+        } else {
+            res.status(404).json({ success: false, message: 'ไม่พบข้อมูลการตั้งค่า' });
+        }
+    } catch (err) {
+        console.error("Error fetching P2P settings:", err);
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
 
+// ==========================================
+// 🌟 [ADMIN] อัปเดตข้อมูลตั้งค่า P2P และโปรโมชั่น
+// ==========================================
+app.put('/api/admin/p2p-settings', async (req, res) => {
+    try {
+        const { 
+            deposit_bonus_percent, withdraw_fee_percent, 
+            provider_reward_percent, referrer_reward_percent, 
+            request_timeout_minutes, promo_start_time, promo_end_time 
+        } = req.body;
+
+        const pool = await sql.connect(dbConfig);
+        
+        // อัปเดตข้อมูลแถวแรกเสมอ (id = 1)
+        await pool.request()
+            .input('deposit', sql.Decimal(5,2), deposit_bonus_percent)
+            .input('withdraw', sql.Decimal(5,2), withdraw_fee_percent)
+            .input('provider', sql.Decimal(5,2), provider_reward_percent)
+            .input('referrer', sql.Decimal(5,2), referrer_reward_percent)
+            .input('timeout', sql.Int, request_timeout_minutes)
+            .input('p_start', sql.DateTime, promo_start_time || null)
+            .input('p_end', sql.DateTime, promo_end_time || null)
+            .query(`
+                UPDATE P2P_Settings 
+                SET deposit_bonus_percent = @deposit,
+                    withdraw_fee_percent = @withdraw,
+                    provider_reward_percent = @provider,
+                    referrer_reward_percent = @referrer,
+                    request_timeout_minutes = @timeout,
+                    promo_start_time = @p_start,
+                    promo_end_time = @p_end,
+                    updated_at = GETDATE()
+            `);
+
+        res.json({ success: true, message: 'บันทึกการตั้งค่าสำเร็จ' });
+    } catch (err) {
+        console.error("Error updating P2P settings:", err);
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
 
 // ==========================================
 // 🌟 สิ้นสุด  API P2P
