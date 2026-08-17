@@ -6437,7 +6437,7 @@ app.get('/api/p2p/board', async (req, res) => {
             .query(`
                 SELECT r.*, u.username 
                 FROM P2P_Requests r
-                LEFT JOIN Users u ON r.requester_id = u.id
+                LEFT JOIN Users u ON r.requester_id = u.user_id -- 🌟 แก้เป็น user_id แล้วครับ
                 WHERE 
                    (r.status = 'PENDING' AND r.requester_id != @uid AND r.expires_at > GETDATE())
                    OR 
