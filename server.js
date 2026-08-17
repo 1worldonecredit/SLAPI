@@ -6541,7 +6541,9 @@ app.put('/api/admin/p2p-settings', async (req, res) => {
 // 🌟 [CLIENT] ดึงข้อมูลหน้าบอร์ดลูกค้า (แยกบอร์ด กับ โฆษณา)
 // ==========================================
 
-// 1. ดึงข้อมูลกระเป๋าเงินและบอร์ดงาน (ตัวนี้จะถูกหน้าเว็บเรียกทุก 10 วินาที)
+// ==========================================
+// 🌟 [CLIENT] ดึงข้อมูลหน้าบอร์ดลูกค้า (ดึงสกุลเงินและแก้เวลาอเมริกาให้ตรงกับไทย/ลาว)
+// ==========================================
 app.get('/api/p2p/board', async (req, res) => {
     try {
         const { user_id } = req.query;
@@ -6549,11 +6551,25 @@ app.get('/api/p2p/board', async (req, res) => {
         const pool = await sql.connect(dbConfig);
 
         const settingResult = await pool.request().query('SELECT TOP 1 * FROM P2P_Settings');
-        const activePromoResult = await pool.request().query(`SELECT TOP 1 * FROM P2P_Promotions WHERE GETDATE() BETWEEN start_time AND end_time ORDER BY end_time ASC`);
-        const walletResult = await pool.request().input('uid', sql.Int, user_id).query('SELECT balance FROM Wallets WHERE user_id = @uid');
+        
+        // 🌟 1. แก้ปัญหา Timezone ของ Somee: ใช้ GETUTCDATE() + 7 ชั่วโมง เพื่อให้ตรงกับเวลาเอเชีย
+        const activePromoResult = await pool.request().query(`
+            SELECT TOP 1 * FROM P2P_Promotions 
+            WHERE DATEADD(hour, 7, GETUTCDATE()) BETWEEN start_time AND end_time 
+            ORDER BY end_time ASC
+        `);
+        
+        // 🌟 2. ดึงยอดเงิน พร้อมสกุลเงิน (Currency) ของยูสเซอร์นั้นๆ จาก DB 100%
+        const walletResult = await pool.request().input('uid', sql.Int, user_id).query(`
+            SELECT w.balance, u.currency 
+            FROM Wallets w 
+            LEFT JOIN Users u ON w.user_id = u.user_id 
+            WHERE w.user_id = @uid
+        `);
+        
         const missionsResult = await pool.request().input('uid', sql.Int, user_id).query(`
             SELECT r.*, u.username FROM P2P_Requests r LEFT JOIN Users u ON r.requester_id = u.user_id 
-            WHERE (r.status = 'PENDING' AND r.requester_id != @uid AND r.expires_at > GETDATE()) OR (r.provider_id = @uid AND r.status IN ('ACCEPTED', 'VERIFYING')) ORDER BY r.created_at DESC
+            WHERE (r.status = 'PENDING' AND r.requester_id != @uid AND r.expires_at > DATEADD(hour, 7, GETUTCDATE())) OR (r.provider_id = @uid AND r.status IN ('ACCEPTED', 'VERIFYING')) ORDER BY r.created_at DESC
         `);
 
         res.json({ 
@@ -6561,6 +6577,7 @@ app.get('/api/p2p/board', async (req, res) => {
             settings: settingResult.recordset[0], 
             activePromo: activePromoResult.recordset.length > 0 ? activePromoResult.recordset[0] : null,
             wallet: walletResult.recordset.length > 0 ? walletResult.recordset[0].balance : 0, 
+            currency: (walletResult.recordset.length > 0 && walletResult.recordset[0].currency) ? walletResult.recordset[0].currency : 'THB', // ส่งสกุลเงินกลับไปให้หน้าเว็บ
             missions: missionsResult.recordset 
         });
     } catch (err) { res.status(500).json({ success: false, message: err.message }); }
