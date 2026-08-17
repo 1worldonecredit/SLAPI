@@ -6542,7 +6542,7 @@ app.put('/api/admin/p2p-settings', async (req, res) => {
 // ==========================================
 
 // ==========================================
-// 🌟 [CLIENT] ดึงข้อมูลหน้าบอร์ดลูกค้า (ดึงสกุลเงินและแก้เวลาอเมริกาให้ตรงกับไทย/ลาว)
+// 🌟 [CLIENT] ดึงข้อมูลหน้าบอร์ดลูกค้า (ฉบับอัปเดตดึงสกุลเงิน + แก้เวลาโปรโมชั่น)
 // ==========================================
 app.get('/api/p2p/board', async (req, res) => {
     try {
@@ -6552,14 +6552,14 @@ app.get('/api/p2p/board', async (req, res) => {
 
         const settingResult = await pool.request().query('SELECT TOP 1 * FROM P2P_Settings');
         
-        // 🌟 1. แก้ปัญหา Timezone ของ Somee: ใช้ GETUTCDATE() + 7 ชั่วโมง เพื่อให้ตรงกับเวลาเอเชีย
+        // 🌟 1. แก้ปัญหา Timezone เซิร์ฟเวอร์: ดึงโปรโมชั่นโดยปรับเวลาให้ตรงกับไทย/ลาว (+7)
         const activePromoResult = await pool.request().query(`
             SELECT TOP 1 * FROM P2P_Promotions 
             WHERE DATEADD(hour, 7, GETUTCDATE()) BETWEEN start_time AND end_time 
             ORDER BY end_time ASC
         `);
         
-        // 🌟 2. ดึงยอดเงิน พร้อมสกุลเงิน (Currency) ของยูสเซอร์นั้นๆ จาก DB 100%
+        // 🌟 2. ดึงสกุลเงิน (currency) ของ User จากฐานข้อมูลมาด้วย
         const walletResult = await pool.request().input('uid', sql.Int, user_id).query(`
             SELECT w.balance, u.currency 
             FROM Wallets w 
@@ -6577,10 +6577,12 @@ app.get('/api/p2p/board', async (req, res) => {
             settings: settingResult.recordset[0], 
             activePromo: activePromoResult.recordset.length > 0 ? activePromoResult.recordset[0] : null,
             wallet: walletResult.recordset.length > 0 ? walletResult.recordset[0].balance : 0, 
-            currency: (walletResult.recordset.length > 0 && walletResult.recordset[0].currency) ? walletResult.recordset[0].currency : 'THB', // ส่งสกุลเงินกลับไปให้หน้าเว็บ
+            currency: (walletResult.recordset.length > 0 && walletResult.recordset[0].currency) ? walletResult.recordset[0].currency : 'THB', // 🌟 ส่ง currency กลับไปให้หน้าเว็บ
             missions: missionsResult.recordset 
         });
-    } catch (err) { res.status(500).json({ success: false, message: err.message }); }
+    } catch (err) { 
+        res.status(500).json({ success: false, message: err.message }); 
+    }
 });
 
 // ==========================================
