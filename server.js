@@ -6228,6 +6228,198 @@ app.get('/api/admin/yeeki/history', async (req, res) => {
     }
 });
 
+// ==========================================
+// 🌟 เริ่ม API P2P
+// ==========================================
+
+// ==========================================
+// 🌟 1. ลูกค้าส่งคำขอฝากเงิน (DEPOSIT REQUEST)
+// ==========================================
+app.post('/api/p2p/request-deposit', async (req, res) => {
+    try {
+        const { requester_id, amount, currency } = req.body;
+        const pool = await sql.connect(dbConfig);
+
+        // 1. เช็คว่ามีคำขอฝากที่กำลัง "ค้างอยู่" ไหม? (ห้ามทำซ้อน)
+        const checkActive = await pool.request()
+            .input('uid', sql.Int, requester_id)
+            .query(`SELECT request_id FROM P2P_Requests WHERE requester_id = @uid AND request_type = 'DEPOSIT' AND status IN ('PENDING', 'ACCEPTED', 'VERIFYING')`);
+        
+        if (checkActive.recordset.length > 0) {
+            return res.status(400).json({ success: false, message: 'คุณมีคำขอฝากเงินที่กำลังดำเนินการอยู่ กรุณาทำรายการเดิมให้เสร็จสิ้น' });
+        }
+
+        // 2. ดึงค่า Setting ปัจจุบัน (ดึง % โบนัส และเวลาหมดอายุที่ Admin ตั้งไว้)
+        const setting = await pool.request().query('SELECT TOP 1 * FROM P2P_Settings');
+        const settings = setting.recordset[0];
+        
+        const bonus = (amount * settings.deposit_bonus_percent) / 100;
+        const net_amount = amount + bonus;
+        const provider_reward = (amount * settings.provider_reward_percent) / 100;
+
+        // 3. บันทึกคำขอลง Database พร้อมคำนวณเวลาหมดอายุ
+        await pool.request()
+            .input('req_id', sql.Int, requester_id)
+            .input('curr', sql.VarChar, currency)
+            .input('amt', sql.Decimal, amount)
+            .input('bonus', sql.Decimal, bonus)
+            .input('net', sql.Decimal, net_amount)
+            .input('reward', sql.Decimal, provider_reward)
+            .input('timeout', sql.Int, settings.request_timeout_minutes)
+            .query(`
+                INSERT INTO P2P_Requests (requester_id, request_type, currency, amount, bonus_or_fee, net_amount, provider_reward, expires_at)
+                VALUES (@req_id, 'DEPOSIT', @curr, @amt, @bonus, @net, @reward, DATEADD(minute, @timeout, GETDATE()))
+            `);
+
+        res.json({ success: true, message: 'สร้างคำขอฝากเงินสำเร็จ' });
+    } catch (err) {
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
+
+// ==========================================
+// 🌟 2. ผู้ให้บริการกด "รับงาน" (ACCEPT JOB)
+// ==========================================
+app.post('/api/p2p/accept-job', async (req, res) => {
+    try {
+        const { provider_id, request_id } = req.body;
+        const pool = await sql.connect(dbConfig);
+
+        // 1. ดึงข้อมูลคำขอมาตรวจสอบ
+        const reqData = await pool.request().input('rid', sql.Int, request_id).query(`SELECT * FROM P2P_Requests WHERE request_id = @rid AND status = 'PENDING'`);
+        if (reqData.recordset.length === 0) return res.status(400).json({ success: false, message: 'งานนี้ถูกรับไปแล้ว หรือหมดอายุ' });
+        const job = reqData.recordset[0];
+
+        if (job.requester_id === provider_id) return res.status(400).json({ success: false, message: 'คุณไม่สามารถรับงานของตัวเองได้' });
+
+        // 2. 🌟 ตรวจสอบ "สกุลเงินบัญชีธนาคาร" ว่าตรงกับคำขอไหม
+        // (สมมติว่าตารางเก็บธนาคารชื่อ BankAccounts)
+        const checkBank = await pool.request()
+            .input('pid', sql.Int, provider_id)
+            .input('curr', sql.VarChar, job.currency)
+            .query(`SELECT COUNT(*) as bankCount FROM BankAccounts WHERE user_id = @pid AND currency = @curr`);
+            
+        if (checkBank.recordset[0].bankCount === 0) {
+            return res.status(400).json({ success: false, message: `คุณไม่มีบัญชีธนาคารสกุลเงิน ${job.currency} ไม่สามารถรับงานนี้ได้` });
+        }
+
+        // 3. เริ่ม Transaction (เพราะมีการหักเงิน ต้องห้ามพลาด)
+        const transaction = new sql.Transaction(pool);
+        await transaction.begin();
+
+        try {
+            // เช็คและหักเงิน (Escrow) จาก Wallet คนรับงาน
+            const walletCheck = await transaction.request()
+                .input('pid', sql.Int, provider_id)
+                .input('amt', sql.Decimal, job.amount)
+                .query(`
+                    UPDATE Wallets SET balance = balance - @amt 
+                    OUTPUT INSERTED.balance
+                    WHERE user_id = @pid AND balance >= @amt
+                `);
+            
+            if (walletCheck.recordset.length === 0) {
+                throw new Error('ยอดเงินในกระเป๋าของคุณไม่เพียงพอสำหรับการพักเงิน (Escrow)');
+            }
+
+            // อัปเดตสถานะงานเป็น ACCEPTED
+            await transaction.request()
+                .input('rid', sql.Int, request_id)
+                .input('pid', sql.Int, provider_id)
+                .query(`UPDATE P2P_Requests SET status = 'ACCEPTED', provider_id = @pid, accepted_at = GETDATE() WHERE request_id = @rid`);
+
+            await transaction.commit();
+            res.json({ success: true, message: 'รับงานสำเร็จ! ระบบได้หักเงินไปพักไว้แล้ว' });
+
+        } catch (err) {
+            await transaction.rollback(); // ถ้าพังตรงไหน คืนเงินกลับทันที
+            throw err;
+        }
+    } catch (err) {
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
+
+// ==========================================
+// 🌟 3. ผู้รับงานตรวจสลิปและยืนยัน (VERIFY SLIP) + ระบบแบน 3 ครั้ง
+// ==========================================
+app.post('/api/p2p/verify-slip', async (req, res) => {
+    try {
+        const { provider_id, request_id, is_correct } = req.body;
+        const pool = await sql.connect(dbConfig);
+
+        const reqData = await pool.request().input('rid', sql.Int, request_id).query(`SELECT * FROM P2P_Requests WHERE request_id = @rid AND provider_id = @provider_id`);
+        const job = reqData.recordset[0];
+
+        const transaction = new sql.Transaction(pool);
+        await transaction.begin();
+
+        try {
+            if (is_correct) {
+                // ✅ กรณีสลิปถูกต้อง:
+                // 1. เติมเงินให้คนฝาก (เงินต้น + โบนัส)
+                await transaction.request().input('uid', sql.Int, job.requester_id).input('net', sql.Decimal, job.net_amount)
+                    .query(`UPDATE Wallets SET balance = balance + @net WHERE user_id = @uid`);
+
+                // 2. คืนเงิน Escrow + ค่าคอม ให้คนรับงาน
+                const refund_and_reward = job.amount + job.provider_reward;
+                await transaction.request().input('pid', sql.Int, provider_id).input('total', sql.Decimal, refund_and_reward)
+                    .query(`UPDATE Wallets SET balance = balance + @total WHERE user_id = @pid`);
+
+                // 3. ปิดงาน
+                await transaction.request().input('rid', sql.Int, request_id)
+                    .query(`UPDATE P2P_Requests SET status = 'COMPLETED', completed_at = GETDATE() WHERE request_id = @rid`);
+                
+            } else {
+                // ❌ กรณีเงินไม่เข้า / ยกเลิกงาน
+                // 1. คืนเงิน Escrow ให้คนรับงาน
+                await transaction.request().input('pid', sql.Int, provider_id).input('amt', sql.Decimal, job.amount)
+                    .query(`UPDATE Wallets SET balance = balance + @amt WHERE user_id = @pid`);
+                
+                // 2. ยกเลิกงาน
+                await transaction.request().input('rid', sql.Int, request_id)
+                    .query(`UPDATE P2P_Requests SET status = 'CANCELLED', completed_at = GETDATE() WHERE request_id = @rid`);
+
+                // 3. 🌟 ระบบแบนบัญชี: เพิ่มประวัติยกเลิกให้ลูกค้า ถ้าครบกำหนด -> ล็อกบัญชี
+                const banCheck = await transaction.request().input('uid', sql.Int, job.requester_id).query(`
+                    UPDATE Users SET p2p_cancel_count = p2p_cancel_count + 1 
+                    OUTPUT INSERTED.p2p_cancel_count
+                    WHERE id = @uid
+                `);
+                
+                // ดึงค่าการแบนจาก Setting
+                const setDb = await transaction.request().query('SELECT max_strikes_before_ban FROM P2P_Settings');
+                const maxStrikes = setDb.recordset[0].max_strikes_before_ban;
+
+                if (banCheck.recordset[0].p2p_cancel_count >= maxStrikes) {
+                    await transaction.request().input('uid', sql.Int, job.requester_id).query(`UPDATE Users SET is_locked = 1 WHERE id = @uid`);
+                    // **ตรงนี้เจ้านายสามารถยิง API แจ้งเตือนแอดมินทาง Line Notify ได้เลยครับ**
+                }
+            }
+
+            await transaction.commit();
+            res.json({ success: true, message: is_correct ? 'จบภารกิจ! โอนเงินให้ลูกค้าสำเร็จ' : 'ยกเลิกคำขอ และคืนเงินมัดจำให้คุณแล้ว' });
+
+        } catch (err) {
+            await transaction.rollback();
+            throw err;
+        }
+    } catch (err) {
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
+
+
+
+
+
+
+// ==========================================
+// 🌟 สิ้นสุด  API P2P
+// ==========================================
+
+
+
 app.listen(port, () => {
     console.log(`🚀 Server เปิดทำงานแล้วที่พอร์ต ${port}`);
 });
