@@ -6556,14 +6556,18 @@ app.get('/api/admin/ads', async (req, res) => {
 
 app.post('/api/admin/ads', async (req, res) => {
     try {
-        const { media_type, media_url } = req.body;
+        const { title, description, media_type, media_url } = req.body;
         const pool = await sql.connect(dbConfig);
         await pool.request()
+            .input('title', sql.NVarChar, title || '') // 🌟 เปลี่ยนเป็น NVarChar รองรับภาษาไทย
+            .input('desc', sql.NVarChar, description || '') // 🌟 เปลี่ยนเป็น NVarChar รองรับภาษาไทย
             .input('type', sql.VarChar, media_type)
             .input('url', sql.VarChar, media_url)
-            .query('INSERT INTO P2P_Ads (media_type, media_url) VALUES (@type, @url)');
+            .query('INSERT INTO P2P_Ads (title, description, media_type, media_url) VALUES (@title, @desc, @type, @url)');
         res.json({ success: true, message: 'เพิ่มโฆษณาสำเร็จ' });
-    } catch (err) { res.status(500).json({ success: false, message: err.message }); }
+    } catch (err) { 
+        res.status(500).json({ success: false, message: err.message }); 
+    }
 });
 
 app.delete('/api/admin/ads/:id', async (req, res) => {
