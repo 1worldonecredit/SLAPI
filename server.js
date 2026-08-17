@@ -6538,6 +6538,52 @@ app.put('/api/admin/p2p-settings', async (req, res) => {
 });
 
 // ==========================================
+// 🌟 [CLIENT] ดึงข้อมูลหน้าบอร์ดลูกค้า (แยกบอร์ด กับ โฆษณา)
+// ==========================================
+
+// 1. ดึงข้อมูลกระเป๋าเงินและบอร์ดงาน (ตัวนี้จะถูกหน้าเว็บเรียกทุก 10 วินาที)
+app.get('/api/p2p/board', async (req, res) => {
+    try {
+        const { user_id } = req.query;
+        if (!user_id) return res.status(400).json({ success: false, message: 'Missing user_id' });
+        const pool = await sql.connect(dbConfig);
+
+        const settingResult = await pool.request().query('SELECT TOP 1 * FROM P2P_Settings');
+        const activePromoResult = await pool.request().query(`SELECT TOP 1 * FROM P2P_Promotions WHERE GETDATE() BETWEEN start_time AND end_time ORDER BY end_time ASC`);
+        const walletResult = await pool.request().input('uid', sql.Int, user_id).query('SELECT balance FROM Wallets WHERE user_id = @uid');
+        const missionsResult = await pool.request().input('uid', sql.Int, user_id).query(`
+            SELECT r.*, u.username FROM P2P_Requests r LEFT JOIN Users u ON r.requester_id = u.user_id 
+            WHERE (r.status = 'PENDING' AND r.requester_id != @uid AND r.expires_at > GETDATE()) OR (r.provider_id = @uid AND r.status IN ('ACCEPTED', 'VERIFYING')) ORDER BY r.created_at DESC
+        `);
+
+        res.json({ 
+            success: true, 
+            settings: settingResult.recordset[0], 
+            activePromo: activePromoResult.recordset.length > 0 ? activePromoResult.recordset[0] : null,
+            wallet: walletResult.recordset.length > 0 ? walletResult.recordset[0].balance : 0, 
+            missions: missionsResult.recordset 
+        });
+    } catch (err) { res.status(500).json({ success: false, message: err.message }); }
+});
+
+// ==========================================
+// 🌟 API ใหม่: ดึงเฉพาะโฆษณา/วิดีโอ (ดึงแค่ครั้งเดียวตอนลูกค้าเปิดหน้าเว็บ)
+// ==========================================
+app.get('/api/p2p/active-ads', async (req, res) => {
+    try {
+        const pool = await sql.connect(dbConfig);
+        // ดึงเฉพาะโฆษณาที่ is_active = 1 (เปิดใช้งานอยู่)
+        const result = await pool.request().query(`
+            SELECT * FROM P2P_Ads 
+            WHERE is_active = 1 
+            ORDER BY sort_order ASC, created_at DESC
+        `);
+        res.json({ success: true, ads: result.recordset });
+    } catch (err) { 
+        res.status(500).json({ success: false, message: err.message }); 
+    }
+});
+// ==========================================
 // 🌟 สิ้นสุด  API P2P
 // ==========================================
 // ==========================================
