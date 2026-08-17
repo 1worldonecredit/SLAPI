@@ -6410,7 +6410,52 @@ app.post('/api/p2p/verify-slip', async (req, res) => {
 });
 
 
+// ==========================================
+// 🌟 4. ดึงข้อมูลบอร์ด P2P (รวมโปรโมชั่น และ Wallet)
+// ==========================================
+app.get('/api/p2p/board', async (req, res) => {
+    try {
+        const { user_id } = req.query;
+        if (!user_id) return res.status(400).json({ success: false, message: 'Missing user_id' });
 
+        const pool = await sql.connect(dbConfig);
+
+        // 1. ดึง Setting (โปรโมชั่น)
+        const settingResult = await pool.request().query('SELECT TOP 1 * FROM P2P_Settings');
+        const settings = settingResult.recordset[0];
+
+        // 2. ดึงกระเป๋าเงิน (Wallet) ของตัวเอง
+        const walletResult = await pool.request()
+            .input('uid', sql.Int, user_id)
+            .query('SELECT balance FROM Wallets WHERE user_id = @uid');
+        const wallet = walletResult.recordset.length > 0 ? walletResult.recordset[0].balance : 0;
+
+        // 3. ดึงภารกิจ (ดึงเฉพาะคำขอที่หมดเวลายังไม่เกินกำหนด และ ไม่ใช่ของตัวเอง)
+        // หรือ ภารกิจที่เรา "รับงานไว้แล้ว"
+        const missionsResult = await pool.request()
+            .input('uid', sql.Int, user_id)
+            .query(`
+                SELECT r.*, u.username 
+                FROM P2P_Requests r
+                LEFT JOIN Users u ON r.requester_id = u.id
+                WHERE 
+                   (r.status = 'PENDING' AND r.requester_id != @uid AND r.expires_at > GETDATE())
+                   OR 
+                   (r.provider_id = @uid AND r.status IN ('ACCEPTED', 'VERIFYING'))
+                ORDER BY r.created_at DESC
+            `);
+
+        res.json({ 
+            success: true, 
+            settings: settings, 
+            wallet: wallet, 
+            missions: missionsResult.recordset 
+        });
+    } catch (err) {
+        console.error("Error fetching P2P board:", err);
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
 
 
 
