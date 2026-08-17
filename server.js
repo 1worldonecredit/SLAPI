@@ -6520,7 +6520,51 @@ app.put('/api/admin/p2p-settings', async (req, res) => {
 // ==========================================
 // 🌟 สิ้นสุด  API P2P
 // ==========================================
+// ==========================================
+// 🌟 [ADMIN] ADS โปรโมชั้น  เริ่ม
+// ==========================================
+// ==========================================
+// 🌟 [ADMIN] จัดการป้ายโฆษณาคั่นเวลา (ADS)
+// ==========================================
+app.get('/api/admin/ads', async (req, res) => {
+    try {
+        const pool = await sql.connect(dbConfig);
+        const result = await pool.request().query('SELECT * FROM P2P_Ads ORDER BY created_at DESC');
+        res.json({ success: true, ads: result.recordset });
+    } catch (err) { res.status(500).json({ success: false, message: err.message }); }
+});
 
+app.post('/api/admin/ads', async (req, res) => {
+    try {
+        const { media_type, media_url } = req.body;
+        const pool = await sql.connect(dbConfig);
+        await pool.request()
+            .input('type', sql.VarChar, media_type)
+            .input('url', sql.VarChar, media_url)
+            .query('INSERT INTO P2P_Ads (media_type, media_url) VALUES (@type, @url)');
+        res.json({ success: true, message: 'เพิ่มโฆษณาสำเร็จ' });
+    } catch (err) { res.status(500).json({ success: false, message: err.message }); }
+});
+
+app.delete('/api/admin/ads/:id', async (req, res) => {
+    try {
+        const pool = await sql.connect(dbConfig);
+        await pool.request().input('id', sql.Int, req.params.id).query('DELETE FROM P2P_Ads WHERE ad_id = @id');
+        res.json({ success: true, message: 'ลบสำเร็จ' });
+    } catch (err) { res.status(500).json({ success: false, message: err.message }); }
+});
+
+
+
+
+
+
+
+
+
+// ==========================================
+// 🌟 [ADMIN] ADS โปรโมชั้น  สิ้นสุด
+// ==========================================
 
 
 app.listen(port, () => {
