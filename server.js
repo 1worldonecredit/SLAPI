@@ -6528,15 +6528,12 @@ app.post('/api/p2p/verify-slip', async (req, res) => {
     }
 });
 
-// ==========================================
-// 🌟 [API] ระบบกดปุ่มรับงาน P2P (รัดกุมที่สุด)
-// ==========================================
 app.post('/api/p2p/accept-job', async (req, res) => {
     try {
         const { provider_id, request_id } = req.body;
         const pool = await sql.connect(dbConfig);
         
-        // 📌 1. ดึงข้อมูลคำขอฝากเงินที่ลูกค้ากำลังจะกดรับ
+        // 1. ดึงข้อมูลคำขอฝากเงินที่ลูกค้ากำลังจะกดรับ
         const reqResult = await pool.request()
             .input('reqId', sql.Int, request_id)
             .query(`SELECT * FROM P2P_Requests WHERE request_id = @reqId`);
@@ -6546,27 +6543,28 @@ app.post('/api/p2p/accept-job', async (req, res) => {
         
         if (mission.status !== 'PENDING') return res.json({ success: false, message: 'งานนี้ถูกรับไปแล้ว หรือหมดเวลาไปแล้วครับ' });
         
-        // 📌 2. [ด่านที่ 1] เช็คว่าผู้รับงาน "มีบัญชีธนาคาร" ที่ตรงกับสกุลเงินของงานนี้ และ "อนุมัติแล้ว" หรือไม่?
+        // 2. [สำคัญ!] เช็คบัญชีธนาคาร: ต้องมีบัญชีสกุลเงินเดียวกับงาน และแอดมิน "อนุมัติแล้ว"
         const bankResult = await pool.request()
             .input('uid', sql.Int, provider_id)
-            .input('currency', sql.VarChar, mission.currency) // อิงตามคอลัมน์ currency ของ P2P_Requests
+            .input('currency', sql.VarChar, mission.currency)
             .query(`
                 SELECT TOP 1 b.bank_name, ub.account_number, ub.account_name 
                 FROM UserBanks ub
                 LEFT JOIN Banks b ON ub.bank_id = b.bank_id
                 WHERE ub.user_id = @uid 
                   AND ub.currency_code = @currency 
-                  AND ub.status = 'Approved'
+                  AND ub.status = 'Approved' 
             `);
             
+        // ถ้าไม่มีบัญชีที่ผ่านเงื่อนไข ระบบจะเตะออกทันที
         if (bankResult.recordset.length === 0) {
             return res.json({ 
                 success: false, 
-                message: `❌ คุณยังไม่มีสมุดบัญชีธนาคารสกุลเงิน ${mission.currency} ที่ได้รับการอนุมัติ กรุณาไปเพิ่มและรออนุมัติบัญชีก่อนรับงานนี้ครับ` 
+                message: `❌ คุณยังไม่มีบัญชีธนาคารสกุลเงิน ${mission.currency} ที่ได้รับการอนุมัติ กรุณาไปเพิ่มและรออนุมัติบัญชีก่อนรับงานนี้ครับ` 
             });
         }
         
-        // 📌 3. [ด่านที่ 2] เช็คยอดเงิน Wallet ว่ามีพอให้หักค้ำประกันหรือไม่?
+        // 3. เช็คยอดเงิน Wallet ว่ามีพอให้หักค้ำประกันหรือไม่
         const walletResult = await pool.request()
             .input('uid', sql.Int, provider_id)
             .query(`SELECT balance FROM Wallets WHERE user_id = @uid`);
@@ -6578,27 +6576,20 @@ app.post('/api/p2p/accept-job', async (req, res) => {
                 message: `❌ ยอดเงินใน Wallet ของคุณไม่พอ (ต้องการ ${mission.amount} ${mission.currency} แต่คุณมี ${providerBalance} ${mission.currency})` 
             });
         }
-        
-        const providerBank = bankResult.recordset[0];
-        const bankDetailsStr = `${providerBank.bank_name} เลขบัญชี: ${providerBank.account_number} (${providerBank.account_name})`;
 
-        // 📌 4. ถ้าผ่านทุกด่าน -> อัปเดตงาน + ดึงบัญชีมารอ + เริ่มนับถอยหลัง
+        // 4. ถ้าผ่านทุกด่าน -> รับงาน, หักเงิน, จับเวลา 15 นาที
         await pool.request()
             .input('reqId', sql.Int, request_id)
             .input('providerId', sql.Int, provider_id)
-            .input('providerBankDetails', sql.NVarChar, bankDetailsStr) // บันทึกข้อมูลบัญชีของผู้รับงานลงไปในงานด้วย
             .query(`
                 UPDATE P2P_Requests 
                 SET status = 'ACCEPTED', 
                     provider_id = @providerId, 
-                    /* สมมติว่าเจ้านายมีคอลัมน์เก็บข้อมูลบัญชีผู้รับเงินไว้ให้คนฝากดู */
-                    /* provider_bank_details = @providerBankDetails, */ 
                     accepted_at = GETDATE(), 
-                    expires_at = DATEADD(minute, 15, GETDATE()) -- ให้เวลาคนฝากโอนเงิน 15 นาที 
+                    expires_at = DATEADD(minute, 15, GETDATE())
                 WHERE request_id = @reqId
             `);
 
-        // 📌 5. หักเงิน Wallet ของผู้รับงานไปพักไว้ (ค้ำประกัน)
         await pool.request()
             .input('uid', sql.Int, provider_id)
             .input('amount', sql.Decimal, mission.amount)
