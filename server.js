@@ -6543,20 +6543,19 @@ app.post('/api/p2p/accept-job', async (req, res) => {
         
         if (mission.status !== 'PENDING') return res.json({ success: false, message: 'งานนี้ถูกรับไปแล้ว หรือหมดเวลาไปแล้วครับ' });
         
-        // 2. [สำคัญ!] เช็คบัญชีธนาคาร: ต้องมีบัญชีสกุลเงินเดียวกับงาน และแอดมิน "อนุมัติแล้ว"
+        // 2. [สำคัญ!] เช็คบัญชีธนาคาร: (แก้ไขเอา bank_name ออก เพื่อแก้บัค Error)
         const bankResult = await pool.request()
             .input('uid', sql.Int, provider_id)
             .input('currency', sql.VarChar, mission.currency)
             .query(`
-                SELECT TOP 1 b.bank_name, ub.account_number, ub.account_name 
-                FROM UserBanks ub
-                LEFT JOIN Banks b ON ub.bank_id = b.bank_id
-                WHERE ub.user_id = @uid 
-                  AND ub.currency_code = @currency 
-                  AND ub.status = 'Approved' 
+                SELECT TOP 1 account_number, account_name 
+                FROM UserBanks 
+                WHERE user_id = @uid 
+                  AND currency_code = @currency 
+                  AND status = 'Approved' 
             `);
             
-       // ถ้าไม่มีบัญชีที่ผ่านเงื่อนไข ระบบจะเตะออกทันที
+       // ถ้าไม่มีบัญชีที่ผ่านเงื่อนไข ระบบจะเตะออกทันที พร้อมส่ง isBankError ไปให้หน้าเว็บ
         if (bankResult.recordset.length === 0) {
             return res.json({ 
                 success: false, 
