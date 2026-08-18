@@ -6261,6 +6261,7 @@ app.post('/api/p2p/request-deposit', async (req, res) => {
         const net_amount = parseFloat(amount) + bonus_amount;
 
         // 🌟 3. บันทึกลงตาราง พร้อมประทับตราเวลาหมดอายุ (expires_at = ปัจจุบัน + นาทีที่ตั้งไว้)
+        // 🌟 3. บันทึกลงตาราง บังคับใช้เวลาประเทศไทย (GETUTCDATE() + 7 ชั่วโมง)
         await pool.request()
             .input('req_id', sql.Int, requester_id)
             .input('type', sql.VarChar, 'DEPOSIT')
@@ -6269,10 +6270,10 @@ app.post('/api/p2p/request-deposit', async (req, res) => {
             .input('bonus', sql.Decimal(18, 2), bonus_amount)
             .input('net', sql.Decimal(18, 2), net_amount)
             .input('reward', sql.Decimal(18, 2), provider_reward)
-            .input('timeout', sql.Int, board_timeout) // ส่งตัวแปรเวลาเข้าไป
+            .input('timeout', sql.Int, board_timeout)
             .query(`
                 INSERT INTO P2P_Requests (requester_id, request_type, currency, amount, bonus_or_fee, net_amount, provider_reward, status, created_at, expires_at) 
-                VALUES (@req_id, @type, @curr, @amt, @bonus, @net, @reward, 'PENDING', GETDATE(), DATEADD(minute, @timeout, GETDATE()))
+                VALUES (@req_id, @type, @curr, @amt, @bonus, @net, @reward, 'PENDING', DATEADD(hour, 7, GETUTCDATE()), DATEADD(minute, @timeout, DATEADD(hour, 7, GETUTCDATE())))
             `);
 
         res.json({ success: true, message: 'สร้างคำขอฝากเงินสำเร็จ' });
