@@ -1187,45 +1187,32 @@ app.get('/api/admin/user-banks', async (req, res) => {
 });
 
 // ==========================================
-// 2. API อัปเดตสถานะ (อนุมัติ/ไม่อนุมัติ) + แจ้งเตือน + เก็บชื่อคนทำ
+// 🏦 [ADMIN] อนุมัติ / ปฏิเสธ สมุดบัญชีลูกค้า
 // ==========================================
 app.put('/api/admin/user-banks/:id/status', async (req, res) => {
-    const { id } = req.params;
-    const { status, user_id, admin_name, reject_reason } = req.body; 
-    // status คาดหวังเป็น: 'Approved' (ผ่าน) หรือ 'Rejected' (ไม่ผ่าน)
-
     try {
+        const user_bank_id = req.params.id;
+        const { status, reject_reason } = req.body; // รับค่า 'Approved' หรือ 'Rejected' และเหตุผล
+
         const pool = await sql.connect(dbConfig);
         
-        // 🌟 1. อัปเดตสถานะในตาราง UserBanks
-        // (หมายเหตุ: หากคุณต้องการเก็บชื่อคนตรวจลง DB แนะนำให้เพิ่มคอลัมน์ reviewed_by ในตาราง UserBanks ก่อนนะครับ)
+        // อัปเดตสถานะสมุดบัญชี และใส่เหตุผล (ถ้ามี)
         await pool.request()
-            .input('id', sql.Int, id)
+            .input('id', sql.Int, user_bank_id)
             .input('status', sql.VarChar, status)
-            // .input('reviewed_by', sql.NVarChar, admin_name) // เปิดใช้บรรทัดนี้ถ้าเพิ่มคอลัมน์แล้ว
+            .input('reason', sql.NVarChar(sql.MAX), reject_reason || null)
             .query(`
                 UPDATE UserBanks 
-                SET status = @status 
+                SET status = @status, 
+                    reject_reason = @reason
                 WHERE user_bank_id = @id
             `);
-
-        // 🌟 2. ส่ง Notification แจ้งลูกค้า
-        const notifMessage = status === 'Approved' 
-            ? `บัญชีธนาคาร ${reject_reason || ''} ของคุณได้รับการอนุมัติเรียบร้อยแล้ว` 
-            : `คำขอเพิ่มบัญชีถูกปฏิเสธ: ${reject_reason || 'ข้อมูลไม่ถูกต้อง'}`;
             
-        await pool.request()
-            .input('user_id', sql.Int, user_id)
-            .input('message', sql.NVarChar, notifMessage)
-            .query(`
-                INSERT INTO Notifications (user_id, message, is_read, created_at)
-                VALUES (@user_id, @message, 0, GETDATE())
-            `);
-
-        res.json({ success: true, message: 'บันทึกข้อมูลและส่งแจ้งเตือนสำเร็จ' });
+        res.json({ success: true, message: 'อัปเดตสถานะสมุดบัญชีสำเร็จ' });
     } catch (err) {
-        console.error('Error updating bank status:', err);
-        res.status(500).json({ success: false, message: 'Server error' });
+        console.error("Bank Status Update Error:", err);
+        // ถ้าขึ้น Error ให้ส่งข้อความแจ้งเตือนกลับไปตรงๆ
+        res.status(500).json({ success: false, message: 'Server error: ' + err.message });
     }
 });
 
