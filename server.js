@@ -710,31 +710,6 @@ app.post('/api/login', async (req, res) => {
   }
 });
 
-// ==========================================
-// API: ทดสอบ ลบได้หลังทดสอบ
-// ==========================================
-app.get('/api/admin/test-db-connection', async (req, res) => {
-  try {
-    const pool = await sql.connect(dbConfig);
-    // ดึงผู้ใช้งานมา 1 คน (TOP 1) เพื่อพิสูจน์ว่าเชื่อม DB ได้จริง
-    const result = await pool.request().query(`
-      SELECT TOP 1 un.firstname, un.lastname, u.country 
-      FROM Users u
-      LEFT JOIN UserName_Lastname un ON u.user_id = un.user_id
-    `);
-    
-    if (result.recordset.length > 0) {
-      res.json({ success: true, data: result.recordset[0] });
-    } else {
-      res.json({ success: false, message: 'ไม่พบข้อมูล' });
-    }
-  } catch (err) {
-    console.error('DB Test Error:', err);
-    res.status(500).json({ success: false, message: 'Database Error' });
-  }
-});
-
-
 
 // ==========================================
 // API: ดึงอัตราแลกเปลี่ยน (Exchange Rates)
