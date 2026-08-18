@@ -1136,16 +1136,15 @@ app.put('/api/user-banks/:id', async (req, res) => {
 
         const pool = await sql.connect(dbConfig);
 
-        // 🌟 สร้างเงื่อนไข: ถ้ายูสเซอร์อัปรูปใหม่มา ให้เซฟรูปใหม่ ถ้าไม่อัปใหม่อันเดิมไว้
+        // 🌟 เอา updated_at = GETDATE() ออกแล้วครับ จะได้ไม่ Error
         let updateQuery = `
             UPDATE UserBanks 
             SET bank_id = @bankId, 
                 account_number = @accNum, 
                 account_name = @accName, 
                 currency_code = @curr, 
-                status = 'Pending', /* 🌟 ปรับให้กลับไปรอแอดมินตรวจใหม่ */
-                reject_reason = NULL, /* 🌟 ล้างเหตุผลที่เคยโดนปฏิเสธทิ้ง */
-                updated_at = GETDATE()
+                status = 'Pending', 
+                reject_reason = NULL 
         `;
         if (passbookBase64) updateQuery += `, passbook_image = @img`;
         updateQuery += ` WHERE user_bank_id = @id`;
@@ -1165,7 +1164,6 @@ app.put('/api/user-banks/:id', async (req, res) => {
         res.status(500).json({ success: false, message: 'Server error: ' + err.message });
     }
 });
-
 
 // ==========================================
 // 🌟 1. API: ดึงข้อมูลสัตว์และตัวเลขทั้งหมด (GET)
