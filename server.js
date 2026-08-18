@@ -1136,7 +1136,6 @@ app.put('/api/user-banks/:id', async (req, res) => {
 
         const pool = await sql.connect(dbConfig);
 
-        // 🌟 เอา updated_at = GETDATE() ออกแล้วครับ จะได้ไม่ Error
         let updateQuery = `
             UPDATE UserBanks 
             SET bank_id = @bankId, 
@@ -1153,7 +1152,7 @@ app.put('/api/user-banks/:id', async (req, res) => {
             .input('id', sql.Int, bankId)
             .input('bankId', sql.Int, newBankId)
             .input('accNum', sql.VarChar, accountNumber)
-            .input('accName', sql.VarChar, accountName)
+            .input('accName', sql.NVarChar, accountName) // 🌟 เปลี่ยนเป็น NVarChar ตรงนี้ครับ ภาษาไทยมาเต็มแน่นอน!
             .input('curr', sql.VarChar, currencyCode);
 
         if (passbookBase64) request.input('img', sql.NVarChar(sql.MAX), passbookBase64);
