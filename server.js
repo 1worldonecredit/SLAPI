@@ -1093,7 +1093,8 @@ app.get('/api/admin/user-banks', async (req, res) => {
             SELECT 
                 ub.user_bank_id, ub.user_id, ub.bank_id, ub.account_name, ub.account_number, 
                 ub.is_primary, ub.created_at, ub.currency_code, ub.status, 
-                ub.passbook_image, /* 🌟 เพิ่มคอลัมน์รูปภาพตรงนี้ครับ */
+                ub.passbook_image, 
+                ub.reject_reason, /* 🌟 เพิ่มคอลัมน์ประวัติการสั่งแก้ตรงนี้ครับ */
                 un.firstname, un.lastname
             FROM UserBanks ub
             LEFT JOIN UserName_Lastname un ON ub.user_id = un.user_id
