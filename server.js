@@ -6287,17 +6287,20 @@ app.post('/api/p2p/request-deposit', async (req, res) => {
 });
 
 // ==========================================
-// ⏱️ [ADMIN] ดึงข้อมูลตั้งค่าเวลา P2P
+// ⏱️ [ADMIN] ดึงข้อมูลตั้งค่าเวลา P2P (แพ็คคู่)
 // ==========================================
 app.get('/api/admin/p2p-time-setting', async (req, res) => {
     try {
         const pool = await sql.connect(dbConfig);
-        // ตรวจสอบว่ามีคอลัมน์ mission_timeout_minutes หรือยัง ถ้าไม่มีเราส่งค่า Default ไปก่อน
         const result = await pool.request().query('SELECT TOP 1 * FROM P2P_Settings');
-        if (result.recordset.length > 0 && result.recordset[0].mission_timeout_minutes) {
-            res.json({ success: true, timeout: result.recordset[0].mission_timeout_minutes });
+        if (result.recordset.length > 0) {
+            res.json({ 
+                success: true, 
+                board_timeout: result.recordset[0].mission_timeout_minutes || 30,
+                provider_timeout: result.recordset[0].provider_timeout_minutes || 15 
+            });
         } else {
-            res.json({ success: true, timeout: 30 }); // ค่าเริ่มต้น 30 นาที
+            res.json({ success: true, board_timeout: 30, provider_timeout: 15 });
         }
     } catch (err) {
         res.status(500).json({ success: false, message: err.message });
@@ -6305,31 +6308,29 @@ app.get('/api/admin/p2p-time-setting', async (req, res) => {
 });
 
 // ==========================================
-// ⏱️ [ADMIN] อัปเดตเวลาภารกิจ P2P
+// ⏱️ [ADMIN] อัปเดตเวลาภารกิจ P2P (แพ็คคู่)
 // ==========================================
 app.post('/api/admin/p2p-time-update', async (req, res) => {
     try {
-        const { timeout_minutes } = req.body;
+        const { board_timeout, provider_timeout } = req.body;
         const pool = await sql.connect(dbConfig);
-        
-        // เช็คว่ามีข้อมูลในตารางหรือยัง
         const check = await pool.request().query('SELECT COUNT(*) as count FROM P2P_Settings');
         
-        // ⚠️ เราใช้ try-catch ครอบ SQL ไว้ เผื่อฐานข้อมูลเจ้านายยังไม่ได้สร้างคอลัมน์นี้
         try {
             if (check.recordset[0].count === 0) {
                 await pool.request()
-                    .input('mins', sql.Int, timeout_minutes)
-                    .query(`INSERT INTO P2P_Settings (mission_timeout_minutes) VALUES (@mins)`);
+                    .input('b_mins', sql.Int, board_timeout)
+                    .input('p_mins', sql.Int, provider_timeout)
+                    .query(`INSERT INTO P2P_Settings (mission_timeout_minutes, provider_timeout_minutes) VALUES (@b_mins, @p_mins)`);
             } else {
                 await pool.request()
-                    .input('mins', sql.Int, timeout_minutes)
-                    .query(`UPDATE P2P_Settings SET mission_timeout_minutes = @mins`);
+                    .input('b_mins', sql.Int, board_timeout)
+                    .input('p_mins', sql.Int, provider_timeout)
+                    .query(`UPDATE P2P_Settings SET mission_timeout_minutes = @b_mins, provider_timeout_minutes = @p_mins`);
             }
-            res.json({ success: true, message: 'บันทึกเวลา P2P สำเร็จ! (มีผลกับงานใหม่ทันที)' });
+            res.json({ success: true, message: 'บันทึกเวลา P2P ทั้ง 2 ระบบสำเร็จเรียบร้อย!' });
         } catch (sqlErr) {
-            // ถ้าพัง แปลว่าเจ้านายต้องไปกด New Query สร้างคอลัมน์ในฐานข้อมูลก่อนครับ
-            res.json({ success: false, message: 'กรุณาเพิ่มคอลัมน์ mission_timeout_minutes (ประเภท INT) ในตาราง P2P_Settings ก่อนครับ' });
+            res.json({ success: false, message: 'กรุณาเพิ่มคอลัมน์เวลาลงในตาราง P2P_Settings ก่อนครับ' });
         }
     } catch (err) {
         res.status(500).json({ success: false, message: err.message });
