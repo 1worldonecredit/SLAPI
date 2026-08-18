@@ -1126,6 +1126,35 @@ app.delete('/api/user-banks/:id', async (req, res) => {
     }
 });
 
+
+// ==========================================
+// 🏦 [ADMIN] อนุมัติ / ปฏิเสธ สมุดบัญชีลูกค้า
+// ==========================================
+app.put('/api/admin/user-banks/:id/status', async (req, res) => {
+    try {
+        const user_bank_id = req.params.id;
+        const { status, reject_reason } = req.body; 
+
+        const pool = await sql.connect(dbConfig);
+        
+        // อัปเดตสถานะสมุดบัญชี และใส่เหตุผลที่ไม่อนุมัติ (ถ้ามี)
+        await pool.request()
+            .input('id', sql.Int, user_bank_id)
+            .input('status', sql.VarChar, status)
+            .input('reason', sql.NVarChar(sql.MAX), reject_reason || null)
+            .query(`
+                UPDATE UserBanks 
+                SET status = @status, 
+                    reject_reason = @reason
+                WHERE user_bank_id = @id
+            `);
+            
+        res.json({ success: true, message: 'อัปเดตสถานะสมุดบัญชีสำเร็จ' });
+    } catch (err) {
+        console.error("เกิดข้อผิดพลาดในการอัปเดตสถานะบัญชี:", err);
+        res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดที่เซิร์ฟเวอร์: ' + err.message });
+    }
+});
 // ==========================================
 // ✏️ [CLIENT] แก้ไขสมุดบัญชีที่โดนปฏิเสธ (ส่งตรวจใหม่)
 // ==========================================
