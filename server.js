@@ -6233,7 +6233,7 @@ app.get('/api/admin/yeeki/history', async (req, res) => {
 // ==========================================
 
 // ==========================================
-// 💸 [CLIENT] สร้างคำขอฝากเงิน (ดึงค่าคอมมิชชั่นจากหน้า Admin มาคำนวณ)
+// 💸 [CLIENT] สร้างคำขอฝากเงิน (เพิ่มระบบดึงเวลาจาก P2P_Settings)
 // ==========================================
 app.post('/api/p2p/request-deposit', async (req, res) => {
     try {
@@ -6243,30 +6243,24 @@ app.post('/api/p2p/request-deposit', async (req, res) => {
         const pool = await sql.connect(dbConfig);
         
         let bonus_amount = 0;
-        let provider_reward = 0; 
+        let provider_reward = (amount * 1) / 100; // กลับมาใช้เรท 1% ตามที่คุยกันครับ
+        let board_timeout = 30; // เวลาตั้งต้นเผื่อหาตารางไม่เจอ
         
-        // 1. ดึงโปรโมชั่นโบนัสเงินฝาก (ของลูกค้า)
+        // 1. ดึงโปรโมชั่น (แจกโบนัสลูกค้า)
         if (promo_id) {
-            const promo = await pool.request()
-                .input('pid', sql.Int, promo_id)
-                .query('SELECT bonus_percent FROM P2P_Promotions WHERE promo_id = @pid');
-            if (promo.recordset.length > 0) {
-                bonus_amount = (amount * parseFloat(promo.recordset[0].bonus_percent)) / 100;
-            }
+            const promo = await pool.request().input('pid', sql.Int, promo_id).query('SELECT bonus_percent FROM P2P_Promotions WHERE promo_id = @pid');
+            if (promo.recordset.length > 0) bonus_amount = (amount * parseFloat(promo.recordset[0].bonus_percent)) / 100;
         }
-        
-        // 2. ดึงค่า Commission P2P (ของผู้รับงาน) จากตาราง P2P_Settings แบบ Real-time
-        const settings = await pool.request().query('SELECT TOP 1 provider_reward_percent FROM P2P_Settings');
-        if (settings.recordset.length > 0 && settings.recordset[0].provider_reward_percent) {
-            const reward_percent = parseFloat(settings.recordset[0].provider_reward_percent);
-            provider_reward = (amount * reward_percent) / 100; // เอาเปอร์เซ็นต์ที่ตั้งในระบบมาคูณ
-        } else {
-            provider_reward = (amount * 1) / 100; // ถ้าหาไม่เจอ ให้ยึด 1% เป็นค่าสำรองกันระบบพัง
+
+        // 🌟 2. แอบดูตารางเวลา ว่าแอดมินตั้งเวลาให้งานอยู่บนบอร์ดกี่นาที
+        const settings = await pool.request().query('SELECT TOP 1 mission_timeout_minutes FROM P2P_Settings');
+        if (settings.recordset.length > 0 && settings.recordset[0].mission_timeout_minutes) {
+            board_timeout = settings.recordset[0].mission_timeout_minutes;
         }
 
         const net_amount = parseFloat(amount) + bonus_amount;
 
-        // 3. บันทึกลงตารางคำขอ
+        // 🌟 3. บันทึกลงตาราง พร้อมประทับตราเวลาหมดอายุ (expires_at = ปัจจุบัน + นาทีที่ตั้งไว้)
         await pool.request()
             .input('req_id', sql.Int, requester_id)
             .input('type', sql.VarChar, 'DEPOSIT')
@@ -6275,9 +6269,10 @@ app.post('/api/p2p/request-deposit', async (req, res) => {
             .input('bonus', sql.Decimal(18, 2), bonus_amount)
             .input('net', sql.Decimal(18, 2), net_amount)
             .input('reward', sql.Decimal(18, 2), provider_reward)
+            .input('timeout', sql.Int, board_timeout) // ส่งตัวแปรเวลาเข้าไป
             .query(`
-                INSERT INTO P2P_Requests (requester_id, request_type, currency, amount, bonus_or_fee, net_amount, provider_reward, status, created_at) 
-                VALUES (@req_id, @type, @curr, @amt, @bonus, @net, @reward, 'PENDING', GETDATE())
+                INSERT INTO P2P_Requests (requester_id, request_type, currency, amount, bonus_or_fee, net_amount, provider_reward, status, created_at, expires_at) 
+                VALUES (@req_id, @type, @curr, @amt, @bonus, @net, @reward, 'PENDING', GETDATE(), DATEADD(minute, @timeout, GETDATE()))
             `);
 
         res.json({ success: true, message: 'สร้างคำขอฝากเงินสำเร็จ' });
