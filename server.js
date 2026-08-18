@@ -6411,76 +6411,65 @@ app.post('/api/p2p/verify-slip', async (req, res) => {
 
 
 // ==========================================
-// 🌟 4. ดึงข้อมูลบอร์ด P2P (รวมโปรโมชั่น และ Wallet)
+// 🌟 [CLIENT] ดึงข้อมูลหน้าบอร์ดลูกค้า (พร้อมระบบแยกสกุลเงิน & ดึงเรทแลกเปลี่ยน)
 // ==========================================
 app.get('/api/p2p/board', async (req, res) => {
     try {
-        const { user_id } = req.query;
+        // 🌟 รับค่า currency (สกุลเงิน) ที่หน้าเว็บส่งมาด้วย
+        const { user_id, currency } = req.query; 
         if (!user_id) return res.status(400).json({ success: false, message: 'Missing user_id' });
         
-        let pool;
-        try {
-            pool = await sql.connect(dbConfig);
-        } catch(e) {
-            return res.status(500).json({ success: false, message: 'DB Connection Error: ' + e.message });
+        const pool = await sql.connect(dbConfig);
+        
+        // 🌟 ดึงข้อมูลเรทเงินจากตาราง ExchangeRates ของเจ้านาย
+        const rateResult = await pool.request().query('SELECT * FROM ExchangeRates');
+        
+        const settingResult = await pool.request().query('SELECT TOP 1 * FROM P2P_Settings');
+        
+        const activePromoResult = await pool.request().query(`
+            SELECT TOP 1 * FROM P2P_Promotions 
+            WHERE GETDATE() BETWEEN start_time AND end_time 
+            ORDER BY end_time ASC
+        `);
+        
+        // ดึงยอดเงิน (ไม่ดึง u.currency แล้ว เพราะในตาราง Users ไม่มีคอลัมน์นี้)
+        const walletResult = await pool.request()
+            .input('uid', sql.Int, user_id)
+            .query(`SELECT balance FROM Wallets WHERE user_id = @uid`);
+        
+        // 🌟 คัดกรองบอร์ดงาน: โชว์เฉพาะ "งานที่สกุลเงินตรงกับลูกค้าที่ Login อยู่"
+        let missionQuery = `
+            SELECT r.*, u.username 
+            FROM P2P_Requests r 
+            LEFT JOIN Users u ON r.requester_id = u.user_id 
+            WHERE ((r.status = 'PENDING' AND r.requester_id != @uid AND r.expires_at > GETDATE()) 
+               OR (r.provider_id = @uid AND r.status IN ('ACCEPTED', 'VERIFYING')))
+        `;
+        if (currency) {
+            missionQuery += ` AND r.currency = @currency`; // ล็อกสกุลเงิน
         }
+        missionQuery += ` ORDER BY r.created_at DESC`;
 
-        let settingResult;
-        try {
-            settingResult = await pool.request().query('SELECT TOP 1 * FROM P2P_Settings');
-        } catch(e) {
-            return res.status(500).json({ success: false, message: 'Settings Query Error: ' + e.message });
-        }
-        
-        let activePromoResult;
-        try {
-            activePromoResult = await pool.request().query(`
-                SELECT TOP 1 * FROM P2P_Promotions 
-                WHERE GETDATE() BETWEEN start_time AND end_time 
-                ORDER BY end_time ASC
-            `);
-        } catch(e) {
-            return res.status(500).json({ success: false, message: 'Promo Query Error: ' + e.message });
-        }
-        
-        let walletResult;
-        try {
-            walletResult = await pool.request()
-                .input('uid', sql.Int, user_id)
-                .query(`SELECT w.balance, u.currency FROM Wallets w LEFT JOIN Users u ON w.user_id = u.user_id WHERE w.user_id = @uid`);
-        } catch(e) {
-            return res.status(500).json({ success: false, message: 'Wallet Query Error: ' + e.message });
-        }
-        
-        let missionsResult;
-        try {
-            missionsResult = await pool.request()
-                .input('uid', sql.Int, user_id)
-                .query(`SELECT r.*, u.username FROM P2P_Requests r LEFT JOIN Users u ON r.requester_id = u.user_id WHERE (r.status = 'PENDING' AND r.requester_id != @uid AND r.expires_at > GETDATE()) OR (r.provider_id = @uid AND r.status IN ('ACCEPTED', 'VERIFYING')) ORDER BY r.created_at DESC`);
-        } catch(e) {
-            return res.status(500).json({ success: false, message: 'Missions Query Error: ' + e.message });
-        }
+        const missionsResult = await pool.request()
+            .input('uid', sql.Int, user_id)
+            .input('currency', sql.VarChar, currency || 'THB')
+            .query(missionQuery);
 
-        let myRequestsResult;
-        try {
-            myRequestsResult = await pool.request()
-                .input('myuid', sql.Int, user_id)
-                .query(`SELECT * FROM P2P_Requests WHERE requester_id = @myuid ORDER BY created_at DESC`);
-        } catch(e) {
-            return res.status(500).json({ success: false, message: 'MyRequests Query Error: ' + e.message });
-        }
+        // ดึงประวัติของตัวเอง
+        const myRequestsResult = await pool.request()
+            .input('myuid', sql.Int, user_id)
+            .query(`SELECT * FROM P2P_Requests WHERE requester_id = @myuid ORDER BY created_at DESC`);
 
         res.json({ 
             success: true, 
             settings: settingResult.recordset[0] || null, 
             activePromo: activePromoResult.recordset.length > 0 ? activePromoResult.recordset[0] : null,
             wallet: walletResult.recordset.length > 0 ? walletResult.recordset[0].balance : 0, 
-            currency: (walletResult.recordset.length > 0 && walletResult.recordset[0].currency) ? walletResult.recordset[0].currency : 'THB',
+            exchangeRates: rateResult.recordset || [], // 🌟 ส่งเรทแลกเปลี่ยนไปให้หน้าเว็บด้วย
             missions: missionsResult.recordset || [],
             myRequests: myRequestsResult.recordset || [] 
         });
     } catch (err) { 
-        console.error("Board API Error: ", err.message);
         res.status(500).json({ success: false, message: err.message }); 
     }
 });
