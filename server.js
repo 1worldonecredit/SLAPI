@@ -6546,15 +6546,24 @@ app.post('/api/p2p/accept-job', async (req, res) => {
         
         if (mission.status !== 'PENDING') return res.json({ success: false, message: 'งานนี้ถูกรับไปแล้ว หรือหมดเวลาไปแล้วครับ' });
         
-        // 📌 2. [ด่านที่ 1] เช็คว่าผู้รับงาน "มีบัญชีธนาคาร" ที่ตรงกับสกุลเงินของงานนี้หรือไม่?
-        // ⚠️ เปลี่ยนชื่อตาราง UserBankAccounts ให้ตรงกับของเจ้านายนะครับ
+        // 📌 2. [ด่านที่ 1] เช็คว่าผู้รับงาน "มีบัญชีธนาคาร" ที่ตรงกับสกุลเงินของงานนี้ และ "อนุมัติแล้ว" หรือไม่?
         const bankResult = await pool.request()
             .input('uid', sql.Int, provider_id)
-            .input('currency', sql.VarChar, mission.currency)
-            .query(`SELECT TOP 1 bank_name, account_number, account_name FROM UserBankAccounts WHERE user_id = @uid AND currency = @currency`);
+            .input('currency', sql.VarChar, mission.currency) // อิงตามคอลัมน์ currency ของ P2P_Requests
+            .query(`
+                SELECT TOP 1 b.bank_name, ub.account_number, ub.account_name 
+                FROM UserBanks ub
+                LEFT JOIN Banks b ON ub.bank_id = b.bank_id
+                WHERE ub.user_id = @uid 
+                  AND ub.currency_code = @currency 
+                  AND ub.status = 'Approved'
+            `);
             
         if (bankResult.recordset.length === 0) {
-            return res.json({ success: false, message: `❌ คุณยังไม่มีสมุดบัญชีธนาคารสกุลเงิน ${mission.currency} กรุณาไปเพิ่มบัญชีธนาคารก่อนรับงานนี้ครับ` });
+            return res.json({ 
+                success: false, 
+                message: `❌ คุณยังไม่มีสมุดบัญชีธนาคารสกุลเงิน ${mission.currency} ที่ได้รับการอนุมัติ กรุณาไปเพิ่มและรออนุมัติบัญชีก่อนรับงานนี้ครับ` 
+            });
         }
         
         // 📌 3. [ด่านที่ 2] เช็คยอดเงิน Wallet ว่ามีพอให้หักค้ำประกันหรือไม่?
@@ -6564,20 +6573,26 @@ app.post('/api/p2p/accept-job', async (req, res) => {
             
         const providerBalance = walletResult.recordset.length > 0 ? walletResult.recordset[0].balance : 0;
         if (providerBalance < mission.amount) {
-            return res.json({ success: false, message: `❌ ยอดเงินใน Wallet ของคุณไม่พอ (ต้องการ ${mission.amount} ${mission.currency} แต่คุณมี ${providerBalance} ${mission.currency})` });
+            return res.json({ 
+                success: false, 
+                message: `❌ ยอดเงินใน Wallet ของคุณไม่พอ (ต้องการ ${mission.amount} ${mission.currency} แต่คุณมี ${providerBalance} ${mission.currency})` 
+            });
         }
         
         const providerBank = bankResult.recordset[0];
         const bankDetailsStr = `${providerBank.bank_name} เลขบัญชี: ${providerBank.account_number} (${providerBank.account_name})`;
 
-        // 📌 4. ถ้าผ่านทุกด่าน -> อัปเดตงาน + ดึงบัญชีมารอ + เริ่มนับถอยหลัง (สมมติให้เวลาคนฝากโอน 15 นาที)
+        // 📌 4. ถ้าผ่านทุกด่าน -> อัปเดตงาน + ดึงบัญชีมารอ + เริ่มนับถอยหลัง
         await pool.request()
             .input('reqId', sql.Int, request_id)
             .input('providerId', sql.Int, provider_id)
+            .input('providerBankDetails', sql.NVarChar, bankDetailsStr) // บันทึกข้อมูลบัญชีของผู้รับงานลงไปในงานด้วย
             .query(`
                 UPDATE P2P_Requests 
                 SET status = 'ACCEPTED', 
                     provider_id = @providerId, 
+                    /* สมมติว่าเจ้านายมีคอลัมน์เก็บข้อมูลบัญชีผู้รับเงินไว้ให้คนฝากดู */
+                    /* provider_bank_details = @providerBankDetails, */ 
                     accepted_at = GETDATE(), 
                     expires_at = DATEADD(minute, 15, GETDATE()) -- ให้เวลาคนฝากโอนเงิน 15 นาที 
                 WHERE request_id = @reqId
@@ -6594,7 +6609,6 @@ app.post('/api/p2p/accept-job', async (req, res) => {
         res.status(500).json({ success: false, message: 'Server Error: ' + err.message });
     }
 });
-
 // ==========================================
 // 🌟 [CLIENT] ดึงข้อมูลหน้าบอร์ดลูกค้า (โชว์ทุกสกุลเงิน + ไม่กรองเวลา)
 // ==========================================
