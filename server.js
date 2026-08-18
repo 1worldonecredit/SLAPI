@@ -6233,42 +6233,51 @@ app.get('/api/admin/yeeki/history', async (req, res) => {
 // ==========================================
 
 // ==========================================
-// 🌟 1. ลูกค้าส่งคำขอฝากเงิน (DEPOSIT REQUEST)
+// 💸 [CLIENT] สร้างคำขอฝากเงิน (ดึงค่าคอมมิชชั่นจากหน้า Admin มาคำนวณ)
 // ==========================================
 app.post('/api/p2p/request-deposit', async (req, res) => {
     try {
-        const { requester_id, amount, currency } = req.body;
-        const pool = await sql.connect(dbConfig);
+        const { requester_id, amount, currency, promo_id } = req.body;
+        if (!requester_id || !amount) return res.status(400).json({ success: false, message: 'ข้อมูลไม่ครบถ้วน' });
 
-        // 1. เช็คว่ามีคำขอฝากที่กำลัง "ค้างอยู่" ไหม? (ห้ามทำซ้อน)
-        const checkActive = await pool.request()
-            .input('uid', sql.Int, requester_id)
-            .query(`SELECT request_id FROM P2P_Requests WHERE requester_id = @uid AND request_type = 'DEPOSIT' AND status IN ('PENDING', 'ACCEPTED', 'VERIFYING')`);
+        const pool = await sql.connect(dbConfig);
         
-        if (checkActive.recordset.length > 0) {
-            return res.status(400).json({ success: false, message: 'คุณมีคำขอฝากเงินที่กำลังดำเนินการอยู่ กรุณาทำรายการเดิมให้เสร็จสิ้น' });
+        let bonus_amount = 0;
+        let provider_reward = 0; 
+        
+        // 1. ดึงโปรโมชั่นโบนัสเงินฝาก (ของลูกค้า)
+        if (promo_id) {
+            const promo = await pool.request()
+                .input('pid', sql.Int, promo_id)
+                .query('SELECT bonus_percent FROM P2P_Promotions WHERE promo_id = @pid');
+            if (promo.recordset.length > 0) {
+                bonus_amount = (amount * parseFloat(promo.recordset[0].bonus_percent)) / 100;
+            }
+        }
+        
+        // 2. ดึงค่า Commission P2P (ของผู้รับงาน) จากตาราง P2P_Settings แบบ Real-time
+        const settings = await pool.request().query('SELECT TOP 1 provider_reward_percent FROM P2P_Settings');
+        if (settings.recordset.length > 0 && settings.recordset[0].provider_reward_percent) {
+            const reward_percent = parseFloat(settings.recordset[0].provider_reward_percent);
+            provider_reward = (amount * reward_percent) / 100; // เอาเปอร์เซ็นต์ที่ตั้งในระบบมาคูณ
+        } else {
+            provider_reward = (amount * 1) / 100; // ถ้าหาไม่เจอ ให้ยึด 1% เป็นค่าสำรองกันระบบพัง
         }
 
-        // 2. ดึงค่า Setting ปัจจุบัน (ดึง % โบนัส และเวลาหมดอายุที่ Admin ตั้งไว้)
-        const setting = await pool.request().query('SELECT TOP 1 * FROM P2P_Settings');
-        const settings = setting.recordset[0];
-        
-        const bonus = (amount * settings.deposit_bonus_percent) / 100;
-        const net_amount = amount + bonus;
-        const provider_reward = (amount * settings.provider_reward_percent) / 100;
+        const net_amount = parseFloat(amount) + bonus_amount;
 
-        // 3. บันทึกคำขอลง Database พร้อมคำนวณเวลาหมดอายุ
+        // 3. บันทึกลงตารางคำขอ
         await pool.request()
             .input('req_id', sql.Int, requester_id)
-            .input('curr', sql.VarChar, currency)
-            .input('amt', sql.Decimal, amount)
-            .input('bonus', sql.Decimal, bonus)
-            .input('net', sql.Decimal, net_amount)
-            .input('reward', sql.Decimal, provider_reward)
-            .input('timeout', sql.Int, settings.request_timeout_minutes)
+            .input('type', sql.VarChar, 'DEPOSIT')
+            .input('curr', sql.VarChar, currency || 'THB')
+            .input('amt', sql.Decimal(18, 2), amount)
+            .input('bonus', sql.Decimal(18, 2), bonus_amount)
+            .input('net', sql.Decimal(18, 2), net_amount)
+            .input('reward', sql.Decimal(18, 2), provider_reward)
             .query(`
-                INSERT INTO P2P_Requests (requester_id, request_type, currency, amount, bonus_or_fee, net_amount, provider_reward, expires_at)
-                VALUES (@req_id, 'DEPOSIT', @curr, @amt, @bonus, @net, @reward, DATEADD(minute, @timeout, GETDATE()))
+                INSERT INTO P2P_Requests (requester_id, request_type, currency, amount, bonus_or_fee, net_amount, provider_reward, status, created_at) 
+                VALUES (@req_id, @type, @curr, @amt, @bonus, @net, @reward, 'PENDING', GETDATE())
             `);
 
         res.json({ success: true, message: 'สร้างคำขอฝากเงินสำเร็จ' });
