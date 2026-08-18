@@ -1187,31 +1187,61 @@ app.get('/api/admin/user-banks', async (req, res) => {
 });
 
 // ==========================================
-// 🏦 [ADMIN] อนุมัติ / ปฏิเสธ สมุดบัญชีลูกค้า
+// 🗑️ [CLIENT] ลบสมุดบัญชี (แบบ Soft Delete ไม่ลบจริงจากฐานข้อมูล)
 // ==========================================
-app.put('/api/admin/user-banks/:id/status', async (req, res) => {
+app.delete('/api/user-banks/:id', async (req, res) => {
     try {
-        const user_bank_id = req.params.id;
-        const { status, reject_reason } = req.body; // รับค่า 'Approved' หรือ 'Rejected' และเหตุผล
-
+        const bankId = req.params.id;
         const pool = await sql.connect(dbConfig);
         
-        // อัปเดตสถานะสมุดบัญชี และใส่เหตุผล (ถ้ามี)
+        // 🌟 อัปเดตสถานะเป็น Deleted แทนการใช้คำสั่ง DELETE FROM
         await pool.request()
-            .input('id', sql.Int, user_bank_id)
-            .input('status', sql.VarChar, status)
-            .input('reason', sql.NVarChar(sql.MAX), reject_reason || null)
-            .query(`
-                UPDATE UserBanks 
-                SET status = @status, 
-                    reject_reason = @reason
-                WHERE user_bank_id = @id
-            `);
+            .input('id', sql.Int, bankId)
+            .query(`UPDATE UserBanks SET status = 'Deleted' WHERE user_bank_id = @id`);
             
-        res.json({ success: true, message: 'อัปเดตสถานะสมุดบัญชีสำเร็จ' });
+        res.json({ success: true, message: 'ลบบัญชีสำเร็จ' });
     } catch (err) {
-        console.error("Bank Status Update Error:", err);
-        // ถ้าขึ้น Error ให้ส่งข้อความแจ้งเตือนกลับไปตรงๆ
+        res.status(500).json({ success: false, message: 'Server error: ' + err.message });
+    }
+});
+
+// ==========================================
+// ✏️ [CLIENT] แก้ไขสมุดบัญชีที่โดนปฏิเสธ (ส่งตรวจใหม่)
+// ==========================================
+app.put('/api/user-banks/:id', async (req, res) => {
+    try {
+        const bankId = req.params.id;
+        const { firstname, lastname, bankId: newBankId, accountNumber, currencyCode, passbookBase64 } = req.body;
+        const accountName = `${firstname} ${lastname}`;
+
+        const pool = await sql.connect(dbConfig);
+
+        // 🌟 สร้างเงื่อนไข: ถ้ายูสเซอร์อัปรูปใหม่มา ให้เซฟรูปใหม่ ถ้าไม่อัปใหม่อันเดิมไว้
+        let updateQuery = `
+            UPDATE UserBanks 
+            SET bank_id = @bankId, 
+                account_number = @accNum, 
+                account_name = @accName, 
+                currency_code = @curr, 
+                status = 'Pending', /* 🌟 ปรับให้กลับไปรอแอดมินตรวจใหม่ */
+                reject_reason = NULL, /* 🌟 ล้างเหตุผลที่เคยโดนปฏิเสธทิ้ง */
+                updated_at = GETDATE()
+        `;
+        if (passbookBase64) updateQuery += `, passbook_image = @img`;
+        updateQuery += ` WHERE user_bank_id = @id`;
+
+        const request = pool.request()
+            .input('id', sql.Int, bankId)
+            .input('bankId', sql.Int, newBankId)
+            .input('accNum', sql.VarChar, accountNumber)
+            .input('accName', sql.VarChar, accountName)
+            .input('curr', sql.VarChar, currencyCode);
+
+        if (passbookBase64) request.input('img', sql.NVarChar(sql.MAX), passbookBase64);
+
+        await request.query(updateQuery);
+        res.json({ success: true, message: 'บันทึกข้อมูลและส่งตรวจสอบใหม่สำเร็จ' });
+    } catch (err) {
         res.status(500).json({ success: false, message: 'Server error: ' + err.message });
     }
 });
