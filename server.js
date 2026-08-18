@@ -6414,66 +6414,51 @@ app.post('/api/p2p/verify-slip', async (req, res) => {
 // 🌟 4. ดึงข้อมูลบอร์ด P2P (รวมโปรโมชั่น และ Wallet)
 // ==========================================
 // ==========================================
-// 🌟 4. ดึงข้อมูลบอร์ด P2P (รวมโปรโมชั่นคิว, โฆษณา ADS และ Wallet)
+// 🌟 [CLIENT] ดึงข้อมูลหน้าบอร์ดลูกค้า
 // ==========================================
 app.get('/api/p2p/board', async (req, res) => {
     try {
         const { user_id } = req.query;
         if (!user_id) return res.status(400).json({ success: false, message: 'Missing user_id' });
-
         const pool = await sql.connect(dbConfig);
 
-        // 1. ดึง Setting (ตั้งค่าพื้นฐาน P2P เช่น ค่าธรรมเนียม)
         const settingResult = await pool.request().query('SELECT TOP 1 * FROM P2P_Settings');
-        const settings = settingResult.recordset[0];
-
-        // 🌟 2. หาโปรโมชั่นที่ "กำลังทำงานอยู่ในเวลาปัจจุบัน" จากตารางคิว
+        
         const activePromoResult = await pool.request().query(`
             SELECT TOP 1 * FROM P2P_Promotions 
-            WHERE GETDATE() BETWEEN start_time AND end_time 
+            WHERE DATEADD(hour, 7, GETUTCDATE()) BETWEEN start_time AND end_time 
             ORDER BY end_time ASC
         `);
-        const activePromo = activePromoResult.recordset.length > 0 ? activePromoResult.recordset[0] : null;
+        
+        const walletResult = await pool.request().input('uid', sql.Int, user_id).query(`
+            SELECT w.balance, u.currency 
+            FROM Wallets w 
+            LEFT JOIN Users u ON w.user_id = u.user_id 
+            WHERE w.user_id = @uid
+        `);
+        
+        // 🌟 1. ดึงงานของคนอื่น (สำหรับหน้าบอร์ดรับงาน)
+        const missionsResult = await pool.request().input('uid', sql.Int, user_id).query(`
+            SELECT r.*, u.username FROM P2P_Requests r LEFT JOIN Users u ON r.requester_id = u.user_id 
+            WHERE (r.status = 'PENDING' AND r.requester_id != @uid AND r.expires_at > DATEADD(hour, 7, GETUTCDATE())) OR (r.provider_id = @uid AND r.status IN ('ACCEPTED', 'VERIFYING')) ORDER BY r.created_at DESC
+        `);
 
-        // 🌟 3. ถ้าช่วงนี้ไม่มีโปรโมชั่น ให้สุ่มป้ายโฆษณา (ADS) มาแสดงแทน 1 ตัว
-        let activeAd = null;
-        if (!activePromo) {
-            const adResult = await pool.request().query('SELECT TOP 1 * FROM P2P_Ads WHERE is_active = 1 ORDER BY NEWID()');
-            if (adResult.recordset.length > 0) activeAd = adResult.recordset[0];
-        }
+        // 🌟 2. ดึงประวัติคำขอของ "ตัวเอง" ทั้งหมด (สำหรับโชว์หน้าแจ้งฝาก/ถอน)
+        const myRequestsResult = await pool.request().input('uid', sql.Int, user_id).query(`
+            SELECT * FROM P2P_Requests WHERE requester_id = @uid ORDER BY created_at DESC
+        `);
 
-        // 4. ดึงกระเป๋าเงิน (Wallet) ของตัวเอง
-        const walletResult = await pool.request()
-            .input('uid', sql.Int, user_id)
-            .query('SELECT balance FROM Wallets WHERE user_id = @uid');
-        const wallet = walletResult.recordset.length > 0 ? walletResult.recordset[0].balance : 0;
-
-        // 5. ดึงภารกิจ (งานของคนอื่นที่ว่างอยู่ หรือ งานของตัวเองที่รับมาแล้ว)
-        const missionsResult = await pool.request()
-            .input('uid', sql.Int, user_id)
-            .query(`
-                SELECT r.*, u.username 
-                FROM P2P_Requests r
-                LEFT JOIN Users u ON r.requester_id = u.user_id -- 🌟 (ใช้ user_id ตามที่แก้ไว้ครับ)
-                WHERE 
-                   (r.status = 'PENDING' AND r.requester_id != @uid AND r.expires_at > GETDATE())
-                   OR 
-                   (r.provider_id = @uid AND r.status IN ('ACCEPTED', 'VERIFYING'))
-                ORDER BY r.created_at DESC
-            `);
-
-        // 🌟 6. ส่งข้อมูลทั้งหมดกลับไปให้หน้าเว็บลูกค้า (Frontend)
         res.json({ 
             success: true, 
-            settings: settings, 
-            activePromo: activePromo, // ส่งโปรที่กำลังทำงาน
-            activeAd: activeAd,       // ส่งโฆษณา (ถ้าไม่มีโปร)
-            wallet: wallet, 
-            missions: missionsResult.recordset 
+            settings: settingResult.recordset[0], 
+            activePromo: activePromoResult.recordset.length > 0 ? activePromoResult.recordset[0] : null,
+            wallet: walletResult.recordset.length > 0 ? walletResult.recordset[0].balance : 0, 
+            currency: (walletResult.recordset.length > 0 && walletResult.recordset[0].currency) ? walletResult.recordset[0].currency : 'THB',
+            missions: missionsResult.recordset,
+            myRequests: myRequestsResult.recordset // 🌟 ส่งข้อมูลของตัวเองกลับไปด้วย
         });
-    } catch (err) {
-        console.error("Error fetching P2P board:", err);
-        res.status(500).json({ success: false, message: err.message });
+    } catch (err) { 
+        res.status(500).json({ success: false, message: err.message }); 
     }
 });
 
