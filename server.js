@@ -497,36 +497,27 @@ app.get('/api/banks', async (req, res) => {
 });
 
 // ==========================================
-// API 2: ดึงบัญชีธนาคารของ User และเช็กข้อมูลชื่อ
+// 🏦 API ดึงบัญชีธนาคารของลูกค้า (หน้าแอป)
 // ==========================================
-app.get('/api/user-profile-banks/:userId', async (req, res) => {
-  try {
-    const pool = await sql.connect(dbConfig);
-    const userId = req.params.userId;
-
-    // ดึงชื่อ นามสกุล
-    const nameResult = await pool.request()
-      .input('userId', sql.Int, userId)
-      .query('SELECT firstname, lastname FROM UserName_Lastname WHERE user_id = @userId');
-    
-    // ดึงบัญชีธนาคาร
-    const bankResult = await pool.request()
-      .input('userId', sql.Int, userId)
-      .query(`
-        SELECT ub.*, b.bank_name, b.logo_url 
-        FROM UserBanks ub 
-        JOIN Banks b ON ub.bank_id = b.bank_id 
-        WHERE ub.user_id = @userId
-      `);
-
-    res.json({ 
-      success: true, 
-      profile: nameResult.recordset[0] || null,
-      userBanks: bankResult.recordset 
-    });
-  } catch (err) {
-    res.status(500).json({ success: false, message: 'ระบบขัดข้อง' });
-  }
+app.get('/api/user-profile-banks/:uid', async (req, res) => {
+    try {
+        const uid = req.params.uid;
+        const pool = await sql.connect(dbConfig);
+        
+        const result = await pool.request()
+            .input('uid', sql.Int, uid)
+            .query(`
+                SELECT ub.*, b.bank_name, b.bank_code 
+                FROM UserBanks ub
+                LEFT JOIN Banks b ON ub.bank_id = b.bank_id
+                WHERE ub.user_id = @uid AND ub.status != 'Deleted' /* 🌟 เพิ่ม AND status != 'Deleted' ตรงนี้ครับ */
+                ORDER BY ub.created_at DESC
+            `);
+            
+        res.json({ success: true, userBanks: result.recordset });
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
 });
 
 // ==========================================
@@ -1115,53 +1106,7 @@ app.post('/api/admin/manage-deposit', async (req, res) => {
   }
 });
 
-// ==========================================
-// API: (Admin) ดึงข้อมูลบัญชีธนาคารของลูกค้าทั้งหมด
-// ==========================================
-app.get('/api/admin/customer-banks', async (req, res) => {
-  try {
-    const pool = await poolPromise;
-    const result = await pool.request().query(`
-      SELECT 
-        ub.user_bank_id, ub.account_name, ub.account_number, ub.is_primary, ub.created_at, ub.currency_code,
-        ub.status,  -- 🌟 ดึงคอลัมน์ status มาเพื่อให้หน้าเว็บแยกแท็บได้
-        u.username,
-        b.bank_name
-      FROM UserBanks ub
-      LEFT JOIN Users u ON ub.user_id = u.user_id
-      LEFT JOIN Banks b ON ub.bank_id = b.bank_id
-      ORDER BY ub.created_at DESC
-    `);
-    res.json({ success: true, banks: result.recordset });
-  } catch (error) {
-    console.error('Fetch Customer Banks Error:', error);
-    res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการดึงข้อมูลบัญชี' });
-  }
-});
 
-// ==========================================
-// API: (Admin) จัดการอนุมัติ หรือ ปฏิเสธ บัญชีธนาคารลูกค้า
-// ==========================================
-app.post('/api/admin/verify-customer-bank', async (req, res) => {
-  const { userBankId, action } = req.body; 
-
-  if (!userBankId || !action) {
-    return res.status(400).json({ success: false, message: 'ข้อมูลไม่ครบถ้วน' });
-  }
-
-  try {
-    const pool = await poolPromise;
-    await pool.request()
-      .input('id', sql.Int, userBankId)
-      .input('status', sql.VarChar, action)
-      .query("UPDATE UserBanks SET status = @status WHERE user_bank_id = @id");
-      
-    res.json({ success: true, message: action === 'Approved' ? 'อนุมัติบัญชีสำเร็จ' : 'ปฏิเสธบัญชีสำเร็จ' });
-  } catch (error) {
-    console.error('Verify Bank Error:', error);
-    res.status(500).json({ success: false, message: 'ระบบเซิร์ฟเวอร์ขัดข้อง' });
-  }
-});
 
 // ==========================================
 // 1. API ดึงรายการคำขอเพิ่มบัญชีธนาคารทั้งหมด (แอดมิน)
