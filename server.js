@@ -6337,7 +6337,7 @@ app.post('/api/admin/p2p-time-update', async (req, res) => {
 // 🌟 2. ผู้ให้บริการกด "รับงาน" (ACCEPT JOB)
 // ==========================================
 // ==========================================
-// 🛡️ [API] ระบบกดปุ่มรับงาน P2P (คำนวณเรทเงิน + ตรวจบัญชีธนาคาร)
+// 🛡️ [API] ระบบกดปุ่มรับงาน P2P (คำนวณเรทเงิน + ตรวจบัญชีธนาคาร + ดึงเวลา)
 // ==========================================
 app.post('/api/p2p/accept-job', async (req, res) => {
     try {
@@ -6392,16 +6392,23 @@ app.post('/api/p2p/accept-job', async (req, res) => {
             .input('amount', sql.Decimal(18, 2), deductAmount)
             .query(`UPDATE Wallets SET balance = balance - @amount WHERE user_id = @uid`);
 
-        // 🌟 5. เปลี่ยนสถานะงาน -> ผูกคนรับงาน -> และนับถอยหลัง 15 นาที!
+        // 🌟 5. ดึงเวลาของผู้รับงานจากตาราง P2P_Settings และอัปเดตสถานะ
+        const settings = await pool.request().query('SELECT TOP 1 provider_timeout_minutes FROM P2P_Settings');
+        let provider_timeout = 15; // ค่าเริ่มต้นเผื่อหาตารางไม่เจอ
+        if (settings.recordset.length > 0 && settings.recordset[0].provider_timeout_minutes) {
+            provider_timeout = settings.recordset[0].provider_timeout_minutes;
+        }
+
         await pool.request()
             .input('reqId', sql.Int, request_id)
             .input('providerId', sql.Int, provider_id)
+            .input('p_timeout', sql.Int, provider_timeout)
             .query(`
                 UPDATE P2P_Requests 
                 SET status = 'ACCEPTED', 
                     provider_id = @providerId, 
                     accepted_at = GETDATE(), 
-                    expires_at = DATEADD(minute, 15, GETDATE())
+                    expires_at = DATEADD(minute, @p_timeout, GETDATE())
                 WHERE request_id = @reqId
             `);
 
