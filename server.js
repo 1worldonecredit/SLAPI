@@ -1164,12 +1164,11 @@ app.post('/api/admin/verify-customer-bank', async (req, res) => {
 });
 
 // ==========================================
-// 1. API ดึงรายการคำขอเพิ่มบัญชีธนาคารทั้งหมด
+// 1. API ดึงรายการคำขอเพิ่มบัญชีธนาคารทั้งหมด (แอดมิน)
 // ==========================================
 app.get('/api/admin/user-banks', async (req, res) => {
     try {
         const pool = await sql.connect(dbConfig);
-        // ดึงข้อมูลธนาคาร พร้อม Join หาชื่อลูกค้า (UserName_Lastname)
         const result = await pool.request().query(`
             SELECT 
                 ub.user_bank_id, ub.user_id, ub.bank_id, ub.account_name, ub.account_number, 
@@ -1177,6 +1176,7 @@ app.get('/api/admin/user-banks', async (req, res) => {
                 un.firstname, un.lastname
             FROM UserBanks ub
             LEFT JOIN UserName_Lastname un ON ub.user_id = un.user_id
+            WHERE ub.status != 'Deleted'  /* 🌟 เพิ่มบรรทัดนี้ ซ่อนอันที่ลบแล้ว */
             ORDER BY ub.created_at DESC
         `);
         res.json({ success: true, data: result.recordset });
