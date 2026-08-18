@@ -1092,11 +1092,12 @@ app.get('/api/admin/user-banks', async (req, res) => {
         const result = await pool.request().query(`
             SELECT 
                 ub.user_bank_id, ub.user_id, ub.bank_id, ub.account_name, ub.account_number, 
-                ub.is_primary, ub.created_at, ub.currency_code, ub.status,
+                ub.is_primary, ub.created_at, ub.currency_code, ub.status, 
+                ub.passbook_image, /* 🌟 เพิ่มคอลัมน์รูปภาพตรงนี้ครับ */
                 un.firstname, un.lastname
             FROM UserBanks ub
             LEFT JOIN UserName_Lastname un ON ub.user_id = un.user_id
-            WHERE ub.status != 'Deleted'  /* 🌟 เพิ่มบรรทัดนี้ ซ่อนอันที่ลบแล้ว */
+            WHERE ub.status != 'Deleted'
             ORDER BY ub.created_at DESC
         `);
         res.json({ success: true, data: result.recordset });
