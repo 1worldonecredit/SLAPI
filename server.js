@@ -6477,19 +6477,16 @@ app.post('/api/p2p/accept-job', async (req, res) => {
 });
 
 // ==========================================
-// 🌟 [CLIENT] ดึงข้อมูลหน้าบอร์ดลูกค้า (แก้โหลดช้า + ดึงสกุลเงิน)
+// 🌟 [CLIENT] ดึงข้อมูลหน้าบอร์ดลูกค้า (โชว์ทุกสกุลเงิน + ไม่กรองเวลา)
 // ==========================================
-let cachedPool = null; // 🌟 เก็บ Connection ไว้ใช้ซ้ำ ทำให้โหลดเร็วขึ้น 10 เท่า!
+let cachedPool = null;
 
 app.get('/api/p2p/board', async (req, res) => {
     try {
         const { user_id } = req.query;
         if (!user_id) return res.status(400).json({ success: false, message: 'Missing user_id' });
         
-        // 🌟 ถ้ายังไม่เคยเชื่อมต่อ ค่อยต่อใหม่ ถ้าต่อแล้วให้ใช้ท่อเดิม
-        if (!cachedPool) {
-            cachedPool = await sql.connect(dbConfig);
-        }
+        if (!cachedPool) { cachedPool = await sql.connect(dbConfig); }
         const pool = cachedPool;
         
         const rateResult = await pool.request().query('SELECT * FROM ExchangeRates');
@@ -6504,10 +6501,20 @@ app.get('/api/p2p/board', async (req, res) => {
             .input('uid', sql.Int, user_id)
             .query(`SELECT balance FROM Wallets WHERE user_id = @uid`);
         
-        // ดึงงานมาโชว์ทั้งหมด (ยังไม่ล็อคสกุลเงินเผื่อเจ้านายทดสอบ)
+        // 🌟 ปลดล็อค: ดึงงาน PENDING ทั้งหมด (ไม่แยกสกุลเงิน, ไม่สนเวลาหมดอายุ)
+        // ข้อควรระวัง: จะไม่ดึงงานที่ตัวเองเป็นคนสร้างมาโชว์ (r.requester_id != @uid)
         const missionsResult = await pool.request()
             .input('uid', sql.Int, user_id)
-            .query(`SELECT r.*, u.username FROM P2P_Requests r LEFT JOIN Users u ON r.requester_id = u.user_id WHERE ((r.status = 'PENDING' AND r.requester_id != @uid AND r.expires_at > GETDATE()) OR (r.provider_id = @uid AND r.status IN ('ACCEPTED', 'VERIFYING'))) ORDER BY r.created_at DESC`);
+            .query(`
+                SELECT r.*, u.username 
+                FROM P2P_Requests r 
+                LEFT JOIN Users u ON r.requester_id = u.user_id 
+                WHERE 
+                  (r.status = 'PENDING' AND r.requester_id != @uid) 
+                  OR 
+                  (r.provider_id = @uid AND r.status IN ('ACCEPTED', 'VERIFYING')) 
+                ORDER BY r.created_at DESC
+            `);
 
         const myRequestsResult = await pool.request()
             .input('myuid', sql.Int, user_id)
@@ -6519,7 +6526,7 @@ app.get('/api/p2p/board', async (req, res) => {
             activePromo: activePromoResult.recordset.length > 0 ? activePromoResult.recordset[0] : null,
             wallet: walletResult.recordset.length > 0 ? walletResult.recordset[0].balance : 0, 
             exchangeRates: rateResult.recordset || [],
-            missions: missionsResult.recordset || [],
+            missions: missionsResult.recordset || [], // ส่งไปทั้งหมดเลย
             myRequests: myRequestsResult.recordset || [] 
         });
     } catch (err) { 
