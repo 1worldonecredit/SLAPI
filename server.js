@@ -1143,8 +1143,8 @@ app.put('/api/user-banks/:id', async (req, res) => {
                 account_number = @accNum, 
                 account_name = @accName, 
                 currency_code = @curr, 
-                status = 'Pending', 
-                reject_reason = NULL 
+                status = 'Re-submitted' /* 🌟 1. เปลี่ยนสถานะเป็น "ส่งเรื่องแก้แล้ว" */
+                /* 🌟 2. เอาคำสั่ง reject_reason = NULL ออก (เก็บความจำไว้ให้แอดมินดู) */
         `;
         if (passbookBase64) updateQuery += `, passbook_image = @img`;
         updateQuery += ` WHERE user_bank_id = @id`;
@@ -1153,7 +1153,7 @@ app.put('/api/user-banks/:id', async (req, res) => {
             .input('id', sql.Int, bankId)
             .input('bankId', sql.Int, newBankId)
             .input('accNum', sql.VarChar, accountNumber)
-            .input('accName', sql.NVarChar, accountName) // 🌟 เปลี่ยนเป็น NVarChar ตรงนี้ครับ ภาษาไทยมาเต็มแน่นอน!
+            .input('accName', sql.NVarChar, accountName) 
             .input('curr', sql.VarChar, currencyCode);
 
         if (passbookBase64) request.input('img', sql.NVarChar(sql.MAX), passbookBase64);
