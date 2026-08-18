@@ -6413,35 +6413,62 @@ app.post('/api/p2p/verify-slip', async (req, res) => {
 // ==========================================
 // 🌟 4. ดึงข้อมูลบอร์ด P2P (รวมโปรโมชั่น และ Wallet)
 // ==========================================
-// ==========================================
-// 🌟 [CLIENT] ดึงข้อมูลหน้าบอร์ดลูกค้า (แก้บั๊ก 500 ถอยกลับไปใช้ GETDATE ปกติ)
-// ==========================================
 app.get('/api/p2p/board', async (req, res) => {
     try {
         const { user_id } = req.query;
         if (!user_id) return res.status(400).json({ success: false, message: 'Missing user_id' });
-        const pool = await sql.connect(dbConfig);
+        
+        let pool;
+        try {
+            pool = await sql.connect(dbConfig);
+        } catch(e) {
+            return res.status(500).json({ success: false, message: 'DB Connection Error: ' + e.message });
+        }
 
-        const settingResult = await pool.request().query('SELECT TOP 1 * FROM P2P_Settings');
+        let settingResult;
+        try {
+            settingResult = await pool.request().query('SELECT TOP 1 * FROM P2P_Settings');
+        } catch(e) {
+            return res.status(500).json({ success: false, message: 'Settings Query Error: ' + e.message });
+        }
         
-        // 🌟 กลับไปใช้ GETDATE() ธรรมดาที่เคยรันผ่าน (ถ้าเวลาไม่ตรง เดี๋ยวเราไปหาวิธีปรับที่ฐานข้อมูล Somee แทนครับ)
-        const activePromoResult = await pool.request().query(`
-            SELECT TOP 1 * FROM P2P_Promotions 
-            WHERE GETDATE() BETWEEN start_time AND end_time 
-            ORDER BY end_time ASC
-        `);
+        let activePromoResult;
+        try {
+            activePromoResult = await pool.request().query(`
+                SELECT TOP 1 * FROM P2P_Promotions 
+                WHERE GETDATE() BETWEEN start_time AND end_time 
+                ORDER BY end_time ASC
+            `);
+        } catch(e) {
+            return res.status(500).json({ success: false, message: 'Promo Query Error: ' + e.message });
+        }
         
-        const walletResult = await pool.request()
-            .input('uid', sql.Int, user_id)
-            .query(`SELECT w.balance, u.currency FROM Wallets w LEFT JOIN Users u ON w.user_id = u.user_id WHERE w.user_id = @uid`);
+        let walletResult;
+        try {
+            walletResult = await pool.request()
+                .input('uid', sql.Int, user_id)
+                .query(`SELECT w.balance, u.currency FROM Wallets w LEFT JOIN Users u ON w.user_id = u.user_id WHERE w.user_id = @uid`);
+        } catch(e) {
+            return res.status(500).json({ success: false, message: 'Wallet Query Error: ' + e.message });
+        }
         
-        const missionsResult = await pool.request()
-            .input('uid', sql.Int, user_id)
-            .query(`SELECT r.*, u.username FROM P2P_Requests r LEFT JOIN Users u ON r.requester_id = u.user_id WHERE (r.status = 'PENDING' AND r.requester_id != @uid AND r.expires_at > GETDATE()) OR (r.provider_id = @uid AND r.status IN ('ACCEPTED', 'VERIFYING')) ORDER BY r.created_at DESC`);
+        let missionsResult;
+        try {
+            missionsResult = await pool.request()
+                .input('uid', sql.Int, user_id)
+                .query(`SELECT r.*, u.username FROM P2P_Requests r LEFT JOIN Users u ON r.requester_id = u.user_id WHERE (r.status = 'PENDING' AND r.requester_id != @uid AND r.expires_at > GETDATE()) OR (r.provider_id = @uid AND r.status IN ('ACCEPTED', 'VERIFYING')) ORDER BY r.created_at DESC`);
+        } catch(e) {
+            return res.status(500).json({ success: false, message: 'Missions Query Error: ' + e.message });
+        }
 
-        const myRequestsResult = await pool.request()
-            .input('myuid', sql.Int, user_id)
-            .query(`SELECT * FROM P2P_Requests WHERE requester_id = @myuid ORDER BY created_at DESC`);
+        let myRequestsResult;
+        try {
+            myRequestsResult = await pool.request()
+                .input('myuid', sql.Int, user_id)
+                .query(`SELECT * FROM P2P_Requests WHERE requester_id = @myuid ORDER BY created_at DESC`);
+        } catch(e) {
+            return res.status(500).json({ success: false, message: 'MyRequests Query Error: ' + e.message });
+        }
 
         res.json({ 
             success: true, 
@@ -6453,7 +6480,7 @@ app.get('/api/p2p/board', async (req, res) => {
             myRequests: myRequestsResult.recordset || [] 
         });
     } catch (err) { 
-        console.error("Board API Error: ", err.message); // สั่งพิมพ์ลงจอดำ Railway ด้วย จะได้เช็คง่ายๆ
+        console.error("Board API Error: ", err.message);
         res.status(500).json({ success: false, message: err.message }); 
     }
 });
