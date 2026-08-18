@@ -6400,6 +6400,7 @@ app.post('/api/p2p/accept-job', async (req, res) => {
             provider_timeout = settings.recordset[0].provider_timeout_minutes;
         }
 
+       // 🌟 บังคับใช้เวลาประเทศไทยตอนกดรับงานเช่นกัน
         await pool.request()
             .input('reqId', sql.Int, request_id)
             .input('providerId', sql.Int, provider_id)
@@ -6408,8 +6409,8 @@ app.post('/api/p2p/accept-job', async (req, res) => {
                 UPDATE P2P_Requests 
                 SET status = 'ACCEPTED', 
                     provider_id = @providerId, 
-                    accepted_at = GETDATE(), 
-                    expires_at = DATEADD(minute, @p_timeout, GETDATE())
+                    accepted_at = DATEADD(hour, 7, GETUTCDATE()), 
+                    expires_at = DATEADD(minute, @p_timeout, DATEADD(hour, 7, GETUTCDATE()))
                 WHERE request_id = @reqId
             `);
 
