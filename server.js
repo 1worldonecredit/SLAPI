@@ -6557,7 +6557,7 @@ app.post('/api/p2p/accept-job', async (req, res) => {
             `);
             
         // ถ้าไม่มีบัญชีที่ผ่านเงื่อนไข ระบบจะเตะออกทันที
-        if (bankResult.recordset.length === 0) {
+       if (bankResult.recordset.length === 0) {
             return res.json({ 
                 success: false, 
                 message: `❌ คุณยังไม่มีบัญชีธนาคารสกุลเงิน ${mission.currency} ที่ได้รับการอนุมัติ กรุณาไปเพิ่มและรออนุมัติบัญชีก่อนรับงานนี้ครับ` 
