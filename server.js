@@ -6414,7 +6414,7 @@ app.post('/api/p2p/verify-slip', async (req, res) => {
 // 🌟 4. ดึงข้อมูลบอร์ด P2P (รวมโปรโมชั่น และ Wallet)
 // ==========================================
 // ==========================================
-// 🌟 [CLIENT] ดึงข้อมูลหน้าบอร์ดลูกค้า (ดึงประวัติส่วนตัวมาด้วย)
+// 🌟 [CLIENT] ดึงข้อมูลหน้าบอร์ดลูกค้า (แก้บั๊ก 500 ถอยกลับไปใช้ GETDATE ปกติ)
 // ==========================================
 app.get('/api/p2p/board', async (req, res) => {
     try {
@@ -6424,9 +6424,10 @@ app.get('/api/p2p/board', async (req, res) => {
 
         const settingResult = await pool.request().query('SELECT TOP 1 * FROM P2P_Settings');
         
+        // 🌟 กลับไปใช้ GETDATE() ธรรมดาที่เคยรันผ่าน (ถ้าเวลาไม่ตรง เดี๋ยวเราไปหาวิธีปรับที่ฐานข้อมูล Somee แทนครับ)
         const activePromoResult = await pool.request().query(`
             SELECT TOP 1 * FROM P2P_Promotions 
-            WHERE DATEADD(hour, 7, GETUTCDATE()) BETWEEN start_time AND end_time 
+            WHERE GETDATE() BETWEEN start_time AND end_time 
             ORDER BY end_time ASC
         `);
         
@@ -6436,9 +6437,8 @@ app.get('/api/p2p/board', async (req, res) => {
         
         const missionsResult = await pool.request()
             .input('uid', sql.Int, user_id)
-            .query(`SELECT r.*, u.username FROM P2P_Requests r LEFT JOIN Users u ON r.requester_id = u.user_id WHERE (r.status = 'PENDING' AND r.requester_id != @uid AND r.expires_at > DATEADD(hour, 7, GETUTCDATE())) OR (r.provider_id = @uid AND r.status IN ('ACCEPTED', 'VERIFYING')) ORDER BY r.created_at DESC`);
+            .query(`SELECT r.*, u.username FROM P2P_Requests r LEFT JOIN Users u ON r.requester_id = u.user_id WHERE (r.status = 'PENDING' AND r.requester_id != @uid AND r.expires_at > GETDATE()) OR (r.provider_id = @uid AND r.status IN ('ACCEPTED', 'VERIFYING')) ORDER BY r.created_at DESC`);
 
-        // 🌟 ดึงประวัติคำขอทั้งหมดของลูกค้าคนนี้ส่งไปให้หน้าเว็บ
         const myRequestsResult = await pool.request()
             .input('myuid', sql.Int, user_id)
             .query(`SELECT * FROM P2P_Requests WHERE requester_id = @myuid ORDER BY created_at DESC`);
@@ -6450,9 +6450,10 @@ app.get('/api/p2p/board', async (req, res) => {
             wallet: walletResult.recordset.length > 0 ? walletResult.recordset[0].balance : 0, 
             currency: (walletResult.recordset.length > 0 && walletResult.recordset[0].currency) ? walletResult.recordset[0].currency : 'THB',
             missions: missionsResult.recordset || [],
-            myRequests: myRequestsResult.recordset || [] // 🌟 ส่งข้อมูลประวัติ
+            myRequests: myRequestsResult.recordset || [] 
         });
     } catch (err) { 
+        console.error("Board API Error: ", err.message); // สั่งพิมพ์ลงจอดำ Railway ด้วย จะได้เช็คง่ายๆ
         res.status(500).json({ success: false, message: err.message }); 
     }
 });
