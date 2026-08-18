@@ -6553,6 +6553,7 @@ app.get('/api/admin/p2p-settings', async (req, res) => {
     }
 });
 
+
 // ==========================================
 // 🌟 [ADMIN] อัปเดตข้อมูลตั้งค่า P2P และโปรโมชั่น
 // ==========================================
@@ -6593,6 +6594,33 @@ app.put('/api/admin/p2p-settings', async (req, res) => {
         res.status(500).json({ success: false, message: err.message });
     }
 });
+
+
+// ==========================================
+// 🛡️ [ADMIN] อัปเดตเฉพาะค่า Commission P2P (แยกต่างหาก ปลอดภัย 100%)
+// ==========================================
+app.post('/api/admin/p2p-commission-update', async (req, res) => {
+    try {
+        const { reward_percent } = req.body;
+        const pool = await sql.connect(dbConfig);
+        
+        // เช็คว่ามีข้อมูลในตารางหรือยัง ถ้ายังให้ Insert ถ้ามีแล้วให้ Update
+        const check = await pool.request().query('SELECT COUNT(*) as count FROM P2P_Settings');
+        if (check.recordset[0].count === 0) {
+            await pool.request()
+                .input('percent', sql.Decimal(5, 2), reward_percent)
+                .query(`INSERT INTO P2P_Settings (provider_reward_percent) VALUES (@percent)`);
+        } else {
+            await pool.request()
+                .input('percent', sql.Decimal(5, 2), reward_percent)
+                .query(`UPDATE P2P_Settings SET provider_reward_percent = @percent`);
+        }
+        res.json({ success: true, message: 'บันทึกค่า Commission P2P สำเร็จแล้ว! (มีผลเฉพาะบิลใหม่)' });
+    } catch (err) {
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
+
 
 // ==========================================
 // 🌟 [CLIENT] ดึงข้อมูลหน้าบอร์ดลูกค้า (แยกบอร์ด กับ โฆษณา)
