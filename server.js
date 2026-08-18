@@ -6414,7 +6414,7 @@ app.post('/api/p2p/verify-slip', async (req, res) => {
 // 🌟 4. ดึงข้อมูลบอร์ด P2P (รวมโปรโมชั่น และ Wallet)
 // ==========================================
 // ==========================================
-// 🌟 [CLIENT] ดึงข้อมูลหน้าบอร์ดลูกค้า
+// 🌟 [CLIENT] ดึงข้อมูลหน้าบอร์ดลูกค้า (ดึงประวัติส่วนตัวมาด้วย)
 // ==========================================
 app.get('/api/p2p/board', async (req, res) => {
     try {
@@ -6430,32 +6430,27 @@ app.get('/api/p2p/board', async (req, res) => {
             ORDER BY end_time ASC
         `);
         
-        const walletResult = await pool.request().input('uid', sql.Int, user_id).query(`
-            SELECT w.balance, u.currency 
-            FROM Wallets w 
-            LEFT JOIN Users u ON w.user_id = u.user_id 
-            WHERE w.user_id = @uid
-        `);
+        const walletResult = await pool.request()
+            .input('uid', sql.Int, user_id)
+            .query(`SELECT w.balance, u.currency FROM Wallets w LEFT JOIN Users u ON w.user_id = u.user_id WHERE w.user_id = @uid`);
         
-        // 🌟 1. ดึงงานของคนอื่น (สำหรับหน้าบอร์ดรับงาน)
-        const missionsResult = await pool.request().input('uid', sql.Int, user_id).query(`
-            SELECT r.*, u.username FROM P2P_Requests r LEFT JOIN Users u ON r.requester_id = u.user_id 
-            WHERE (r.status = 'PENDING' AND r.requester_id != @uid AND r.expires_at > DATEADD(hour, 7, GETUTCDATE())) OR (r.provider_id = @uid AND r.status IN ('ACCEPTED', 'VERIFYING')) ORDER BY r.created_at DESC
-        `);
+        const missionsResult = await pool.request()
+            .input('uid', sql.Int, user_id)
+            .query(`SELECT r.*, u.username FROM P2P_Requests r LEFT JOIN Users u ON r.requester_id = u.user_id WHERE (r.status = 'PENDING' AND r.requester_id != @uid AND r.expires_at > DATEADD(hour, 7, GETUTCDATE())) OR (r.provider_id = @uid AND r.status IN ('ACCEPTED', 'VERIFYING')) ORDER BY r.created_at DESC`);
 
-        // 🌟 2. ดึงประวัติคำขอของ "ตัวเอง" ทั้งหมด (สำหรับโชว์หน้าแจ้งฝาก/ถอน)
-        const myRequestsResult = await pool.request().input('uid', sql.Int, user_id).query(`
-            SELECT * FROM P2P_Requests WHERE requester_id = @uid ORDER BY created_at DESC
-        `);
+        // 🌟 ดึงประวัติคำขอทั้งหมดของลูกค้าคนนี้ส่งไปให้หน้าเว็บ
+        const myRequestsResult = await pool.request()
+            .input('myuid', sql.Int, user_id)
+            .query(`SELECT * FROM P2P_Requests WHERE requester_id = @myuid ORDER BY created_at DESC`);
 
         res.json({ 
             success: true, 
-            settings: settingResult.recordset[0], 
+            settings: settingResult.recordset[0] || null, 
             activePromo: activePromoResult.recordset.length > 0 ? activePromoResult.recordset[0] : null,
             wallet: walletResult.recordset.length > 0 ? walletResult.recordset[0].balance : 0, 
             currency: (walletResult.recordset.length > 0 && walletResult.recordset[0].currency) ? walletResult.recordset[0].currency : 'THB',
-            missions: missionsResult.recordset,
-            myRequests: myRequestsResult.recordset // 🌟 ส่งข้อมูลของตัวเองกลับไปด้วย
+            missions: missionsResult.recordset || [],
+            myRequests: myRequestsResult.recordset || [] // 🌟 ส่งข้อมูลประวัติ
         });
     } catch (err) { 
         res.status(500).json({ success: false, message: err.message }); 
