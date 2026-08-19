@@ -6535,78 +6535,7 @@ app.post('/api/p2p/verify-slip', async (req, res) => {
     }
 });
 
-app.post('/api/p2p/accept-job', async (req, res) => {
-    try {
-        const { provider_id, request_id } = req.body;
-        const pool = await sql.connect(dbConfig);
-        
-        // 1. ดึงข้อมูลคำขอฝากเงินที่ลูกค้ากำลังจะกดรับ
-        const reqResult = await pool.request()
-            .input('reqId', sql.Int, request_id)
-            .query(`SELECT * FROM P2P_Requests WHERE request_id = @reqId`);
-        
-        if (reqResult.recordset.length === 0) return res.json({ success: false, message: 'ไม่พบคำขอนี้ในระบบ' });
-        const mission = reqResult.recordset[0];
-        
-        if (mission.status !== 'PENDING') return res.json({ success: false, message: 'งานนี้ถูกรับไปแล้ว หรือหมดเวลาไปแล้วครับ' });
-        
-        // 2. [สำคัญ!] เช็คบัญชีธนาคาร: (แก้ไขเอา bank_name ออก เพื่อแก้บัค Error)
-        const bankResult = await pool.request()
-            .input('uid', sql.Int, provider_id)
-            .input('currency', sql.VarChar, mission.currency)
-            .query(`
-                SELECT TOP 1 account_number, account_name 
-                FROM UserBanks 
-                WHERE user_id = @uid 
-                  AND currency_code = @currency 
-                  AND status = 'Approved' 
-            `);
-            
-       // ถ้าไม่มีบัญชีที่ผ่านเงื่อนไข ระบบจะเตะออกทันที พร้อมส่ง isBankError ไปให้หน้าเว็บ
-        if (bankResult.recordset.length === 0) {
-            return res.json({ 
-                success: false, 
-                isBankError: true, /* 🌟 ส่งรหัสลับไปบอกหน้าเว็บ */
-                message: `❌ คุณยังไม่มีบัญชีธนาคารสกุลเงิน ${mission.currency} ที่ได้รับการอนุมัติ\n\nต้องการไปหน้า "จัดการบัญชีธนาคาร" เพื่อเพิ่มบัญชีเดี๋ยวนี้เลยหรือไม่?` 
-            });
-        }
-        
-        // 3. เช็คยอดเงิน Wallet ว่ามีพอให้หักค้ำประกันหรือไม่
-        const walletResult = await pool.request()
-            .input('uid', sql.Int, provider_id)
-            .query(`SELECT balance FROM Wallets WHERE user_id = @uid`);
-            
-        const providerBalance = walletResult.recordset.length > 0 ? walletResult.recordset[0].balance : 0;
-        if (providerBalance < mission.amount) {
-            return res.json({ 
-                success: false, 
-                message: `❌ ยอดเงินใน Wallet ของคุณไม่พอ (ต้องการ ${mission.amount} ${mission.currency} แต่คุณมี ${providerBalance} ${mission.currency})` 
-            });
-        }
 
-        // 4. ถ้าผ่านทุกด่าน -> รับงาน, หักเงิน, จับเวลา 15 นาที
-        await pool.request()
-            .input('reqId', sql.Int, request_id)
-            .input('providerId', sql.Int, provider_id)
-            .query(`
-                UPDATE P2P_Requests 
-                SET status = 'ACCEPTED', 
-                    provider_id = @providerId, 
-                    accepted_at = GETDATE(), 
-                    expires_at = DATEADD(minute, 15, GETDATE())
-                WHERE request_id = @reqId
-            `);
-
-        await pool.request()
-            .input('uid', sql.Int, provider_id)
-            .input('amount', sql.Decimal, mission.amount)
-            .query(`UPDATE Wallets SET balance = balance - @amount WHERE user_id = @uid`);
-
-        res.json({ success: true, message: '✅ รับงานสำเร็จ! เตรียมรอรับเงินโอนได้เลยครับ' });
-    } catch (err) {
-        res.status(500).json({ success: false, message: 'Server Error: ' + err.message });
-    }
-});
 // ==========================================
 // 🌟 [CLIENT] ดึงข้อมูลหน้าบอร์ดลูกค้า (โชว์ทุกสกุลเงิน + ไม่กรองเวลา)
 // ==========================================
