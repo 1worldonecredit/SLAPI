@@ -6390,9 +6390,7 @@ app.post('/api/p2p/accept-job', async (req, res) => {
         
         if (mission.status !== 'PENDING') return res.json({ success: false, message: 'งานนี้ถูกรับไปแล้ว หรือหมดเวลาครับ' });
         
-        // 🌟 2. ด่านตรวจสมุดบัญชี: คนรับงานต้องมีบัญชี "สกุลเงิน" ตรงกับงาน
-        // (เช่น งาน LAK คนรับต้องมีบัญชีธนาคารลาวผูกไว้ในตาราง UserBanks)
-        // ต้องไม่มีการ JOIN ตาราง Banks และไม่มีคำว่า bank_name
+       // 🌟 2. ด่านตรวจสมุดบัญชี: คนรับงานต้องมีบัญชี "สกุลเงิน" ตรงกับงาน
         const bankResult = await pool.request()
             .input('uid', sql.Int, provider_id)
             .input('currency', sql.VarChar, mission.currency)
@@ -6405,7 +6403,21 @@ app.post('/api/p2p/accept-job', async (req, res) => {
             `);
             
         if (bankResult.recordset.length === 0) {
-            return res.json({ success: false, message: `❌ คุณยังไม่มีสมุดบัญชีธนาคารสกุลเงิน ${mission.currency} กรุณาไปเพิ่มบัญชีก่อนรับงานนี้ครับ` });
+            // 💡 [เพิ่มใหม่] เช็คว่าลูกค้ามีบัญชี "สกุลเงินอื่น" ที่อนุมัติแล้วในระบบบ้างไหม?
+            const otherBanksResult = await pool.request()
+                .input('uid', sql.Int, provider_id)
+                .query(`SELECT COUNT(*) as count FROM UserBanks WHERE user_id = @uid AND status = 'Approved'`);
+            
+            const hasAnyBank = otherBanksResult.recordset[0].count > 0;
+
+            return res.json({ 
+                success: false, 
+                isBankError: true,
+                hasAnyBank: hasAnyBank, // 🌟 ส่งสถานะไปบอกหน้าเว็บ
+                message: hasAnyBank 
+                    ? `❌ คุณยังไม่มีบัญชีสกุลเงิน ${mission.currency} ครับ\n\n💡 คำแนะนำ: คุณสามารถเลือกรับงานในสกุลเงินที่คุณมีบัญชีอยู่แล้ว หรือไปเพิ่มบัญชี ${mission.currency} ใหม่ก็ได้ครับ\n\nต้องการไปเพิ่มบัญชีใหม่ตอนนี้เลยหรือไม่?` 
+                    : `❌ คุณยังไม่มีบัญชีธนาคารในระบบเลยครับ!\n\nระบบจะพาคุณไปยังหน้า "จัดการบัญชีธนาคาร" เพื่อเพิ่มบัญชีใบแรกของคุณครับ`
+            });
         }
         
         // 🌟 3. ดึงกระเป๋าเงินผู้รับงาน และคำนวณการหักเงินแบบ "ข้ามสกุลเงิน"
