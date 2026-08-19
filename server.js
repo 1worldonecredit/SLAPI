@@ -6654,7 +6654,7 @@ app.post('/api/p2p/verify-slip', async (req, res) => {
 
 
 // ==========================================
-// 🌟 [CLIENT] ดึงข้อมูลหน้าบอร์ดลูกค้า (โชว์ทุกสกุลเงิน + ไม่กรองเวลา)
+// 🌟 [CLIENT] ดึงข้อมูลหน้าบอร์ดลูกค้า (แยกงานว่าง กับ งานที่รับแล้ว)
 // ==========================================
 let cachedPool = null;
 
@@ -6678,18 +6678,25 @@ app.get('/api/p2p/board', async (req, res) => {
             .input('uid', sql.Int, user_id)
             .query(`SELECT balance FROM Wallets WHERE user_id = @uid`);
         
-        // 🌟 ปลดล็อค: ดึงงาน PENDING ทั้งหมด (ไม่แยกสกุลเงิน, ไม่สนเวลาหมดอายุ)
-        // ข้อควรระวัง: จะไม่ดึงงานที่ตัวเองเป็นคนสร้างมาโชว์ (r.requester_id != @uid)
+        // 🌟 1. ดึงเฉพาะ "งานว่าง" (PENDING) มาแสดงบนบอร์ด
         const missionsResult = await pool.request()
             .input('uid', sql.Int, user_id)
             .query(`
                 SELECT r.*, u.username 
                 FROM P2P_Requests r 
                 LEFT JOIN Users u ON r.requester_id = u.user_id 
-                WHERE 
-                  (r.status = 'PENDING' AND r.requester_id != @uid) 
-                  OR 
-                  (r.provider_id = @uid AND r.status IN ('ACCEPTED', 'VERIFYING')) 
+                WHERE r.status = 'PENDING' AND r.requester_id != @uid 
+                ORDER BY r.created_at DESC
+            `);
+
+        // 🌟 2. [แยกตะกร้าใหม่] ดึงเฉพาะ "งานที่ฉันกดรับมาดูแล" (ACCEPTED, VERIFYING)
+        const myAcceptedResult = await pool.request()
+            .input('uid', sql.Int, user_id)
+            .query(`
+                SELECT r.*, u.username 
+                FROM P2P_Requests r 
+                LEFT JOIN Users u ON r.requester_id = u.user_id 
+                WHERE r.provider_id = @uid AND r.status IN ('ACCEPTED', 'VERIFYING')
                 ORDER BY r.created_at DESC
             `);
 
@@ -6703,10 +6710,12 @@ app.get('/api/p2p/board', async (req, res) => {
             activePromo: activePromoResult.recordset.length > 0 ? activePromoResult.recordset[0] : null,
             wallet: walletResult.recordset.length > 0 ? walletResult.recordset[0].balance : 0, 
             exchangeRates: rateResult.recordset || [],
-            missions: missionsResult.recordset || [], // ส่งไปทั้งหมดเลย
+            missions: missionsResult.recordset || [], // 🟢 ส่งไปเฉพาะ "งานว่าง"
+            myAcceptedJobs: myAcceptedResult.recordset || [], // 🟡 ก้อนใหม่! ส่ง "งานที่รับแล้ว" แยกไปต่างหาก
             myRequests: myRequestsResult.recordset || [] 
         });
     } catch (err) { 
+        console.error(err);
         res.status(500).json({ success: false, message: err.message }); 
     }
 });
