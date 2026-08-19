@@ -6466,13 +6466,14 @@ app.post('/api/p2p/accept-job', async (req, res) => {
 
         // 🌟 4.5 [NEW] บันทึกประวัติการหักเงินลง Transactions (ทิ้งหลักฐาน)
         // ใส่เครื่องหมายลบ (-@amount) เพื่อแสดงว่าเป็นยอดหักออก
+       // ... โค้ดด้านบน ...
         await pool.request()
             .input('uid', sql.Int, provider_id)
             .input('amount', sql.Decimal(18, 2), deductAmount)
             .input('note', sql.NVarChar, `หักเงินค้ำประกัน รอโอน P2P (Job ID: ${request_id})`)
             .query(`
-                INSERT INTO Transactions (user_id, amount, transaction_type, status, description, created_at)
-                VALUES (@uid, -@amount, 'P2P_GUARANTEE', 'COMPLETED', @note, GETDATE())
+                INSERT INTO Transactions (user_id, amount, transaction_type, status, title, created_at)
+                VALUES (@uid, -@amount, 'P2P_GUARANTEE', 'Completed', @note, GETDATE())
             `);
 
         // 🌟 5. ดึงเวลาของผู้รับงาน และอัปเดตสถานะงาน
