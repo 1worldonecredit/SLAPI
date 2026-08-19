@@ -6554,13 +6554,14 @@ app.post('/api/p2p/cancel-job', async (req, res) => {
 
         // 4. 📝 บันทึกประวัติการคืนเงินลงตาราง Transactions (ทิ้งหลักฐาน)
         // (💡 หมายเหตุ: หากตาราง Transactions ของเจ้านายใช้ชื่อคอลัมน์อื่น เช่น ใช้ 'details' แทน 'description' ให้แก้ในบรรทัด INSERT ได้เลยครับ)
+        // 4. 📝 บันทึกประวัติการคืนเงินลงตาราง Transactions (ทิ้งหลักฐาน)
         await pool.request()
             .input('uid', sql.Int, provider_id)
             .input('amount', sql.Decimal(18, 2), refundAmount)
             .input('note', sql.NVarChar, `โอนกลับเป็นเงินโอนกลับจากการยกเลิกงาน P2P (Job ID: ${request_id})`)
             .query(`
-                INSERT INTO Transactions (user_id, amount, transaction_type, status, description, created_at)
-                VALUES (@uid, @amount, 'P2P_REFUND', 'COMPLETED', @note, GETDATE())
+                INSERT INTO Transactions (user_id, amount, transaction_type, status, title, created_at)
+                VALUES (@uid, @amount, 'P2P_REFUND', 'Completed', @note, GETDATE())
             `);
 
         // 5. ปล่อยงานกลับสู่บอร์ด (รีเซ็ตสถานะกลับเป็น PENDING และล้างค่าเวลาออก)
