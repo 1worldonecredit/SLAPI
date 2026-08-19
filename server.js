@@ -6384,13 +6384,16 @@ app.post('/api/p2p/accept-job', async (req, res) => {
         const pool = await sql.connect(dbConfig);
         
         // 1. ดึงข้อมูลงาน
-        const reqResult = await pool.request().input('reqId', sql.Int, request_id).query(`SELECT * FROM P2P_Requests WHERE request_id = @reqId`);
+        const reqResult = await pool.request()
+            .input('reqId', sql.Int, request_id)
+            .query(`SELECT * FROM P2P_Requests WHERE request_id = @reqId`);
+            
         if (reqResult.recordset.length === 0) return res.json({ success: false, message: 'ไม่พบคำขอนี้ในระบบ' });
         const mission = reqResult.recordset[0];
         
         if (mission.status !== 'PENDING') return res.json({ success: false, message: 'งานนี้ถูกรับไปแล้ว หรือหมดเวลาครับ' });
         
-       // 🌟 2. ด่านตรวจสมุดบัญชี: คนรับงานต้องมีบัญชี "สกุลเงิน" ตรงกับงาน
+        // 🌟 2. ด่านตรวจสมุดบัญชีแบบฉลาด (Smart Check)
         const bankResult = await pool.request()
             .input('uid', sql.Int, provider_id)
             .input('currency', sql.VarChar, mission.currency)
@@ -6403,28 +6406,42 @@ app.post('/api/p2p/accept-job', async (req, res) => {
             `);
             
         if (bankResult.recordset.length === 0) {
-            // 💡 [เพิ่มใหม่] เช็คว่าลูกค้ามีบัญชี "สกุลเงินอื่น" ที่อนุมัติแล้วในระบบบ้างไหม?
+            // 💡 [เพิ่มใหม่] ไปควานหาว่า "แล้วสรุปมีบัญชีสกุลเงินอะไรบ้างที่อนุมัติแล้ว?"
             const otherBanksResult = await pool.request()
                 .input('uid', sql.Int, provider_id)
-                .query(`SELECT COUNT(*) as count FROM UserBanks WHERE user_id = @uid AND status = 'Approved'`);
+                .query(`SELECT DISTINCT currency_code FROM UserBanks WHERE user_id = @uid AND status = 'Approved'`);
             
-            const hasAnyBank = otherBanksResult.recordset[0].count > 0;
+            // จับสกุลเงินที่มีมารวมเป็นข้อความ เช่น "THB, USD"
+            const availableCurrencies = otherBanksResult.recordset.map(row => row.currency_code).join(', ');
+            const hasAnyBank = availableCurrencies.length > 0;
+
+            let smartMessage = `❌ คุณยังไม่มีบัญชีสกุลเงิน ${mission.currency} ครับ\n\n`;
+            
+            if (hasAnyBank) {
+                smartMessage += `💡 ระบบตรวจพบว่า ตอนนี้คุณมีบัญชี [ ${availableCurrencies} ] ที่พร้อมใช้งาน\nคุณสามารถเลือกรับงานในสกุลเงินที่คุณมีอยู่แล้วได้เลยครับ\n\nหรือถ้าต้องการรับงานนี้ ต้องไปเพิ่มบัญชี ${mission.currency} ใหม่... ต้องการไปเพิ่มบัญชีตอนนี้เลยหรือไม่?`;
+            } else {
+                smartMessage += `ระบบจะพาคุณไปยังหน้า "จัดการบัญชีธนาคาร" เพื่อเพิ่มบัญชีใบแรกของคุณครับ`;
+            }
 
             return res.json({ 
                 success: false, 
                 isBankError: true,
                 hasAnyBank: hasAnyBank, // 🌟 ส่งสถานะไปบอกหน้าเว็บ
-                message: hasAnyBank 
-                    ? `❌ คุณยังไม่มีบัญชีสกุลเงิน ${mission.currency} ครับ\n\n💡 คำแนะนำ: คุณสามารถเลือกรับงานในสกุลเงินที่คุณมีบัญชีอยู่แล้ว หรือไปเพิ่มบัญชี ${mission.currency} ใหม่ก็ได้ครับ\n\nต้องการไปเพิ่มบัญชีใหม่ตอนนี้เลยหรือไม่?` 
-                    : `❌ คุณยังไม่มีบัญชีธนาคารในระบบเลยครับ!\n\nระบบจะพาคุณไปยังหน้า "จัดการบัญชีธนาคาร" เพื่อเพิ่มบัญชีใบแรกของคุณครับ`
+                message: smartMessage 
             });
         }
         
         // 🌟 3. ดึงกระเป๋าเงินผู้รับงาน และคำนวณการหักเงินแบบ "ข้ามสกุลเงิน"
-        const walletResult = await pool.request().input('uid', sql.Int, provider_id).query(`
-            SELECT w.balance, u.currency FROM Wallets w LEFT JOIN Users u ON w.user_id = u.user_id WHERE w.user_id = @uid
-        `);
-        const providerCurrency = walletResult.recordset[0].currency || 'THB';
+        // 🛠️ [แก้ไขบัค]: ตัด u.currency ออก ป้องกัน Error 500 Invalid column name 'currency'
+        const walletResult = await pool.request()
+            .input('uid', sql.Int, provider_id)
+            .query(`SELECT balance FROM Wallets WHERE user_id = @uid`);
+            
+        if (walletResult.recordset.length === 0) {
+             return res.json({ success: false, message: '❌ ไม่พบข้อมูลกระเป๋าเงินของคุณ' });
+        }
+
+        const providerCurrency = 'THB'; // 👈 กำหนดค่ากระเป๋าหลักเป็น THB เพื่อให้ระบบคำนวณได้ไม่พัง
         let deductAmount = parseFloat(mission.amount);
 
         // ถ้าสกุลเงินงาน (LAK) ไม่ตรงกับกระเป๋าคนรับงาน (THB) ให้คำนวณเรท
@@ -6457,7 +6474,7 @@ app.post('/api/p2p/accept-job', async (req, res) => {
             provider_timeout = settings.recordset[0].provider_timeout_minutes;
         }
 
-       // 🌟 บังคับใช้เวลาประเทศไทยตอนกดรับงานเช่นกัน
+        // 🌟 บังคับใช้เวลาประเทศไทยตอนกดรับงานเช่นกัน
         await pool.request()
             .input('reqId', sql.Int, request_id)
             .input('providerId', sql.Int, provider_id)
