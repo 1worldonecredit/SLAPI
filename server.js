@@ -6392,10 +6392,17 @@ app.post('/api/p2p/accept-job', async (req, res) => {
         
         // 🌟 2. ด่านตรวจสมุดบัญชี: คนรับงานต้องมีบัญชี "สกุลเงิน" ตรงกับงาน
         // (เช่น งาน LAK คนรับต้องมีบัญชีธนาคารลาวผูกไว้ในตาราง UserBanks)
+        // ต้องไม่มีการ JOIN ตาราง Banks และไม่มีคำว่า bank_name
         const bankResult = await pool.request()
             .input('uid', sql.Int, provider_id)
             .input('currency', sql.VarChar, mission.currency)
-            .query(`SELECT TOP 1 bank_name, account_number, account_name FROM UserBanks WHERE user_id = @uid AND currency = @currency`);
+            .query(`
+                SELECT TOP 1 account_number, account_name 
+                FROM UserBanks 
+                WHERE user_id = @uid 
+                  AND currency_code = @currency 
+                  AND status = 'Approved' 
+            `);
             
         if (bankResult.recordset.length === 0) {
             return res.json({ success: false, message: `❌ คุณยังไม่มีสมุดบัญชีธนาคารสกุลเงิน ${mission.currency} กรุณาไปเพิ่มบัญชีก่อนรับงานนี้ครับ` });
