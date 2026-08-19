@@ -6946,6 +6946,47 @@ app.delete('/api/admin/ads/:id', async (req, res) => {
     } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 });
 
+// 🌟 API สำหรับแก้ไขรายละเอียดโฆษณา/วิดีโอ (Title & Description)
+app.put('/api/admin/ads/:id', async (req, res) => {
+    try {
+        const ad_id = req.params.id;
+        const { title, description } = req.body;
+
+        // 1. เช็คว่ามีส่ง ID มาหรือไม่
+        if (!ad_id) {
+            return res.status(400).json({ success: false, message: 'ไม่พบรหัสโฆษณา (ad_id)' });
+        }
+
+        // 2. สั่งอัปเดตข้อมูลลง Database
+        // ⚠️ หมายเหตุ: เจ้านายเช็คชื่อตาราง 'Ads' อีกทีนะครับว่าตรงกับใน Database หรือไม่ (บางทีอาจจะชื่อ SystemAds หรือ P2P_Ads)
+        const result = await pool.request()
+            .input('ad_id', sql.Int, ad_id)
+            .input('title', sql.NVarChar, title || '')
+            .input('description', sql.NVarChar, description || '')
+            .query(`
+                UPDATE Ads 
+                SET title = @title, 
+                    description = @description
+                    -- หากเจ้านายมีคอลัมน์ updated_at สามารถเอาคอมเมนต์บรรทัดล่างออกได้ครับ
+                    -- , updated_at = GETDATE()
+                WHERE ad_id = @ad_id
+            `);
+
+        // 3. เช็คว่าอัปเดตสำเร็จไหม (หา ID นั้นเจอหรือเปล่า)
+        if (result.rowsAffected[0] === 0) {
+            return res.status(404).json({ success: false, message: 'ไม่พบข้อมูลโฆษณานี้ในระบบ' });
+        }
+
+        // 4. ส่งสถานะกลับไปให้หน้าบ้าน (Frontend จะได้รับ success: true แล้วเด้ง Alert สำเร็จ)
+        res.json({ success: true, message: 'อัปเดตข้อมูลโฆษณาสำเร็จ' });
+
+    } catch (error) {
+        console.error('Error updating ad:', error);
+        res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดฝั่งเซิร์ฟเวอร์: ' + error.message });
+    }
+});
+
+
 // ==========================================
 // 🌟 [ADMIN] ADS และ โปรโมชั่น  สิ้นสุด
 // ==========================================
