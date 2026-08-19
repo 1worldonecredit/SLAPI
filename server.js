@@ -6376,7 +6376,7 @@ app.post('/api/admin/p2p-time-update', async (req, res) => {
 // 🌟 2. ผู้ให้บริการกด "รับงาน" (ACCEPT JOB)
 // ==========================================
 // ==========================================
-// 🛡️ [API] ระบบกดปุ่มรับงาน P2P (คำนวณเรทเงิน + ตรวจบัญชีธนาคาร + ดึงเวลา)
+// 🛡️ [API] ระบบกดปุ่มรับงาน P2P (คำนวณเรทเงิน + ตรวจบัญชี + หักเงิน + บันทึกประวัติ)
 // ==========================================
 app.post('/api/p2p/accept-job', async (req, res) => {
     try {
@@ -6406,12 +6406,10 @@ app.post('/api/p2p/accept-job', async (req, res) => {
             `);
             
         if (bankResult.recordset.length === 0) {
-            // 💡 [เพิ่มใหม่] ไปควานหาว่า "แล้วสรุปมีบัญชีสกุลเงินอะไรบ้างที่อนุมัติแล้ว?"
             const otherBanksResult = await pool.request()
                 .input('uid', sql.Int, provider_id)
                 .query(`SELECT DISTINCT currency_code FROM UserBanks WHERE user_id = @uid AND status = 'Approved'`);
             
-            // จับสกุลเงินที่มีมารวมเป็นข้อความ เช่น "THB, USD"
             const availableCurrencies = otherBanksResult.recordset.map(row => row.currency_code).join(', ');
             const hasAnyBank = availableCurrencies.length > 0;
 
@@ -6426,13 +6424,12 @@ app.post('/api/p2p/accept-job', async (req, res) => {
             return res.json({ 
                 success: false, 
                 isBankError: true,
-                hasAnyBank: hasAnyBank, // 🌟 ส่งสถานะไปบอกหน้าเว็บ
+                hasAnyBank: hasAnyBank, 
                 message: smartMessage 
             });
         }
         
         // 🌟 3. ดึงกระเป๋าเงินผู้รับงาน และคำนวณการหักเงินแบบ "ข้ามสกุลเงิน"
-        // 🛠️ [แก้ไขบัค]: ตัด u.currency ออก ป้องกัน Error 500 Invalid column name 'currency'
         const walletResult = await pool.request()
             .input('uid', sql.Int, provider_id)
             .query(`SELECT balance FROM Wallets WHERE user_id = @uid`);
@@ -6441,10 +6438,10 @@ app.post('/api/p2p/accept-job', async (req, res) => {
              return res.json({ success: false, message: '❌ ไม่พบข้อมูลกระเป๋าเงินของคุณ' });
         }
 
-        const providerCurrency = 'THB'; // 👈 กำหนดค่ากระเป๋าหลักเป็น THB เพื่อให้ระบบคำนวณได้ไม่พัง
+        const providerCurrency = 'THB'; // 👈 กำหนดค่ากระเป๋าหลักเป็น THB
         let deductAmount = parseFloat(mission.amount);
 
-        // ถ้าสกุลเงินงาน (LAK) ไม่ตรงกับกระเป๋าคนรับงาน (THB) ให้คำนวณเรท
+        // ถ้าสกุลเงินงาน ไม่ตรงกับกระเป๋าคนรับงาน (THB) ให้คำนวณเรท
         if (providerCurrency !== mission.currency) {
             const rateResult = await pool.request().query('SELECT * FROM ExchangeRates');
             const rates = rateResult.recordset;
@@ -6467,14 +6464,24 @@ app.post('/api/p2p/accept-job', async (req, res) => {
             .input('amount', sql.Decimal(18, 2), deductAmount)
             .query(`UPDATE Wallets SET balance = balance - @amount WHERE user_id = @uid`);
 
-        // 🌟 5. ดึงเวลาของผู้รับงานจากตาราง P2P_Settings และอัปเดตสถานะ
+        // 🌟 4.5 [NEW] บันทึกประวัติการหักเงินลง Transactions (ทิ้งหลักฐาน)
+        // ใส่เครื่องหมายลบ (-@amount) เพื่อแสดงว่าเป็นยอดหักออก
+        await pool.request()
+            .input('uid', sql.Int, provider_id)
+            .input('amount', sql.Decimal(18, 2), deductAmount)
+            .input('note', sql.NVarChar, `หักเงินค้ำประกัน รอโอน P2P (Job ID: ${request_id})`)
+            .query(`
+                INSERT INTO Transactions (user_id, amount, transaction_type, status, description, created_at)
+                VALUES (@uid, -@amount, 'P2P_GUARANTEE', 'COMPLETED', @note, GETDATE())
+            `);
+
+        // 🌟 5. ดึงเวลาของผู้รับงาน และอัปเดตสถานะงาน
         const settings = await pool.request().query('SELECT TOP 1 provider_timeout_minutes FROM P2P_Settings');
-        let provider_timeout = 15; // ค่าเริ่มต้นเผื่อหาตารางไม่เจอ
+        let provider_timeout = 15; 
         if (settings.recordset.length > 0 && settings.recordset[0].provider_timeout_minutes) {
             provider_timeout = settings.recordset[0].provider_timeout_minutes;
         }
 
-        // 🌟 บังคับใช้เวลาประเทศไทยตอนกดรับงานเช่นกัน
         await pool.request()
             .input('reqId', sql.Int, request_id)
             .input('providerId', sql.Int, provider_id)
@@ -6488,12 +6495,93 @@ app.post('/api/p2p/accept-job', async (req, res) => {
                 WHERE request_id = @reqId
             `);
 
-        res.json({ success: true, message: 'รับงานสำเร็จ!' });
+        // 🌟 6. ส่งประเภทงาน (request_type) กลับไปให้หน้าเว็บ เพื่อใช้ตัดสินใจว่าต้องวาร์ปไปหน้าไหน
+        res.json({ 
+            success: true, 
+            message: 'รับงานสำเร็จ!', 
+            request_type: mission.request_type 
+        });
+        
     } catch (err) {
         console.error(err);
         res.status(500).json({ success: false, message: 'Server Error: ' + err.message });
     }
 });
+
+// ==========================================
+// 🚫 [API] ยกเลิกงาน P2P (คืนเงินค้ำประกัน + บันทึกประวัติ)
+// ==========================================
+app.post('/api/p2p/cancel-job', async (req, res) => {
+    try {
+        const { provider_id, request_id } = req.body;
+        const pool = await sql.connect(dbConfig);
+
+        // 1. เช็คข้อมูลงาน
+        const reqResult = await pool.request()
+            .input('reqId', sql.Int, request_id)
+            .query(`SELECT * FROM P2P_Requests WHERE request_id = @reqId`);
+            
+        if (reqResult.recordset.length === 0) return res.json({ success: false, message: 'ไม่พบงานนี้ในระบบ' });
+        const mission = reqResult.recordset[0];
+
+        // ต้องเป็นสถานะ ACCEPTED และต้องเป็นคนที่รับงานนี้จริงๆ เท่านั้นถึงจะยกเลิกได้
+        if (mission.status !== 'ACCEPTED' || mission.provider_id !== provider_id) {
+            return res.json({ success: false, message: 'ไม่สามารถยกเลิกได้ สถานะไม่ถูกต้อง หรือคุณไม่ใช่ผู้รับงานนี้' });
+        }
+
+        // 2. คำนวณยอดเงินที่ต้องคืน (ใช้โลจิกเดียวกับตอนหักเงิน)
+        // 🛠️ กำหนดกระเป๋าหลักเป็น THB เพื่อป้องกัน Error 500 Invalid column name 'currency' 
+        const providerCurrency = 'THB'; 
+        let refundAmount = parseFloat(mission.amount);
+
+        // คำนวณเรทเงินให้ตรงกับตอนที่หักไป
+        if (providerCurrency !== mission.currency) {
+            const rateResult = await pool.request().query('SELECT * FROM ExchangeRates');
+            const rates = rateResult.recordset;
+            const rateObj = rates.find(r => r.currency_pair === `${providerCurrency}_${mission.currency}`);
+            const reverseRateObj = rates.find(r => r.currency_pair === `${mission.currency}_${providerCurrency}`);
+            
+            if (rateObj) refundAmount = refundAmount / parseFloat(rateObj.rate);
+            else if (reverseRateObj) refundAmount = refundAmount * parseFloat(reverseRateObj.rate);
+            else return res.json({ success: false, message: `ไม่มีเรทแปลงเงิน ${providerCurrency} เป็น ${mission.currency}` });
+        }
+
+        // 3. คืนเงินกลับเข้า Wallet (บวกเงินกลับ)
+        await pool.request()
+            .input('uid', sql.Int, provider_id)
+            .input('amount', sql.Decimal(18, 2), refundAmount)
+            .query(`UPDATE Wallets SET balance = balance + @amount WHERE user_id = @uid`);
+
+        // 4. 📝 บันทึกประวัติการคืนเงินลงตาราง Transactions (ทิ้งหลักฐาน)
+        // (💡 หมายเหตุ: หากตาราง Transactions ของเจ้านายใช้ชื่อคอลัมน์อื่น เช่น ใช้ 'details' แทน 'description' ให้แก้ในบรรทัด INSERT ได้เลยครับ)
+        await pool.request()
+            .input('uid', sql.Int, provider_id)
+            .input('amount', sql.Decimal(18, 2), refundAmount)
+            .input('note', sql.NVarChar, `โอนกลับเป็นเงินโอนกลับจากการยกเลิกงาน P2P (Job ID: ${request_id})`)
+            .query(`
+                INSERT INTO Transactions (user_id, amount, transaction_type, status, description, created_at)
+                VALUES (@uid, @amount, 'P2P_REFUND', 'COMPLETED', @note, GETDATE())
+            `);
+
+        // 5. ปล่อยงานกลับสู่บอร์ด (รีเซ็ตสถานะกลับเป็น PENDING และล้างค่าเวลาออก)
+        await pool.request()
+            .input('reqId', sql.Int, request_id)
+            .query(`
+                UPDATE P2P_Requests 
+                SET status = 'PENDING', 
+                    provider_id = NULL, 
+                    accepted_at = NULL, 
+                    expires_at = NULL 
+                WHERE request_id = @reqId
+            `);
+
+        res.json({ success: true, message: 'ยกเลิกงานและคืนเงินค้ำประกันเรียบร้อยแล้ว!' });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ success: false, message: 'Server Error: ' + err.message });
+    }
+});
+
 
 // ==========================================
 // 🌟 3. ผู้รับงานตรวจสลิปและยืนยัน (VERIFY SLIP) + ระบบแบน 3 ครั้ง
