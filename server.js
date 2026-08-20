@@ -6429,19 +6429,25 @@ app.post('/api/p2p/accept-job', async (req, res) => {
             });
         }
         
-        // 🌟 3. ดึงกระเป๋าเงินผู้รับงาน และคำนวณการหักเงินแบบ "ข้ามสกุลเงิน"
+       // 🌟 3. ดึงกระเป๋าเงินผู้รับงาน และคำนวณการหักเงินแบบ "ข้ามสกุลเงิน"
         const walletResult = await pool.request()
             .input('uid', sql.Int, provider_id)
             .query(`SELECT balance FROM Wallets WHERE user_id = @uid`);
+            
+        // 👉 [แก้ไข] ดึงสกุลเงินจริงของผู้รับงานจากตาราง Users (ลบการบังคับ THB ตายตัวทิ้ง)
+        const userResult = await pool.request()
+            .input('uid', sql.Int, provider_id)
+            .query(`SELECT currency FROM Users WHERE id = @uid`); // *หมายเหตุ: ถ้า primary key ของเจ้านายคือ user_id ให้แก้คำว่า id เป็น user_id นะครับ
             
         if (walletResult.recordset.length === 0) {
              return res.json({ success: false, message: '❌ ไม่พบข้อมูลกระเป๋าเงินของคุณ' });
         }
 
-        const providerCurrency = 'THB'; // 👈 กำหนดค่ากระเป๋าหลักเป็น THB
+        // 🌟 กำหนดสกุลเงินของกระเป๋าให้ตรงกับตัวตนลูกค้าจริงๆ (เช่น เป็น 'LAK' หรือ 'THB')
+        const providerCurrency = userResult.recordset[0].currency; 
         let deductAmount = parseFloat(mission.amount);
 
-        // ถ้าสกุลเงินงาน ไม่ตรงกับกระเป๋าคนรับงาน (THB) ให้คำนวณเรท
+        // ถ้าสกุลเงินงาน ไม่ตรงกับกระเป๋าคนรับงาน ให้คำนวณเรท (ถ้า LAK ชน LAK จะข้ามไปหักยอดเต็มเลย)
         if (providerCurrency !== mission.currency) {
             const rateResult = await pool.request().query('SELECT * FROM ExchangeRates');
             const rates = rateResult.recordset;
@@ -6451,11 +6457,6 @@ app.post('/api/p2p/accept-job', async (req, res) => {
             if (rateObj) deductAmount = deductAmount / parseFloat(rateObj.rate);
             else if (reverseRateObj) deductAmount = deductAmount * parseFloat(reverseRateObj.rate);
             else return res.json({ success: false, message: `ไม่มีเรทแปลงเงิน ${providerCurrency} เป็น ${mission.currency}` });
-        }
-
-        const providerBalance = parseFloat(walletResult.recordset[0].balance);
-        if (mission.request_type === 'DEPOSIT' && providerBalance < deductAmount) {
-            return res.json({ success: false, message: `❌ ยอดเงินไม่พอ (ต้องการเทียบเท่า ${deductAmount.toFixed(2)} ${providerCurrency})` });
         }
 
         // 🌟 4. หักเงินค้ำประกันจาก Wallet ผู้รับงาน
