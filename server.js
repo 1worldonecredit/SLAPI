@@ -6829,7 +6829,7 @@ app.get('/api/p2p/board', async (req, res) => {
                 ORDER BY r.created_at DESC
             `);
 
-       // 🌟 แยกตะกร้าดึง "งานที่ฉันเป็นคนสร้าง" พร้อมแนบข้อมูลบัญชีธนาคารของ "คนรับงาน" มาด้วย (ฉบับอัปเกรด ดึงข้อมูลแม่นยำ 100%)
+        // 🌟 แยกตะกร้าดึง "งานที่ฉันเป็นคนสร้าง" พร้อมแนบข้อมูลบัญชีธนาคารของ "คนรับงาน" มาด้วย
         const myRequestsResult = await pool.request()
             .input('myuid', sql.Int, user_id)
             .query(`
@@ -6839,13 +6839,7 @@ app.get('/api/p2p/board', async (req, res) => {
                     b.account_number AS provider_account_number,
                     b.account_name AS provider_account_name
                 FROM P2P_Requests r 
-                OUTER APPLY (
-                    SELECT TOP 1 bank_name, account_number, account_name
-                    FROM UserBanks
-                    WHERE user_id = r.provider_id 
-                      AND currency_code = r.currency 
-                      AND status = 'Approved'
-                ) b
+                LEFT JOIN UserBanks b ON r.provider_id = b.user_id AND b.currency_code = r.currency AND b.status = 'Approved'
                 WHERE r.requester_id = @myuid 
                 ORDER BY r.created_at DESC
             `);
