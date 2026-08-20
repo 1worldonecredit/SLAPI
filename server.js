@@ -6258,58 +6258,70 @@ app.post('/api/p2p/request-deposit', async (req, res) => {
     } catch (err) {
         res.status(500).json({ success: false, message: err.message });
     }
-});// ==========================================
-// 💸 [CLIENT] สร้างคำขอฝากเงิน (ดึงเวลาและค่าคอมฯ จาก P2P_Settings)
+});
+
+// ==========================================
+// 💸 [CLIENT] สร้างคำขอฝากเงิน (อัปเกรด: ค้นหาโปรโมชั่น 20% ให้อัตโนมัติ!)
 // ==========================================
 app.post('/api/p2p/request-deposit', async (req, res) => {
     try {
-        const { requester_id, amount, currency, promo_id } = req.body;
+        const { requester_id, amount, currency } = req.body; // 🌟 ไม่ต้องพึ่ง promo_id จากหน้าบ้านแล้ว
         if (!requester_id || !amount) return res.status(400).json({ success: false, message: 'ข้อมูลไม่ครบถ้วน' });
 
         const pool = await sql.connect(dbConfig);
         
         let bonus_amount = 0;
         let provider_reward = 0; 
-        let board_timeout = 15; // เผื่อหาไม่เจอ ให้ยึด 15 นาทีตามหน้าแอดมินเจ้านาย
+        let board_timeout = 15;
+        let bonusPercent = 0;
         
-        // 1. ดึงโปรโมชั่น (แจกโบนัสลูกค้า)
-        if (promo_id) {
-            const promo = await pool.request().input('pid', sql.Int, promo_id).query('SELECT bonus_percent FROM P2P_Promotions WHERE promo_id = @pid');
-            if (promo.recordset.length > 0) bonus_amount = (amount * parseFloat(promo.recordset[0].bonus_percent)) / 100;
-        }
-
-        // 🌟 2. ดึงการตั้งค่าทั้งหมดจากหน้าแอดมิน (P2P_Settings)
+        // 🌟 1. ดึงการตั้งค่าหลักจากหน้าแอดมิน (P2P_Settings)
         const settings = await pool.request().query('SELECT TOP 1 * FROM P2P_Settings');
+        let config = {};
         if (settings.recordset.length > 0) {
-            const config = settings.recordset[0];
+            config = settings.recordset[0];
             
-            // ดึงค่าคอมมิชชั่นคนรับงาน (provider_reward_percent) ที่เจ้านายตั้งไว้ 15% มาคูณ!
-            if (config.provider_reward_percent) {
-                provider_reward = (amount * parseFloat(config.provider_reward_percent)) / 100;
-            } else {
-                provider_reward = (amount * 15) / 100; // ค่าสำรองเผื่อตารางพัง
-            }
+            // ดึงค่าคอมมิชชั่นคนรับงาน (เช่น 15%)
+            provider_reward = (parseFloat(amount) * parseFloat(config.provider_reward_percent || 15)) / 100;
             
-            // ดึงเวลาหมดอายุที่เจ้านายตั้งไว้
-            if (config.mission_timeout_minutes) {
-                board_timeout = config.mission_timeout_minutes;
-            }
+            // ดึงเวลาหมดอายุ (เช่น 15 นาที)
+            board_timeout = config.mission_timeout_minutes || 15;
         } else {
-            provider_reward = (amount * 15) / 100; // ค่าสำรองถ้าไม่มีข้อมูลในตาราง
+            provider_reward = (parseFloat(amount) * 15) / 100; // ค่าสำรองเผื่อตารางพัง
         }
 
+       // 🌟 2. ค้นหาโปรโมชั่น "ที่กำลังทำงานอยู่" (เช็คจากเวลาปัจจุบัน)
+        const promoCheck = await pool.request().query(`
+            SELECT TOP 1 bonus_percent 
+            FROM P2P_Promotions 
+            WHERE DATEADD(hour, 7, GETUTCDATE()) BETWEEN start_time AND end_time 
+            ORDER BY bonus_percent DESC
+        `);
+
+        if (promoCheck.recordset.length > 0) {
+            // ✅ ถ้าช่วงนี้มีโปรโมชั่น (เช่น 20%) ให้ใช้ค่านี้บวกเพิ่มให้ลูกค้า!
+            bonusPercent = parseFloat(promoCheck.recordset[0].bonus_percent);
+        } else {
+            // ✅ ถ้าหมดโปร หรือไม่มีโปรโมชั่น = ไม่ต้องบวกเพิ่ม (โบนัส 0%) คือยอดปกติ
+            bonusPercent = 0;
+        }
+
+       
+
+        // คำนวณเงินโบนัส และยอดรับสุทธิ
+        bonus_amount = (parseFloat(amount) * bonusPercent) / 100;
         const net_amount = parseFloat(amount) + bonus_amount;
 
-        // 🌟 3. บันทึกลงตาราง บังคับใช้เวลาไทย และหยอดค่า 15% ลงไปให้คนรับงาน!
+        // 🌟 3. บันทึกลงตาราง 
         await pool.request()
             .input('req_id', sql.Int, requester_id)
             .input('type', sql.VarChar, 'DEPOSIT')
             .input('curr', sql.VarChar, currency || 'THB')
-            .input('amt', sql.Decimal(18, 2), amount)
-            .input('bonus', sql.Decimal(18, 2), bonus_amount)
-            .input('net', sql.Decimal(18, 2), net_amount)
-            .input('reward', sql.Decimal(18, 2), provider_reward) // 💰 หยอดเงิน 15% (150 บาท) ลงไป
-            .input('timeout', sql.Int, board_timeout) // ⏱️ หยอดเวลาที่เจ้านายตั้งไว้
+            .input('amt', sql.Decimal(18, 4), amount) // ใช้ 18,4 ป้องกันทศนิยมหาย
+            .input('bonus', sql.Decimal(18, 4), bonus_amount)
+            .input('net', sql.Decimal(18, 4), net_amount)
+            .input('reward', sql.Decimal(18, 4), provider_reward) 
+            .input('timeout', sql.Int, board_timeout) 
             .query(`
                 INSERT INTO P2P_Requests (requester_id, request_type, currency, amount, bonus_or_fee, net_amount, provider_reward, status, created_at, expires_at) 
                 VALUES (@req_id, @type, @curr, @amt, @bonus, @net, @reward, 'PENDING', DATEADD(hour, 7, GETUTCDATE()), DATEADD(minute, @timeout, DATEADD(hour, 7, GETUTCDATE())))
@@ -6317,6 +6329,7 @@ app.post('/api/p2p/request-deposit', async (req, res) => {
 
         res.json({ success: true, message: 'สร้างคำขอฝากเงินสำเร็จ' });
     } catch (err) {
+        console.error("Deposit Error:", err);
         res.status(500).json({ success: false, message: err.message });
     }
 });
