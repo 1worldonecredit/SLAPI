@@ -6587,7 +6587,7 @@ app.post('/api/p2p/cancel-job', async (req, res) => {
 
 
 // ==========================================
-// 🌟 3. ผู้รับงานตรวจสลิปและยืนยัน (VERIFY SLIP) + ระบบแบน 3 ครั้ง (ฉบับอัปเกรด อุดช่องโหว่ 100%)
+// 🌟 3. ผู้รับงานตรวจสลิปและยืนยัน (VERIFY SLIP) + ระบบแบน + แจกค่าคอมผู้แนะนำ!
 // ==========================================
 app.post('/api/p2p/verify-slip', async (req, res) => {
     try {
@@ -6599,14 +6599,12 @@ app.post('/api/p2p/verify-slip', async (req, res) => {
             .input('provider_id', sql.Int, provider_id)
             .query(`SELECT * FROM P2P_Requests WHERE request_id = @rid AND provider_id = @provider_id`);
         
-        // 🚨 1. ดักจับกรณีหางานไม่เจอ
         if (reqData.recordset.length === 0) {
             return res.json({ success: false, message: '❌ ไม่พบข้อมูลงาน หรือคุณไม่ใช่ผู้รับงานนี้' });
         }
 
         const job = reqData.recordset[0];
 
-        // 🚨 2. ป้องกันบัคเสกเงิน! (ต้องเป็นงานที่รอตรวจสลิป หรือ เพิ่งรับงานเท่านั้น ถึงจะกดปิดงานได้)
         if (job.status !== 'VERIFYING' && job.status !== 'ACCEPTED') {
             return res.json({ success: false, message: '⚠️ งานนี้ถูกดำเนินการเสร็จสิ้น หรือถูกยกเลิกไปแล้วครับ' });
         }
@@ -6630,7 +6628,33 @@ app.post('/api/p2p/verify-slip', async (req, res) => {
                     .input('total', sql.Decimal, refund_and_reward)
                     .query(`UPDATE Wallets SET balance = balance + @total WHERE user_id = @pid`);
 
-                // 3. ปิดงาน
+                // 🌟 3. (ฟีเจอร์ใหม่) แจกคอมมิชชั่นให้ "ผู้แนะนำของผู้รับงาน" (Affiliate)
+                // ดึง % ค่าแนะนำจาก Setting
+                const setDb = await transaction.request().query('SELECT TOP 1 referrer_reward_percent FROM P2P_Settings');
+                const refPercent = setDb.recordset.length > 0 ? parseFloat(setDb.recordset[0].referrer_reward_percent) : 0;
+
+                if (refPercent > 0) {
+                    // หาว่าใครเป็นคนแนะนำ ผู้รับงานคนนี้
+                    const refCheck = await transaction.request()
+                        .input('pid', sql.Int, provider_id)
+                        .query(`SELECT referrer_id FROM User_Referrals WHERE user_id = @pid`);
+                    
+                    if (refCheck.recordset.length > 0 && refCheck.recordset[0].referrer_id) {
+                        const referrerId = refCheck.recordset[0].referrer_id;
+                        // คำนวณยอดเงินที่ผู้แนะนำจะได้ (คำนวณจากยอดฝากต้นทาง)
+                        const refReward = (parseFloat(job.amount) * refPercent) / 100;
+
+                        // โอนเงินเข้า Wallet ของผู้แนะนำ
+                        await transaction.request()
+                            .input('refId', sql.Int, referrerId)
+                            .input('reward', sql.Decimal, refReward)
+                            .query(`UPDATE Wallets SET balance = balance + @reward WHERE user_id = @refId`);
+                        
+                        // 💡 แนะนำเพิ่มเติม: ถ้าเจ้านายมีตาราง Transactions สำหรับเก็บ Statement สามารถ Insert ประวัติเพิ่มตรงนี้ได้ครับ
+                    }
+                }
+
+                // 4. ปิดงาน
                 await transaction.request()
                     .input('rid', sql.Int, request_id)
                     .query(`UPDATE P2P_Requests SET status = 'COMPLETED', completed_at = GETDATE() WHERE request_id = @rid`);
@@ -6648,7 +6672,7 @@ app.post('/api/p2p/verify-slip', async (req, res) => {
                     .input('rid', sql.Int, request_id)
                     .query(`UPDATE P2P_Requests SET status = 'CANCELLED', completed_at = GETDATE() WHERE request_id = @rid`);
 
-                // 3. 🌟 ระบบแบนบัญชี (แก้คำว่า id เป็น user_id และใส่ ISNULL ป้องกันค่าว่าง)
+                // 3. ระบบแบนบัญชี 
                 const banCheck = await transaction.request()
                     .input('uid', sql.Int, job.requester_id)
                     .query(`
@@ -6658,21 +6682,18 @@ app.post('/api/p2p/verify-slip', async (req, res) => {
                         WHERE user_id = @uid
                     `);
                 
-                // ดึงค่าการแบนจาก Setting
                 const setDb = await transaction.request().query('SELECT TOP 1 max_strikes_before_ban FROM P2P_Settings');
-                const maxStrikes = setDb.recordset.length > 0 ? setDb.recordset[0].max_strikes_before_ban : 3; // เผื่อกรณีลืมตั้งค่า ให้ default เป็น 3
+                const maxStrikes = setDb.recordset.length > 0 ? setDb.recordset[0].max_strikes_before_ban : 3;
 
-                // ถ้าทำผิดกฎเกินกำหนด ให้ล็อคบัญชี
                 if (banCheck.recordset[0].p2p_cancel_count >= maxStrikes) {
                     await transaction.request()
                         .input('uid', sql.Int, job.requester_id)
                         .query(`UPDATE Users SET is_locked = 1 WHERE user_id = @uid`);
-                    // **ตรงนี้เจ้านายสามารถยิง API แจ้งเตือนแอดมินทาง Line Notify ได้เลยครับ**
                 }
             }
 
             await transaction.commit();
-            res.json({ success: true, message: is_correct ? '✅ จบภารกิจ! โอนเงินให้ลูกค้าสำเร็จ' : '⚠️ ยกเลิกคำขอ และคืนเงินมัดจำให้คุณแล้ว' });
+            res.json({ success: true, message: is_correct ? '✅ จบภารกิจ! โอนเงินและจ่ายคอมมิชชั่นผู้แนะนำสำเร็จ' : '⚠️ ยกเลิกคำขอ และคืนเงินมัดจำให้คุณแล้ว' });
 
         } catch (err) {
             await transaction.rollback();
@@ -6683,7 +6704,6 @@ app.post('/api/p2p/verify-slip', async (req, res) => {
         res.status(500).json({ success: false, message: 'Server Error: ' + err.message });
     }
 });
-
 // ==========================================
 // 📤 [API] ลูกค้าอัปโหลดสลิปโอนเงิน
 // ==========================================
