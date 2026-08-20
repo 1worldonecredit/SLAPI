@@ -6587,7 +6587,7 @@ app.post('/api/p2p/cancel-job', async (req, res) => {
 
 
 // ==========================================
-// 🌟 3. ผู้รับงานตรวจสลิปและยืนยัน (VERIFY SLIP) + แจกค่าคอม + บันทึก Statement (อัปเดตคอลัมน์ title ตรง DB แล้ว)
+// 🌟 3. ผู้รับงานตรวจสลิปและยืนยัน (VERIFY SLIP) + แจกค่าคอม (ดึงจาก referrer_username) + บันทึก Statement
 // ==========================================
 app.post('/api/p2p/verify-slip', async (req, res) => {
     try {
@@ -6641,14 +6641,19 @@ app.post('/api/p2p/verify-slip', async (req, res) => {
                         VALUES (@pid, @total, 'P2P_Reward', 'คืนมัดจำและรับค่าคอมมิชชั่น P2P (งาน ID: ' + CAST(@reqId AS NVARCHAR) + ')', 'Completed', GETDATE());
                     `);
 
-                // 3. แจกคอมมิชชั่นให้ "ผู้แนะนำของผู้รับงาน" (Affiliate) (Wallet + Statement)
+                // 🌟 3. แจกคอมมิชชั่นให้ "ผู้แนะนำ" (หาจากตาราง users ด้วย referrer_username)
                 const setDb = await transaction.request().query('SELECT TOP 1 referrer_reward_percent FROM P2P_Settings');
                 const refPercent = setDb.recordset.length > 0 ? parseFloat(setDb.recordset[0].referrer_reward_percent) : 0;
 
                 if (refPercent > 0) {
                     const refCheck = await transaction.request()
                         .input('pid', sql.Int, provider_id)
-                        .query(`SELECT referrer_id FROM User_Referrals WHERE user_id = @pid`);
+                        .query(`
+                            SELECT ref.user_id AS referrer_id 
+                            FROM users me 
+                            INNER JOIN users ref ON me.referrer_username = ref.username 
+                            WHERE me.user_id = @pid
+                        `);
                     
                     if (refCheck.recordset.length > 0 && refCheck.recordset[0].referrer_id) {
                         const referrerId = refCheck.recordset[0].referrer_id;
@@ -6693,10 +6698,11 @@ app.post('/api/p2p/verify-slip', async (req, res) => {
                     .query(`UPDATE P2P_Requests SET status = 'CANCELLED', completed_at = GETDATE() WHERE request_id = @rid`);
 
                 // 3. ระบบแบนบัญชีลูกค้าเกรียน
+                // เช็คว่ามีคอลัมน์ p2p_cancel_count ไหม ถ้า Error รอบหน้าแสดงว่าตาราง users อาจจะไม่มีคอลัมน์นี้ครับ
                 const banCheck = await transaction.request()
                     .input('uid', sql.Int, job.requester_id)
                     .query(`
-                        UPDATE Users 
+                        UPDATE users 
                         SET p2p_cancel_count = ISNULL(p2p_cancel_count, 0) + 1 
                         OUTPUT INSERTED.p2p_cancel_count
                         WHERE user_id = @uid
@@ -6708,7 +6714,7 @@ app.post('/api/p2p/verify-slip', async (req, res) => {
                 if (banCheck.recordset[0].p2p_cancel_count >= maxStrikes) {
                     await transaction.request()
                         .input('uid', sql.Int, job.requester_id)
-                        .query(`UPDATE Users SET is_locked = 1 WHERE user_id = @uid`);
+                        .query(`UPDATE users SET is_locked = 1 WHERE user_id = @uid`);
                 }
             }
 
