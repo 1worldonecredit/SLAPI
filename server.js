@@ -6770,21 +6770,18 @@ app.post('/api/p2p/upload-slip', async (req, res) => {
 
 
 // ==========================================
-// 🚨 [API] ผู้รับงานดึงเงินกลับ (กรณีลูกค้าไม่โอนเงินตามเวลา) - แก้บัค max_strikes_before_ban
+// 🚨 [API] ผู้รับงานดึงเงินกลับ (เลยเวลา) - แก้บัคสกุลเงิน & ทศนิยม
 // ==========================================
 app.post('/api/p2p/timeout-cancel', async (req, res) => {
     try {
         const { provider_id, request_id } = req.body;
         const pool = await sql.connect(dbConfig);
 
-        // 1. ดึงข้อมูลการตั้งค่าจากหน้า Admin (P2P_Settings)
         const setDb = await pool.request().query('SELECT TOP 1 * FROM P2P_Settings');
         const settings = setDb.recordset.length > 0 ? setDb.recordset[0] : {};
-        
         const timeoutMinutes = settings.request_timeout_minutes || 15; 
-        const maxStrikes = 3; // 🌟 กำหนดค่าคงที่ 3 ครั้งไปเลยครับ ป้องกัน Error หาคอลัมน์ไม่เจอ
+        const maxStrikes = 3;
 
-        // 2. เช็คงานว่ายังอยู่ในสถานะ ACCEPTED (รอสลิป) หรือไม่
         const reqData = await pool.request()
             .input('rid', sql.Int, request_id)
             .input('pid', sql.Int, provider_id)
@@ -6796,7 +6793,6 @@ app.post('/api/p2p/timeout-cancel', async (req, res) => {
 
         const job = reqData.recordset[0];
 
-        // 3. เช็คเวลาว่า "หมดเวลาโอน" หรือยัง
         const timeCheck = await pool.request()
             .input('rid', sql.Int, request_id)
             .input('timeout_m', sql.Int, timeoutMinutes)
@@ -6817,18 +6813,38 @@ app.post('/api/p2p/timeout-cancel', async (req, res) => {
         await transaction.begin();
 
         try {
-            // 4. คืนเงินมัดจำเข้า Wallet ผู้รับงาน
+            // 🌟 ท่าไม้ตาย: ค้นหายอดค้ำประกัน "ของจริง"
+            const escrowCheck = await transaction.request()
+                .input('pid', sql.Int, provider_id)
+                .input('reqId', sql.Int, request_id)
+                .query(`
+                    SELECT TOP 1 ABS(amount) as deducted_amount 
+                    FROM Transactions 
+                    WHERE user_id = @pid 
+                      AND title LIKE N'%Job ID: ' + CAST(@reqId AS NVARCHAR) + N'%' 
+                      AND amount < 0
+                    ORDER BY transaction_id DESC
+                `);
+            
+            const actualEscrow = escrowCheck.recordset.length > 0 ? parseFloat(escrowCheck.recordset[0].deducted_amount) : parseFloat(job.amount);
+
+            // คืนเงินค้ำประกัน (ของจริง)
             await transaction.request()
                 .input('pid', sql.Int, provider_id)
-                .input('amt', sql.Decimal, job.amount)
-                .query(`UPDATE Wallets SET balance = balance + @amt WHERE user_id = @pid`);
+                .input('amt', sql.Decimal(18, 4), actualEscrow)
+                .input('reqId', sql.Int, request_id)
+                .query(`
+                    UPDATE Wallets SET balance = balance + @amt WHERE user_id = @pid;
+                    INSERT INTO Transactions (user_id, amount, transaction_type, title, status, created_at) 
+                    VALUES (@pid, @amt, 'P2P_Refund', N'ดึงเงินมัดจำกลับ เนื่องจากลูกค้าไม่โอนเงิน (งาน ID: ' + CAST(@reqId AS NVARCHAR) + N')', 'Completed', GETDATE());
+                `);
 
-            // 5. เปลี่ยนสถานะงานเป็น CANCELLED
+            // เปลี่ยนสถานะ
             await transaction.request()
                 .input('rid', sql.Int, request_id)
                 .query(`UPDATE P2P_Requests SET status = 'CANCELLED', completed_at = DATEADD(hour, 7, GETUTCDATE()) WHERE request_id = @rid`);
 
-            // 6. บันทึกประวัติคนนิสัยเสียลงตาราง P2P_Offenders
+            // ลงโทษคนเบี้ยว
             const offenderCheck = await transaction.request()
                 .input('uid', sql.Int, job.requester_id)
                 .query(`
@@ -6849,7 +6865,6 @@ app.post('/api/p2p/timeout-cancel', async (req, res) => {
             
             const currentFails = offenderCheck.recordset[0].fail_count;
 
-            // 7. เช็คจำนวนครั้ง ถ้าครบกำหนดให้ระงับบัญชีทันที!
             if (currentFails >= maxStrikes) {
                 await transaction.request()
                     .input('uid', sql.Int, job.requester_id)
