@@ -6829,13 +6829,12 @@ app.get('/api/p2p/board', async (req, res) => {
                 ORDER BY r.created_at DESC
             `);
 
-       // 🌟 แยกตะกร้าดึง "งานที่ฉันเป็นคนสร้าง" พร้อมแนบข้อมูลบัญชีธนาคารของ "คนรับงาน" (ใช้ LEFT JOIN ปลอดภัย 100%)
+      // 🌟 แยกตะกร้าดึง "งานที่ฉันเป็นคนสร้าง" พร้อมแนบข้อมูลบัญชี (ฉบับปลอดภัย ไม่พังแน่นอน)
         const myRequestsResult = await pool.request()
             .input('myuid', sql.Int, user_id)
             .query(`
                 SELECT 
                     r.*, 
-                    b.bank_name AS provider_bank_name,
                     b.account_number AS provider_account_number,
                     b.account_name AS provider_account_name
                 FROM P2P_Requests r 
