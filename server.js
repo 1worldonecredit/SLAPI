@@ -6656,72 +6656,6 @@ app.post('/api/p2p/verify-slip', async (req, res) => {
 });
 
 
-// ==========================================
-// 🌟 [CLIENT] ดึงข้อมูลหน้าบอร์ดลูกค้า (แยกงานว่าง กับ งานที่รับแล้ว)
-// ==========================================
-let cachedPool = null;
-
-app.get('/api/p2p/board', async (req, res) => {
-    try {
-        const { user_id } = req.query;
-        if (!user_id) return res.status(400).json({ success: false, message: 'Missing user_id' });
-        
-        if (!cachedPool) { cachedPool = await sql.connect(dbConfig); }
-        const pool = cachedPool;
-        
-        const rateResult = await pool.request().query('SELECT * FROM ExchangeRates');
-        const settingResult = await pool.request().query('SELECT TOP 1 * FROM P2P_Settings');
-        const activePromoResult = await pool.request().query(`
-            SELECT TOP 1 * FROM P2P_Promotions 
-            WHERE GETDATE() BETWEEN start_time AND end_time 
-            ORDER BY end_time ASC
-        `);
-        
-        const walletResult = await pool.request()
-            .input('uid', sql.Int, user_id)
-            .query(`SELECT balance FROM Wallets WHERE user_id = @uid`);
-        
-        // 🌟 1. ดึงเฉพาะ "งานว่าง" (PENDING) มาแสดงบนบอร์ด
-        const missionsResult = await pool.request()
-            .input('uid', sql.Int, user_id)
-            .query(`
-                SELECT r.*, u.username 
-                FROM P2P_Requests r 
-                LEFT JOIN Users u ON r.requester_id = u.user_id 
-                WHERE r.status = 'PENDING' AND r.requester_id != @uid 
-                ORDER BY r.created_at DESC
-            `);
-
-        // 🌟 2. [แยกตะกร้าใหม่] ดึงเฉพาะ "งานที่ฉันกดรับมาดูแล" (ACCEPTED, VERIFYING)
-        const myAcceptedResult = await pool.request()
-            .input('uid', sql.Int, user_id)
-            .query(`
-                SELECT r.*, u.username 
-                FROM P2P_Requests r 
-                LEFT JOIN Users u ON r.requester_id = u.user_id 
-                WHERE r.provider_id = @uid AND r.status IN ('ACCEPTED', 'VERIFYING')
-                ORDER BY r.created_at DESC
-            `);
-
-        const myRequestsResult = await pool.request()
-            .input('myuid', sql.Int, user_id)
-            .query(`SELECT * FROM P2P_Requests WHERE requester_id = @myuid ORDER BY created_at DESC`);
-
-        res.json({ 
-            success: true, 
-            settings: settingResult.recordset[0] || null, 
-            activePromo: activePromoResult.recordset.length > 0 ? activePromoResult.recordset[0] : null,
-            wallet: walletResult.recordset.length > 0 ? walletResult.recordset[0].balance : 0, 
-            exchangeRates: rateResult.recordset || [],
-            missions: missionsResult.recordset || [], // 🟢 ส่งไปเฉพาะ "งานว่าง"
-            myAcceptedJobs: myAcceptedResult.recordset || [], // 🟡 ก้อนใหม่! ส่ง "งานที่รับแล้ว" แยกไปต่างหาก
-            myRequests: myRequestsResult.recordset || [] 
-        });
-    } catch (err) { 
-        console.error(err);
-        res.status(500).json({ success: false, message: err.message }); 
-    }
-});
 
 // ==========================================
 // 🌟 [ADMIN] ดึงข้อมูลตั้งค่า P2P และโปรโมชั่น
@@ -6814,47 +6748,106 @@ app.post('/api/admin/p2p-commission-update', async (req, res) => {
 // ==========================================
 // 🌟 [CLIENT] ดึงข้อมูลหน้าบอร์ดลูกค้า (แยกบอร์ด กับ โฆษณา)
 // ==========================================
+// ==========================================
+// 🛡️ [API] ดึงประวัติงาน P2P ที่กำลังดำเนินการของผู้รับงาน
+// ==========================================
+app.get('/api/p2p/my-jobs/:uid', async (req, res) => {
+    try {
+        const uid = req.params.uid;
+        const pool = await sql.connect(dbConfig);
+        
+        const result = await pool.request()
+            .input('uid', sql.Int, uid)
+            .query(`
+                SELECT * FROM P2P_Requests 
+                WHERE provider_id = @uid 
+                  AND status IN ('ACCEPTED', 'VERIFYING')
+                ORDER BY accepted_at DESC
+            `);
+            
+        res.json({ success: true, jobs: result.recordset });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ success: false, message: 'Server Error: ' + err.message });
+    }
+});
+// ==========================================
+// 🌟 [CLIENT] ดึงข้อมูลหน้าบอร์ดลูกค้า (ฉบับสมบูรณ์ที่สุด - รวมร่างข้อดีและแก้บัคแล้ว)
+// ==========================================
+let cachedPool = null;
 
-// ==========================================
-// 🌟 [CLIENT] ดึงข้อมูลหน้าบอร์ดลูกค้า (ฉบับอัปเดตดึงสกุลเงิน + แก้เวลาโปรโมชั่น)
-// ==========================================
 app.get('/api/p2p/board', async (req, res) => {
     try {
         const { user_id } = req.query;
         if (!user_id) return res.status(400).json({ success: false, message: 'Missing user_id' });
-        const pool = await sql.connect(dbConfig);
-
+        
+        // 🌟 ใช้ระบบ Cache ลดภาระเซิร์ฟเวอร์ (จากตัวที่ 1)
+        if (!cachedPool) { cachedPool = await sql.connect(dbConfig); }
+        const pool = cachedPool;
+        
+        const rateResult = await pool.request().query('SELECT * FROM ExchangeRates');
         const settingResult = await pool.request().query('SELECT TOP 1 * FROM P2P_Settings');
         
-        // 🌟 1. แก้ปัญหา Timezone เซิร์ฟเวอร์: ดึงโปรโมชั่นโดยปรับเวลาให้ตรงกับไทย/ลาว (+7)
+        // 🌟 แก้ปัญหา Timezone เซิร์ฟเวอร์ให้ตรงกับเวลาไทย/ลาว +7 (จากตัวที่ 2)
         const activePromoResult = await pool.request().query(`
             SELECT TOP 1 * FROM P2P_Promotions 
             WHERE DATEADD(hour, 7, GETUTCDATE()) BETWEEN start_time AND end_time 
             ORDER BY end_time ASC
         `);
         
-        // 🌟 2. ดึงสกุลเงิน (currency) ของ User จากฐานข้อมูลมาด้วย
-        const walletResult = await pool.request().input('uid', sql.Int, user_id).query(`
-            SELECT w.balance, u.currency 
-            FROM Wallets w 
-            LEFT JOIN Users u ON w.user_id = u.user_id 
-            WHERE w.user_id = @uid
-        `);
+        // 🌟 ดึงข้อมูลกระเป๋า และ สกุลเงิน (เปลี่ยนเป็น currency_code ให้ตรง DB) (จากตัวที่ 2)
+        const walletResult = await pool.request()
+            .input('uid', sql.Int, user_id)
+            .query(`
+                SELECT w.balance, u.currency_code 
+                FROM Wallets w 
+                LEFT JOIN Users u ON w.user_id = u.user_id 
+                WHERE w.user_id = @uid
+            `);
         
-        const missionsResult = await pool.request().input('uid', sql.Int, user_id).query(`
-            SELECT r.*, u.username FROM P2P_Requests r LEFT JOIN Users u ON r.requester_id = u.user_id 
-            WHERE (r.status = 'PENDING' AND r.requester_id != @uid AND r.expires_at > DATEADD(hour, 7, GETUTCDATE())) OR (r.provider_id = @uid AND r.status IN ('ACCEPTED', 'VERIFYING')) ORDER BY r.created_at DESC
-        `);
+        // 🌟 ดึงเฉพาะ "งานว่าง" และเช็คว่า "ยังไม่หมดเวลา" (รวมร่าง 1+2)
+        const missionsResult = await pool.request()
+            .input('uid', sql.Int, user_id)
+            .query(`
+                SELECT r.*, u.username 
+                FROM P2P_Requests r 
+                LEFT JOIN Users u ON r.requester_id = u.user_id 
+                WHERE r.status = 'PENDING' 
+                  AND r.requester_id != @uid 
+                  AND r.expires_at > DATEADD(hour, 7, GETUTCDATE())
+                ORDER BY r.created_at DESC
+            `);
 
+        // 🌟 แยกตะกร้าดึง "งานที่ฉันกดรับมาดูแล" (จากตัวที่ 1)
+        const myAcceptedResult = await pool.request()
+            .input('uid', sql.Int, user_id)
+            .query(`
+                SELECT r.*, u.username 
+                FROM P2P_Requests r 
+                LEFT JOIN Users u ON r.requester_id = u.user_id 
+                WHERE r.provider_id = @uid AND r.status IN ('ACCEPTED', 'VERIFYING')
+                ORDER BY r.created_at DESC
+            `);
+
+        // 🌟 แยกตะกร้าดึง "งานที่ฉันเป็นคนสร้าง" (จากตัวที่ 1)
+        const myRequestsResult = await pool.request()
+            .input('myuid', sql.Int, user_id)
+            .query(`SELECT * FROM P2P_Requests WHERE requester_id = @myuid ORDER BY created_at DESC`);
+
+        // 🌟 ส่งข้อมูลแบบจัดเต็ม ครบจบใน API เดียว
         res.json({ 
             success: true, 
-            settings: settingResult.recordset[0], 
+            settings: settingResult.recordset[0] || null, 
             activePromo: activePromoResult.recordset.length > 0 ? activePromoResult.recordset[0] : null,
             wallet: walletResult.recordset.length > 0 ? walletResult.recordset[0].balance : 0, 
-            currency: (walletResult.recordset.length > 0 && walletResult.recordset[0].currency) ? walletResult.recordset[0].currency : 'THB', // 🌟 ส่ง currency กลับไปให้หน้าเว็บ
-            missions: missionsResult.recordset 
+            currency: (walletResult.recordset.length > 0 && walletResult.recordset[0].currency_code) ? walletResult.recordset[0].currency_code : 'THB',
+            exchangeRates: rateResult.recordset || [],
+            missions: missionsResult.recordset || [], 
+            myAcceptedJobs: myAcceptedResult.recordset || [], 
+            myRequests: myRequestsResult.recordset || [] 
         });
     } catch (err) { 
+        console.error(err);
         res.status(500).json({ success: false, message: err.message }); 
     }
 });
