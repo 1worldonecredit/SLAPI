@@ -6666,15 +6666,16 @@ app.post('/api/p2p/verify-slip', async (req, res) => {
                         VALUES (@pid, @total, 'P2P_Reward', N'คืนมัดจำและรับค่าคอมมิชชั่น P2P (งาน ID: ' + CAST(@reqId AS NVARCHAR) + N')', 'Completed', GETDATE());
                     `);
 
-                // ✅ 3. แจกคอมมิชชั่นให้ "ผู้แนะนำ" 
+               // ✅ 3. แจกคอมมิชชั่นให้ "ผู้แนะนำ" (อัปเกรด: แปะชื่อคนทำยอดเข้าไปใน Statement ด้วย)
                 const setDb = await transaction.request().query('SELECT TOP 1 referrer_reward_percent FROM P2P_Settings');
                 const refPercent = setDb.recordset.length > 0 ? parseFloat(setDb.recordset[0].referrer_reward_percent) : 0;
 
                 if (refPercent > 0) {
+                    // 🌟 ดึงทั้ง referrer_id และ username ของคนรับงาน (provider_name) ออกมาด้วย
                     const refCheck = await transaction.request()
                         .input('pid', sql.Int, provider_id)
                         .query(`
-                            SELECT ref.user_id AS referrer_id 
+                            SELECT ref.user_id AS referrer_id, me.username AS provider_name 
                             FROM users me 
                             INNER JOIN users ref ON me.referrer_username = ref.username 
                             WHERE me.user_id = @pid
@@ -6682,17 +6683,20 @@ app.post('/api/p2p/verify-slip', async (req, res) => {
                     
                     if (refCheck.recordset.length > 0 && refCheck.recordset[0].referrer_id) {
                         const referrerId = refCheck.recordset[0].referrer_id;
-                        // ค่าคอมคำนวณจากยอด THB ที่หักไป
-                        const refReward = (actualEscrow * refPercent) / 100;
+                        const providerName = refCheck.recordset[0].provider_name; // 👈 ได้ชื่อลูกทีมมาแล้ว!
+                        const refReward = (actualEscrow * refPercent) / 100; 
 
                         await transaction.request()
                             .input('refId', sql.Int, referrerId)
                             .input('reward', sql.Decimal(18, 4), refReward)
                             .input('reqId', sql.Int, request_id)
+                            .input('pName', sql.NVarChar, providerName) // 👈 ส่งชื่อลูกทีมเข้าไปใน Query
                             .query(`
                                 UPDATE Wallets SET balance = balance + @reward WHERE user_id = @refId;
+                                
+                                -- 🌟 เพิ่มชื่อลูกทีมเข้าไปในข้อความ title เช่น "...รับงาน P2P จากคุณ salapi (งาน ID: 1)"
                                 INSERT INTO Transactions (user_id, amount, transaction_type, title, status, created_at) 
-                                VALUES (@refId, @reward, 'Affiliate', N'ค่าคอมมิชชั่นแนะนำเพื่อนรับงาน P2P (งาน ID: ' + CAST(@reqId AS NVARCHAR) + N')', 'Completed', GETDATE());
+                                VALUES (@refId, @reward, 'Affiliate', N'ค่าคอมมิชชั่นแนะนำเพื่อนรับงาน P2P จากคุณ ' + @pName + N' (งาน ID: ' + CAST(@reqId AS NVARCHAR) + N')', 'Completed', GETDATE());
                             `);
                     }
                 }
