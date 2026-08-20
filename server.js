@@ -6713,6 +6713,95 @@ app.post('/api/p2p/upload-slip', async (req, res) => {
     }
 });
 
+
+
+// ==========================================
+// 🚨 [API] ผู้รับงานดึงเงินกลับ (กรณีลูกค้าไม่โอนเงินตามเวลาที่กำหนด)
+// ==========================================
+app.post('/api/p2p/timeout-cancel', async (req, res) => {
+    try {
+        const { provider_id, request_id } = req.body;
+        const pool = await sql.connect(dbConfig);
+
+        // 1. เช็คงานว่ายังอยู่ในสถานะ ACCEPTED (รอสลิป) หรือไม่
+        const reqData = await pool.request()
+            .input('rid', sql.Int, request_id)
+            .input('pid', sql.Int, provider_id)
+            .query(`SELECT * FROM P2P_Requests WHERE request_id = @rid AND provider_id = @pid AND status = 'ACCEPTED'`);
+
+        if (reqData.recordset.length === 0) {
+            return res.json({ success: false, message: 'ไม่พบงานนี้ หรือสถานะงานถูกเปลี่ยนแปลงไปแล้ว' });
+        }
+
+        const job = reqData.recordset[0];
+
+        // 2. เช็คเวลาว่า "หมดเวลาโอน" หรือยัง (อิงจากเวลา Server ปัจจุบัน +7)
+        const timeCheck = await pool.request().input('rid', sql.Int, request_id).query(`
+            SELECT CASE WHEN expires_at < DATEADD(hour, 7, GETUTCDATE()) THEN 1 ELSE 0 END as is_expired 
+            FROM P2P_Requests WHERE request_id = @rid
+        `);
+        
+        if (timeCheck.recordset[0].is_expired === 0) {
+            return res.json({ success: false, message: '⏳ ยังไม่หมดเวลาโอนเงินของลูกค้าครับ (ไม่สามารถดึงเงินกลับได้)' });
+        }
+
+        const transaction = new sql.Transaction(pool);
+        await transaction.begin();
+
+        try {
+            // 3. คืนเงินมัดจำเข้า Wallet ผู้รับงาน
+            await transaction.request()
+                .input('pid', sql.Int, provider_id)
+                .input('amt', sql.Decimal, job.amount)
+                .query(`UPDATE Wallets SET balance = balance + @amt WHERE user_id = @pid`);
+
+            // 4. เปลี่ยนสถานะงานเป็น CANCELLED
+            await transaction.request()
+                .input('rid', sql.Int, request_id)
+                .query(`UPDATE P2P_Requests SET status = 'CANCELLED', completed_at = DATEADD(hour, 7, GETUTCDATE()) WHERE request_id = @rid`);
+
+            // 5. 🌟 บันทึกประวัติคนนิสัยเสียลงตาราง P2P_Offenders (อัปเดต หรือ เพิ่มใหม่)
+            const offenderCheck = await transaction.request()
+                .input('uid', sql.Int, job.requester_id)
+                .query(`
+                    IF EXISTS (SELECT 1 FROM P2P_Offenders WHERE user_id = @uid)
+                    BEGIN
+                        UPDATE P2P_Offenders 
+                        SET fail_count = fail_count + 1, last_offense_date = DATEADD(hour, 7, GETUTCDATE()) 
+                        OUTPUT INSERTED.fail_count
+                        WHERE user_id = @uid
+                    END
+                    ELSE
+                    BEGIN
+                        INSERT INTO P2P_Offenders (user_id, fail_count, last_offense_date) 
+                        OUTPUT INSERTED.fail_count
+                        VALUES (@uid, 1, DATEADD(hour, 7, GETUTCDATE()))
+                    END
+                `);
+            
+            const currentFails = offenderCheck.recordset[0].fail_count;
+
+            // 6. เช็คจำนวนครั้ง ถ้าครบกำหนดให้ระงับบัญชี (ดึงค่าจาก P2P_Settings)
+            const setDb = await transaction.request().query('SELECT TOP 1 max_strikes_before_ban FROM P2P_Settings');
+            const maxStrikes = setDb.recordset.length > 0 ? setDb.recordset[0].max_strikes_before_ban : 3; // Default 3 ครั้ง
+
+            if (currentFails >= maxStrikes) {
+                await transaction.request()
+                    .input('uid', sql.Int, job.requester_id)
+                    .query(`UPDATE Users SET is_locked = 1 WHERE user_id = @uid`);
+            }
+
+            await transaction.commit();
+            res.json({ success: true, message: '✅ ดึงเงินมัดจำกลับสำเร็จ และบันทึกประวัติทำผิดของลูกค้าเรียบร้อยแล้ว' });
+        } catch (err) {
+            await transaction.rollback();
+            throw err;
+        }
+    } catch (err) {
+        console.error("Timeout Cancel Error:", err);
+        res.status(500).json({ success: false, message: 'Server Error: ' + err.message });
+    }
+});
 // ==========================================
 // 🌟 [ADMIN] ดึงข้อมูลตั้งค่า P2P และโปรโมชั่น
 // ==========================================
