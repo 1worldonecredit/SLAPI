@@ -6444,7 +6444,7 @@ app.post('/api/p2p/accept-job', async (req, res) => {
         }
 
         // 🌟 กำหนดสกุลเงินของกระเป๋าให้ตรงกับตัวตนลูกค้าจริงๆ (เช่น เป็น 'LAK' หรือ 'THB')
-        const providerCurrency = userResult.recordset[0].currency; 
+        const providerCurrency = userResult.recordset[0].currency_code;
         let deductAmount = parseFloat(mission.amount);
 
         // ถ้าสกุลเงินงาน ไม่ตรงกับกระเป๋าคนรับงาน ให้คำนวณเรท (ถ้า LAK ชน LAK จะข้ามไปหักยอดเต็มเลย)
