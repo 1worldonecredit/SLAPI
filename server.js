@@ -6760,16 +6760,22 @@ app.post('/api/p2p/upload-slip', async (req, res) => {
 });
 
 
-
 // ==========================================
-// 🚨 [API] ผู้รับงานดึงเงินกลับ (กรณีลูกค้าไม่โอนเงินตามเวลาที่กำหนด)
+// 🚨 [API] ผู้รับงานดึงเงินกลับ (กรณีลูกค้าไม่โอนเงินตามเวลา) - แก้บัค max_strikes_before_ban
 // ==========================================
 app.post('/api/p2p/timeout-cancel', async (req, res) => {
     try {
         const { provider_id, request_id } = req.body;
         const pool = await sql.connect(dbConfig);
 
-        // 1. เช็คงานว่ายังอยู่ในสถานะ ACCEPTED (รอสลิป) หรือไม่
+        // 1. ดึงข้อมูลการตั้งค่าจากหน้า Admin (P2P_Settings)
+        const setDb = await pool.request().query('SELECT TOP 1 * FROM P2P_Settings');
+        const settings = setDb.recordset.length > 0 ? setDb.recordset[0] : {};
+        
+        const timeoutMinutes = settings.request_timeout_minutes || 15; 
+        const maxStrikes = 3; // 🌟 กำหนดค่าคงที่ 3 ครั้งไปเลยครับ ป้องกัน Error หาคอลัมน์ไม่เจอ
+
+        // 2. เช็คงานว่ายังอยู่ในสถานะ ACCEPTED (รอสลิป) หรือไม่
         const reqData = await pool.request()
             .input('rid', sql.Int, request_id)
             .input('pid', sql.Int, provider_id)
@@ -6781,32 +6787,39 @@ app.post('/api/p2p/timeout-cancel', async (req, res) => {
 
         const job = reqData.recordset[0];
 
-        // 2. เช็คเวลาว่า "หมดเวลาโอน" หรือยัง (อิงจากเวลา Server ปัจจุบัน +7)
-        const timeCheck = await pool.request().input('rid', sql.Int, request_id).query(`
-            SELECT CASE WHEN expires_at < DATEADD(hour, 7, GETUTCDATE()) THEN 1 ELSE 0 END as is_expired 
-            FROM P2P_Requests WHERE request_id = @rid
+        // 3. เช็คเวลาว่า "หมดเวลาโอน" หรือยัง
+        const timeCheck = await pool.request()
+            .input('rid', sql.Int, request_id)
+            .input('timeout_m', sql.Int, timeoutMinutes)
+            .query(`
+            SELECT CASE 
+                WHEN DATEADD(minute, @timeout_m, ISNULL(accepted_at, created_at)) < DATEADD(hour, 7, GETUTCDATE()) THEN 1 
+                ELSE 0 
+            END as is_expired 
+            FROM P2P_Requests 
+            WHERE request_id = @rid
         `);
         
         if (timeCheck.recordset[0].is_expired === 0) {
-            return res.json({ success: false, message: '⏳ ยังไม่หมดเวลาโอนเงินของลูกค้าครับ (ไม่สามารถดึงเงินกลับได้)' });
+            return res.json({ success: false, message: `⏳ ยังไม่หมดเวลาโอนเงินครับ (ระบบกำหนดเวลาไว้ ${timeoutMinutes} นาที)` });
         }
 
         const transaction = new sql.Transaction(pool);
         await transaction.begin();
 
         try {
-            // 3. คืนเงินมัดจำเข้า Wallet ผู้รับงาน
+            // 4. คืนเงินมัดจำเข้า Wallet ผู้รับงาน
             await transaction.request()
                 .input('pid', sql.Int, provider_id)
                 .input('amt', sql.Decimal, job.amount)
                 .query(`UPDATE Wallets SET balance = balance + @amt WHERE user_id = @pid`);
 
-            // 4. เปลี่ยนสถานะงานเป็น CANCELLED
+            // 5. เปลี่ยนสถานะงานเป็น CANCELLED
             await transaction.request()
                 .input('rid', sql.Int, request_id)
                 .query(`UPDATE P2P_Requests SET status = 'CANCELLED', completed_at = DATEADD(hour, 7, GETUTCDATE()) WHERE request_id = @rid`);
 
-            // 5. 🌟 บันทึกประวัติคนนิสัยเสียลงตาราง P2P_Offenders (อัปเดต หรือ เพิ่มใหม่)
+            // 6. บันทึกประวัติคนนิสัยเสียลงตาราง P2P_Offenders
             const offenderCheck = await transaction.request()
                 .input('uid', sql.Int, job.requester_id)
                 .query(`
@@ -6827,14 +6840,11 @@ app.post('/api/p2p/timeout-cancel', async (req, res) => {
             
             const currentFails = offenderCheck.recordset[0].fail_count;
 
-            // 6. เช็คจำนวนครั้ง ถ้าครบกำหนดให้ระงับบัญชี (ดึงค่าจาก P2P_Settings)
-            const setDb = await transaction.request().query('SELECT TOP 1 max_strikes_before_ban FROM P2P_Settings');
-            const maxStrikes = setDb.recordset.length > 0 ? setDb.recordset[0].max_strikes_before_ban : 3; // Default 3 ครั้ง
-
+            // 7. เช็คจำนวนครั้ง ถ้าครบกำหนดให้ระงับบัญชีทันที!
             if (currentFails >= maxStrikes) {
                 await transaction.request()
                     .input('uid', sql.Int, job.requester_id)
-                    .query(`UPDATE Users SET is_locked = 1 WHERE user_id = @uid`);
+                    .query(`UPDATE users SET is_locked = 1 WHERE user_id = @uid`);
             }
 
             await transaction.commit();
