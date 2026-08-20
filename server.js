@@ -6587,7 +6587,7 @@ app.post('/api/p2p/cancel-job', async (req, res) => {
 
 
 // ==========================================
-// 🌟 3. ผู้รับงานตรวจสลิปและยืนยัน (VERIFY SLIP) + แจกค่าคอม (ดึงจาก referrer_username) + บันทึก Statement
+// 🌟 3. ผู้รับงานตรวจสลิปและยืนยัน (VERIFY SLIP) + แจกค่าคอม + บันทึก Statement (แก้ภาษาต่างดาว ????)
 // ==========================================
 app.post('/api/p2p/verify-slip', async (req, res) => {
     try {
@@ -6625,7 +6625,7 @@ app.post('/api/p2p/verify-slip', async (req, res) => {
                         UPDATE Wallets SET balance = balance + @net WHERE user_id = @uid;
                         
                         INSERT INTO Transactions (user_id, amount, transaction_type, title, status, created_at) 
-                        VALUES (@uid, @net, 'Deposit', 'รับเงินฝากผ่านระบบ P2P (งาน ID: ' + CAST(@reqId AS NVARCHAR) + ')', 'Completed', GETDATE());
+                        VALUES (@uid, @net, 'Deposit', N'รับเงินฝากผ่านระบบ P2P (งาน ID: ' + CAST(@reqId AS NVARCHAR) + N')', 'Completed', GETDATE());
                     `);
 
                 // 2. คืนเงิน Escrow (มัดจำ) + ค่าคอม ให้คนรับงาน (Wallet + Statement)
@@ -6638,10 +6638,10 @@ app.post('/api/p2p/verify-slip', async (req, res) => {
                         UPDATE Wallets SET balance = balance + @total WHERE user_id = @pid;
                         
                         INSERT INTO Transactions (user_id, amount, transaction_type, title, status, created_at) 
-                        VALUES (@pid, @total, 'P2P_Reward', 'คืนมัดจำและรับค่าคอมมิชชั่น P2P (งาน ID: ' + CAST(@reqId AS NVARCHAR) + ')', 'Completed', GETDATE());
+                        VALUES (@pid, @total, 'P2P_Reward', N'คืนมัดจำและรับค่าคอมมิชชั่น P2P (งาน ID: ' + CAST(@reqId AS NVARCHAR) + N')', 'Completed', GETDATE());
                     `);
 
-                // 🌟 3. แจกคอมมิชชั่นให้ "ผู้แนะนำ" (หาจากตาราง users ด้วย referrer_username)
+                // 3. แจกคอมมิชชั่นให้ "ผู้แนะนำ" 
                 const setDb = await transaction.request().query('SELECT TOP 1 referrer_reward_percent FROM P2P_Settings');
                 const refPercent = setDb.recordset.length > 0 ? parseFloat(setDb.recordset[0].referrer_reward_percent) : 0;
 
@@ -6667,7 +6667,7 @@ app.post('/api/p2p/verify-slip', async (req, res) => {
                                 UPDATE Wallets SET balance = balance + @reward WHERE user_id = @refId;
                                 
                                 INSERT INTO Transactions (user_id, amount, transaction_type, title, status, created_at) 
-                                VALUES (@refId, @reward, 'Affiliate', 'ค่าคอมมิชชั่นแนะนำเพื่อนรับงาน P2P (งาน ID: ' + CAST(@reqId AS NVARCHAR) + ')', 'Completed', GETDATE());
+                                VALUES (@refId, @reward, 'Affiliate', N'ค่าคอมมิชชั่นแนะนำเพื่อนรับงาน P2P (งาน ID: ' + CAST(@reqId AS NVARCHAR) + N')', 'Completed', GETDATE());
                             `);
                     }
                 }
@@ -6689,7 +6689,7 @@ app.post('/api/p2p/verify-slip', async (req, res) => {
                         UPDATE Wallets SET balance = balance + @amt WHERE user_id = @pid;
                         
                         INSERT INTO Transactions (user_id, amount, transaction_type, title, status, created_at) 
-                        VALUES (@pid, @amt, 'P2P_Refund', 'คืนเงินมัดจำ P2P เนื่องจากลูกค้าไม่โอนเงิน (งาน ID: ' + CAST(@reqId AS NVARCHAR) + ')', 'Completed', GETDATE());
+                        VALUES (@pid, @amt, 'P2P_Refund', N'คืนเงินมัดจำ P2P เนื่องจากลูกค้าไม่โอนเงิน (งาน ID: ' + CAST(@reqId AS NVARCHAR) + N')', 'Completed', GETDATE());
                     `);
                 
                 // 2. ยกเลิกงาน
@@ -6698,7 +6698,6 @@ app.post('/api/p2p/verify-slip', async (req, res) => {
                     .query(`UPDATE P2P_Requests SET status = 'CANCELLED', completed_at = GETDATE() WHERE request_id = @rid`);
 
                 // 3. ระบบแบนบัญชีลูกค้าเกรียน
-                // เช็คว่ามีคอลัมน์ p2p_cancel_count ไหม ถ้า Error รอบหน้าแสดงว่าตาราง users อาจจะไม่มีคอลัมน์นี้ครับ
                 const banCheck = await transaction.request()
                     .input('uid', sql.Int, job.requester_id)
                     .query(`
@@ -6708,8 +6707,7 @@ app.post('/api/p2p/verify-slip', async (req, res) => {
                         WHERE user_id = @uid
                     `);
                 
-                const setDb = await transaction.request().query('SELECT TOP 1 max_strikes_before_ban FROM P2P_Settings');
-                const maxStrikes = setDb.recordset.length > 0 ? setDb.recordset[0].max_strikes_before_ban : 3;
+                const maxStrikes = 3; 
 
                 if (banCheck.recordset[0].p2p_cancel_count >= maxStrikes) {
                     await transaction.request()
