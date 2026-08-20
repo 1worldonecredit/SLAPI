@@ -6587,15 +6587,29 @@ app.post('/api/p2p/cancel-job', async (req, res) => {
 
 
 // ==========================================
-// 🌟 3. ผู้รับงานตรวจสลิปและยืนยัน (VERIFY SLIP) + ระบบแบน 3 ครั้ง
+// 🌟 3. ผู้รับงานตรวจสลิปและยืนยัน (VERIFY SLIP) + ระบบแบน 3 ครั้ง (ฉบับอัปเกรด อุดช่องโหว่ 100%)
 // ==========================================
 app.post('/api/p2p/verify-slip', async (req, res) => {
     try {
         const { provider_id, request_id, is_correct } = req.body;
         const pool = await sql.connect(dbConfig);
 
-        const reqData = await pool.request().input('rid', sql.Int, request_id).query(`SELECT * FROM P2P_Requests WHERE request_id = @rid AND provider_id = @provider_id`);
+        const reqData = await pool.request()
+            .input('rid', sql.Int, request_id)
+            .input('provider_id', sql.Int, provider_id)
+            .query(`SELECT * FROM P2P_Requests WHERE request_id = @rid AND provider_id = @provider_id`);
+        
+        // 🚨 1. ดักจับกรณีหางานไม่เจอ
+        if (reqData.recordset.length === 0) {
+            return res.json({ success: false, message: '❌ ไม่พบข้อมูลงาน หรือคุณไม่ใช่ผู้รับงานนี้' });
+        }
+
         const job = reqData.recordset[0];
+
+        // 🚨 2. ป้องกันบัคเสกเงิน! (ต้องเป็นงานที่รอตรวจสลิป หรือ เพิ่งรับงานเท่านั้น ถึงจะกดปิดงานได้)
+        if (job.status !== 'VERIFYING' && job.status !== 'ACCEPTED') {
+            return res.json({ success: false, message: '⚠️ งานนี้ถูกดำเนินการเสร็จสิ้น หรือถูกยกเลิกไปแล้วครับ' });
+        }
 
         const transaction = new sql.Transaction(pool);
         await transaction.begin();
@@ -6604,58 +6618,100 @@ app.post('/api/p2p/verify-slip', async (req, res) => {
             if (is_correct) {
                 // ✅ กรณีสลิปถูกต้อง:
                 // 1. เติมเงินให้คนฝาก (เงินต้น + โบนัส)
-                await transaction.request().input('uid', sql.Int, job.requester_id).input('net', sql.Decimal, job.net_amount)
+                await transaction.request()
+                    .input('uid', sql.Int, job.requester_id)
+                    .input('net', sql.Decimal, job.net_amount)
                     .query(`UPDATE Wallets SET balance = balance + @net WHERE user_id = @uid`);
 
-                // 2. คืนเงิน Escrow + ค่าคอม ให้คนรับงาน
-                const refund_and_reward = job.amount + job.provider_reward;
-                await transaction.request().input('pid', sql.Int, provider_id).input('total', sql.Decimal, refund_and_reward)
+                // 2. คืนเงิน Escrow (มัดจำ) + ค่าคอม ให้คนรับงาน
+                const refund_and_reward = parseFloat(job.amount) + parseFloat(job.provider_reward);
+                await transaction.request()
+                    .input('pid', sql.Int, provider_id)
+                    .input('total', sql.Decimal, refund_and_reward)
                     .query(`UPDATE Wallets SET balance = balance + @total WHERE user_id = @pid`);
 
                 // 3. ปิดงาน
-                await transaction.request().input('rid', sql.Int, request_id)
+                await transaction.request()
+                    .input('rid', sql.Int, request_id)
                     .query(`UPDATE P2P_Requests SET status = 'COMPLETED', completed_at = GETDATE() WHERE request_id = @rid`);
                 
             } else {
-                // ❌ กรณีเงินไม่เข้า / ยกเลิกงาน
-                // 1. คืนเงิน Escrow ให้คนรับงาน
-                await transaction.request().input('pid', sql.Int, provider_id).input('amt', sql.Decimal, job.amount)
+                // ❌ กรณีเงินไม่เข้า / สลิปปลอม
+                // 1. คืนเงิน Escrow (มัดจำ) ให้คนรับงาน
+                await transaction.request()
+                    .input('pid', sql.Int, provider_id)
+                    .input('amt', sql.Decimal, job.amount)
                     .query(`UPDATE Wallets SET balance = balance + @amt WHERE user_id = @pid`);
                 
                 // 2. ยกเลิกงาน
-                await transaction.request().input('rid', sql.Int, request_id)
+                await transaction.request()
+                    .input('rid', sql.Int, request_id)
                     .query(`UPDATE P2P_Requests SET status = 'CANCELLED', completed_at = GETDATE() WHERE request_id = @rid`);
 
-                // 3. 🌟 ระบบแบนบัญชี: เพิ่มประวัติยกเลิกให้ลูกค้า ถ้าครบกำหนด -> ล็อกบัญชี
-                const banCheck = await transaction.request().input('uid', sql.Int, job.requester_id).query(`
-                    UPDATE Users SET p2p_cancel_count = p2p_cancel_count + 1 
-                    OUTPUT INSERTED.p2p_cancel_count
-                    WHERE id = @uid
-                `);
+                // 3. 🌟 ระบบแบนบัญชี (แก้คำว่า id เป็น user_id และใส่ ISNULL ป้องกันค่าว่าง)
+                const banCheck = await transaction.request()
+                    .input('uid', sql.Int, job.requester_id)
+                    .query(`
+                        UPDATE Users 
+                        SET p2p_cancel_count = ISNULL(p2p_cancel_count, 0) + 1 
+                        OUTPUT INSERTED.p2p_cancel_count
+                        WHERE user_id = @uid
+                    `);
                 
                 // ดึงค่าการแบนจาก Setting
-                const setDb = await transaction.request().query('SELECT max_strikes_before_ban FROM P2P_Settings');
-                const maxStrikes = setDb.recordset[0].max_strikes_before_ban;
+                const setDb = await transaction.request().query('SELECT TOP 1 max_strikes_before_ban FROM P2P_Settings');
+                const maxStrikes = setDb.recordset.length > 0 ? setDb.recordset[0].max_strikes_before_ban : 3; // เผื่อกรณีลืมตั้งค่า ให้ default เป็น 3
 
+                // ถ้าทำผิดกฎเกินกำหนด ให้ล็อคบัญชี
                 if (banCheck.recordset[0].p2p_cancel_count >= maxStrikes) {
-                    await transaction.request().input('uid', sql.Int, job.requester_id).query(`UPDATE Users SET is_locked = 1 WHERE id = @uid`);
+                    await transaction.request()
+                        .input('uid', sql.Int, job.requester_id)
+                        .query(`UPDATE Users SET is_locked = 1 WHERE user_id = @uid`);
                     // **ตรงนี้เจ้านายสามารถยิง API แจ้งเตือนแอดมินทาง Line Notify ได้เลยครับ**
                 }
             }
 
             await transaction.commit();
-            res.json({ success: true, message: is_correct ? 'จบภารกิจ! โอนเงินให้ลูกค้าสำเร็จ' : 'ยกเลิกคำขอ และคืนเงินมัดจำให้คุณแล้ว' });
+            res.json({ success: true, message: is_correct ? '✅ จบภารกิจ! โอนเงินให้ลูกค้าสำเร็จ' : '⚠️ ยกเลิกคำขอ และคืนเงินมัดจำให้คุณแล้ว' });
 
         } catch (err) {
             await transaction.rollback();
             throw err;
         }
     } catch (err) {
-        res.status(500).json({ success: false, message: err.message });
+        console.error("Verify Slip Error:", err);
+        res.status(500).json({ success: false, message: 'Server Error: ' + err.message });
     }
 });
 
+// ==========================================
+// 📤 [API] ลูกค้าอัปโหลดสลิปโอนเงิน
+// ==========================================
+app.post('/api/p2p/upload-slip', async (req, res) => {
+    try {
+        const { request_id, slip_url } = req.body; 
 
+        // 🌟 ดักไว้เผื่อคนส่งรูปมาว่างเปล่า
+        if (!slip_url) {
+            return res.status(400).json({ success: false, message: 'กรุณาแนบรูปภาพสลิป' });
+        }
+
+        const pool = await sql.connect(dbConfig);
+        await pool.request()
+            .input('reqId', sql.Int, request_id)
+            .input('slip', sql.NVarChar(sql.MAX), slip_url) // เก็บรูปเป็น Base64
+            .query(`
+                UPDATE P2P_Requests 
+                SET slip_url = @slip, status = 'VERIFYING' 
+                WHERE request_id = @reqId
+            `);
+
+        res.json({ success: true, message: 'ส่งสลิปให้ผู้รับงานตรวจสอบเรียบร้อยแล้ว' });
+    } catch (err) {
+        console.error("Upload Slip Error:", err);
+        res.status(500).json({ success: false, message: 'Server Error: ' + err.message });
+    }
+});
 
 // ==========================================
 // 🌟 [ADMIN] ดึงข้อมูลตั้งค่า P2P และโปรโมชั่น
