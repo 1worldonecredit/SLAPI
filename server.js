@@ -6587,7 +6587,7 @@ app.post('/api/p2p/cancel-job', async (req, res) => {
 
 
 // ==========================================
-// 🌟 3. ผู้รับงานตรวจสลิปและยืนยัน (VERIFY SLIP) + แจกค่าคอม + บันทึก Statement แบบละเอียดยิบ!
+// 🌟 3. ผู้รับงานตรวจสลิปและยืนยัน (VERIFY SLIP) + แจกค่าคอม + บันทึก Statement (อัปเดตคอลัมน์ title ตรง DB แล้ว)
 // ==========================================
 app.post('/api/p2p/verify-slip', async (req, res) => {
     try {
@@ -6624,8 +6624,8 @@ app.post('/api/p2p/verify-slip', async (req, res) => {
                     .query(`
                         UPDATE Wallets SET balance = balance + @net WHERE user_id = @uid;
                         
-                        INSERT INTO Transactions (user_id, amount, transaction_type, description, created_at) 
-                        VALUES (@uid, @net, 'P2P_DEPOSIT', 'รับเงินฝากผ่านระบบ P2P (งาน ID: ' + CAST(@reqId AS NVARCHAR) + ')', GETDATE());
+                        INSERT INTO Transactions (user_id, amount, transaction_type, title, status, created_at) 
+                        VALUES (@uid, @net, 'Deposit', 'รับเงินฝากผ่านระบบ P2P (งาน ID: ' + CAST(@reqId AS NVARCHAR) + ')', 'Completed', GETDATE());
                     `);
 
                 // 2. คืนเงิน Escrow (มัดจำ) + ค่าคอม ให้คนรับงาน (Wallet + Statement)
@@ -6637,8 +6637,8 @@ app.post('/api/p2p/verify-slip', async (req, res) => {
                     .query(`
                         UPDATE Wallets SET balance = balance + @total WHERE user_id = @pid;
                         
-                        INSERT INTO Transactions (user_id, amount, transaction_type, description, created_at) 
-                        VALUES (@pid, @total, 'P2P_REWARD', 'คืนมัดจำและรับค่าคอมมิชชั่นรับงาน P2P (งาน ID: ' + CAST(@reqId AS NVARCHAR) + ')', GETDATE());
+                        INSERT INTO Transactions (user_id, amount, transaction_type, title, status, created_at) 
+                        VALUES (@pid, @total, 'P2P_Reward', 'คืนมัดจำและรับค่าคอมมิชชั่น P2P (งาน ID: ' + CAST(@reqId AS NVARCHAR) + ')', 'Completed', GETDATE());
                     `);
 
                 // 3. แจกคอมมิชชั่นให้ "ผู้แนะนำของผู้รับงาน" (Affiliate) (Wallet + Statement)
@@ -6661,8 +6661,8 @@ app.post('/api/p2p/verify-slip', async (req, res) => {
                             .query(`
                                 UPDATE Wallets SET balance = balance + @reward WHERE user_id = @refId;
                                 
-                                INSERT INTO Transactions (user_id, amount, transaction_type, description, created_at) 
-                                VALUES (@refId, @reward, 'AFFILIATE_COMMISSION', 'ค่าคอมมิชชั่นแนะนำเพื่อนรับงาน P2P (งาน ID: ' + CAST(@reqId AS NVARCHAR) + ')', GETDATE());
+                                INSERT INTO Transactions (user_id, amount, transaction_type, title, status, created_at) 
+                                VALUES (@refId, @reward, 'Affiliate', 'ค่าคอมมิชชั่นแนะนำเพื่อนรับงาน P2P (งาน ID: ' + CAST(@reqId AS NVARCHAR) + ')', 'Completed', GETDATE());
                             `);
                     }
                 }
@@ -6683,8 +6683,8 @@ app.post('/api/p2p/verify-slip', async (req, res) => {
                     .query(`
                         UPDATE Wallets SET balance = balance + @amt WHERE user_id = @pid;
                         
-                        INSERT INTO Transactions (user_id, amount, transaction_type, description, created_at) 
-                        VALUES (@pid, @amt, 'P2P_REFUND', 'คืนเงินมัดจำ P2P เนื่องจากลูกค้าไม่โอนเงิน (งาน ID: ' + CAST(@reqId AS NVARCHAR) + ')', GETDATE());
+                        INSERT INTO Transactions (user_id, amount, transaction_type, title, status, created_at) 
+                        VALUES (@pid, @amt, 'P2P_Refund', 'คืนเงินมัดจำ P2P เนื่องจากลูกค้าไม่โอนเงิน (งาน ID: ' + CAST(@reqId AS NVARCHAR) + ')', 'Completed', GETDATE());
                     `);
                 
                 // 2. ยกเลิกงาน
