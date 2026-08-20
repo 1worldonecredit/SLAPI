@@ -6437,7 +6437,7 @@ app.post('/api/p2p/accept-job', async (req, res) => {
         // 👉 [แก้ไข] ดึงสกุลเงินจริงของผู้รับงานจากตาราง Users (ลบการบังคับ THB ตายตัวทิ้ง)
         const userResult = await pool.request()
             .input('uid', sql.Int, provider_id)
-            .query(`SELECT currency_code FROM Users WHERE id = @uid`); // *หมายเหตุ: ถ้า primary key ของเจ้านายคือ user_id ให้แก้คำว่า id เป็น user_id นะครับ
+            .query(`SELECT currency_code FROM Users WHERE user_id = @uid`); // *หมายเหตุ: ถ้า primary key ของเจ้านายคือ user_id ให้แก้คำว่า id เป็น user_id นะครับ
             
         if (walletResult.recordset.length === 0) {
              return res.json({ success: false, message: '❌ ไม่พบข้อมูลกระเป๋าเงินของคุณ' });
