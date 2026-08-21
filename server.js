@@ -7599,6 +7599,8 @@ app.get('/api/p2p/my-jobs/:userId', async (req, res) => {
             SELECT r.*, 
                    u.username AS requester_name, 
                    bk.bank_name AS req_bank_name, 
+                   bk.logo_url,           /* 🌟 เพิ่ม โลโก้ธนาคาร ตรงนี้ */
+                   bk.country,            /* 🌟 เพิ่ม ประเทศ ตรงนี้ */
                    ub.account_number AS req_account_number,
                    ub.account_name AS req_account_name
             FROM P2P_Requests r
