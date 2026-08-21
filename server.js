@@ -7106,13 +7106,18 @@ app.get('/api/p2p/board', async (req, res) => {
                 ORDER BY r.created_at DESC
             `);
 
-        // 🌟 แยกตะกร้าดึง "งานที่ฉันกดรับมาดูแล" (จากตัวที่ 1)
+        // 🌟 แยกตะกร้าดึง "งานที่ฉันกดรับมาดูแล" (เพิ่ม JOIN ธนาคาร เพื่อโชว์ในหน้าประวัติ)
         const myAcceptedResult = await pool.request()
             .input('uid', sql.Int, user_id)
             .query(`
-                SELECT r.*, u.username 
+                SELECT r.*, u.username,
+                       bk.bank_name AS req_bank_name, bk.logo_url, bk.country,
+                       ub.account_number AS req_account_number,
+                       ub.account_name AS req_account_name
                 FROM P2P_Requests r 
                 LEFT JOIN Users u ON r.requester_id = u.user_id 
+                LEFT JOIN UserBanks ub ON r.user_bank_id = ub.user_bank_id
+                LEFT JOIN Banks bk ON ub.bank_id = bk.bank_id
                 WHERE r.provider_id = @uid AND r.status IN ('ACCEPTED', 'VERIFYING')
                 ORDER BY r.created_at DESC
             `);
@@ -7593,7 +7598,7 @@ app.get('/api/p2p/my-jobs/:userId', async (req, res) => {
 });
 
 // ==========================================
-// 📋 [GET] ดึงประวัติคำขอถอนเงินของลูกค้า (ดึงข้อมูลธนาคารมาด้วย)
+// 📋 [GET] ดึงประวัติคำขอถอนเงินของลูกค้า (ดึงข้อมูลฝั่งผู้รับงานมาด้วย)
 // ==========================================
 app.get('/api/p2p/my-requests/:userId', async (req, res) => {
     try {
@@ -7604,11 +7609,26 @@ app.get('/api/p2p/my-requests/:userId', async (req, res) => {
         const reqDb = await pool.request()
             .input('uid', sql.Int, parseInt(uid, 10))
             .query(`
-                SELECT r.request_id, r.amount, r.net_amount, r.currency, r.status, r.created_at, r.expires_at, r.slip_url,
-                       bk.bank_name, bk.logo_url, bk.country, ub.account_number
+                SELECT r.request_id, r.amount, r.net_amount, r.currency, r.status, r.created_at, r.expires_at, r.slip_url, r.provider_id,
+                       bk.bank_name, bk.logo_url, bk.country, ub.account_number,
+                       pu.username AS provider_username,
+                       pbk.bank_name AS provider_bank_name,
+                       pbk.logo_url AS provider_logo_url,
+                       pbk.country AS provider_country,
+                       pb.account_number AS provider_account_number
                 FROM P2P_Requests r
                 LEFT JOIN UserBanks ub ON r.user_bank_id = ub.user_bank_id
                 LEFT JOIN Banks bk ON ub.bank_id = bk.bank_id
+                -- 🌟 เชื่อมตารางเพื่อดึงข้อมูลฝั่ง "ผู้รับงาน" (Provider)
+                LEFT JOIN Users pu ON r.provider_id = pu.user_id
+                OUTER APPLY (
+                    SELECT TOP 1 b.account_number, b.bank_id
+                    FROM UserBanks b
+                    WHERE b.user_id = r.provider_id 
+                      AND b.currency_code = r.currency 
+                      AND b.status = 'Approved'
+                ) pb
+                LEFT JOIN Banks pbk ON pb.bank_id = pbk.bank_id
                 WHERE r.requester_id = @uid AND r.request_type = 'WITHDRAW'
                 ORDER BY r.request_id DESC
             `);
