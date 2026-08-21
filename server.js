@@ -7290,12 +7290,13 @@ app.put('/api/admin/ads/:id', async (req, res) => {
 // 🌟 [ADMIN] ADS และ โปรโมชั่น  สิ้นสุด
 // ==========================================
 // ==========================================
-// 🌟 API P2P ฝั่งถอนเงิน เริ่ม 
+// 💸 [CLIENT] สร้างคำขอถอนเงิน (P2P) - อัปเดตบันทึกบัญชีธนาคาร
 // ==========================================
 app.post('/api/p2p/request-withdraw', async (req, res) => {
     try {
-        // 🌟 รับค่า user_bank_id มาจากหน้าเว็บ
+        // 🌟 1. รับค่า user_bank_id ที่ลูกค้าเลือกมาจากหน้าเว็บ
         const { requester_id, amount, user_bank_id } = req.body; 
+        
         if (!requester_id || !amount || amount <= 0 || !user_bank_id) {
             return res.status(400).json({ success: false, message: 'กรุณาระบุจำนวนเงินและเลือกบัญชีธนาคาร' });
         }
@@ -7305,9 +7306,17 @@ app.post('/api/p2p/request-withdraw', async (req, res) => {
         await transaction.begin();
 
         try {
-            const userCheck = await transaction.request().input('uid', sql.Int, requester_id).query(`
-                SELECT u.currency_code, w.balance FROM users u LEFT JOIN Wallets w ON u.user_id = w.user_id WHERE u.user_id = @uid
-            `);
+            const userCheck = await transaction.request()
+                .input('uid', sql.Int, requester_id)
+                .query(`
+                    SELECT u.currency_code, w.balance 
+                    FROM users u 
+                    LEFT JOIN Wallets w ON u.user_id = w.user_id 
+                    WHERE u.user_id = @uid
+                `);
+                
+            if (userCheck.recordset.length === 0) throw new Error('ไม่พบข้อมูลผู้ใช้');
+            
             const userCurrency = userCheck.recordset[0].currency_code;
             const currentBalance = parseFloat(userCheck.recordset[0].balance || 0);
             const reqAmount = parseFloat(amount);
@@ -7321,27 +7330,36 @@ app.post('/api/p2p/request-withdraw', async (req, res) => {
             const netAmount = reqAmount - feeAmount; 
             const providerReward = (netAmount * parseFloat(config.provider_reward_percent || 15)) / 100;
 
-            await transaction.request().input('uid', sql.Int, requester_id).input('amt', sql.Decimal(18, 4), reqAmount)
+            // หักเงินในกระเป๋า
+            await transaction.request()
+                .input('uid', sql.Int, requester_id)
+                .input('amt', sql.Decimal(18, 4), reqAmount)
                 .query(`UPDATE Wallets SET balance = balance - @amt WHERE user_id = @uid`);
 
-            const txResult = await transaction.request().input('uid', sql.Int, requester_id).input('amt', sql.Decimal(18, 4), -reqAmount)
-                .query(`INSERT INTO Transactions (user_id, amount, transaction_type, title, status, created_at) OUTPUT INSERTED.transaction_id VALUES (@uid, @amt, 'P2P_Withdraw_Hold', N'หักเงินเพื่อสร้างคำขอถอนเงิน P2P', 'Pending', GETDATE())`);
+            // บันทึกประวัติ Transaction ฝั่ง Wallet
+            await transaction.request()
+                .input('uid', sql.Int, requester_id)
+                .input('amt', sql.Decimal(18, 4), -reqAmount)
+                .query(`
+                    INSERT INTO Transactions (user_id, amount, transaction_type, title, status, created_at) 
+                    VALUES (@uid, @amt, 'P2P_Withdraw_Hold', N'หักเงินเพื่อสร้างคำขอถอนเงิน P2P', 'Pending', DATEADD(hour, 7, GETUTCDATE()))
+                `);
             
-            // 🌟 บันทึก user_bank_id ลงตาราง P2P_Requests แบบล็อคเป้าหมาย
-           // 🌟 แก้ชื่อคอลัมน์ดึงเวลา Timeout ให้ตรงกับฐานข้อมูลเป๊ะๆ
+            // 🌟 2. บันทึกคำขอถอนเงิน (แทรก user_bank_id ลงฐานข้อมูลให้เรียบร้อย)
             await transaction.request()
                 .input('req_id', sql.Int, requester_id)
-                .input('bank_id', sql.Int, user_bank_id)
+                .input('bank_id', sql.Int, user_bank_id) // 👈 จุดนี้คือหัวใจสำคัญที่ทำให้ธนาคารไปโชว์ให้คนรับงานเห็น
                 .input('curr', sql.VarChar, userCurrency)
                 .input('amt', sql.Decimal(18, 4), reqAmount)
                 .input('fee', sql.Decimal(18, 4), feeAmount)
                 .input('net', sql.Decimal(18, 4), netAmount)
                 .input('reward', sql.Decimal(18, 4), providerReward)
-                // 👇 เปลี่ยนเป็น config.request_timeout_minutes ตรงนี้ครับ 👇
-                .input('timeout', sql.Int, parseInt(config.request_timeout_minutes || 15)) 
+                .input('timeout', sql.Int, parseInt(config.request_timeout_minutes || 15))
                 .query(`
-                    INSERT INTO P2P_Requests (requester_id, user_bank_id, request_type, currency, amount, bonus_or_fee, net_amount, provider_reward, status, created_at, expires_at) 
-                    VALUES (@req_id, @bank_id, 'WITHDRAW', @curr, @amt, @fee, @net, @reward, 'PENDING', DATEADD(hour, 7, GETUTCDATE()), DATEADD(minute, @timeout, DATEADD(hour, 7, GETUTCDATE())))
+                    INSERT INTO P2P_Requests 
+                    (requester_id, user_bank_id, request_type, currency, amount, bonus_or_fee, net_amount, provider_reward, status, created_at, expires_at) 
+                    VALUES 
+                    (@req_id, @bank_id, 'WITHDRAW', @curr, @amt, @fee, @net, @reward, 'PENDING', DATEADD(hour, 7, GETUTCDATE()), DATEADD(minute, @timeout, DATEADD(hour, 7, GETUTCDATE())))
                 `);
 
             await transaction.commit();
@@ -7351,6 +7369,7 @@ app.post('/api/p2p/request-withdraw', async (req, res) => {
             throw err;
         }
     } catch (err) {
+        console.error("Request Withdraw Error:", err);
         res.status(500).json({ success: false, message: err.message });
     }
 });
