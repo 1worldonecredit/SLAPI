@@ -7497,9 +7497,6 @@ app.get('/api/p2p/withdraw-info/:userId', async (req, res) => {
     }
 });
 
-// ==========================================
-// ❌ [CLIENT] ยืนยันยกเลิกคำขอถอนเงิน (คืนเงินเข้ากระเป๋าเต็มจำนวน)
-// ==========================================
 app.post('/api/p2p/cancel-withdraw-request', async (req, res) => {
     try {
         const { request_id, requester_id } = req.body;
@@ -7510,46 +7507,38 @@ app.post('/api/p2p/cancel-withdraw-request', async (req, res) => {
         await transaction.begin();
 
         try {
-            // 1. เช็คว่าคำขอนี้มีอยู่จริง, เป็นของลูกค้าคนนี้, และยังไม่มีใครรับงาน (PENDING)
             const reqCheck = await transaction.request()
                 .input('rid', sql.Int, request_id)
                 .input('uid', sql.Int, requester_id)
                 .query(`
-                    SELECT amount, currency, status 
+                    SELECT amount, currency, status, expires_at 
                     FROM P2P_Requests 
                     WHERE request_id = @rid AND requester_id = @uid AND request_type = 'WITHDRAW'
                 `);
 
-            if (reqCheck.recordset.length === 0) {
-                throw new Error('ไม่พบคำขอ หรือคุณไม่มีสิทธิ์ยกเลิกคำขอนี้');
-            }
-
+            if (reqCheck.recordset.length === 0) throw new Error('ไม่พบคำขอ หรือคุณไม่มีสิทธิ์ยกเลิกคำขอนี้');
             const requestData = reqCheck.recordset[0];
 
-            // ถ้ามีคนกดรับงานไปแล้ว จะไม่ให้ยกเลิกเองแล้วครับ ป้องกันการโกง
-            if (requestData.status !== 'PENDING') {
-                throw new Error('ไม่สามารถยกเลิกได้ เนื่องจากมีผู้รับงานไปแล้ว หรือสถานะเปลี่ยนไปแล้วครับ');
+            // 🌟 เช็คเวลาปัจจุบัน เทียบกับเวลาหมดอายุ
+            const now = new Date();
+            const expiresAt = new Date(requestData.expires_at);
+            const isExpired = now > expiresAt;
+
+            // 🌟 กฎการยกเลิก: ถ้าไม่ใช่ PENDING และไม่ได้หมดเวลา จะยกเลิกไม่ได้
+            if (requestData.status !== 'PENDING' && !(requestData.status === 'ACCEPTED' && isExpired)) {
+                throw new Error('ไม่สามารถยกเลิกได้ เนื่องจากผู้รับงานกำลังดำเนินการและยังไม่หมดเวลาครับ');
             }
 
-            const refundAmount = parseFloat(requestData.amount); // ยอดเงินเต็มจำนวนที่หักไปตอนแรก
+            const refundAmount = parseFloat(requestData.amount); 
 
-            // 2. เปลี่ยนสถานะคำขอเป็น CANCELLED
-            await transaction.request()
-                .input('rid', sql.Int, request_id)
+            await transaction.request().input('rid', sql.Int, request_id)
                 .query(`UPDATE P2P_Requests SET status = 'CANCELLED' WHERE request_id = @rid`);
 
-            // 3. 🌟 คืนเงินเข้า Wallet เต็มจำนวน (+ amount)
-            await transaction.request()
-                .input('uid', sql.Int, requester_id)
-                .input('amt', sql.Decimal(18, 4), refundAmount)
+            await transaction.request().input('uid', sql.Int, requester_id).input('amt', sql.Decimal(18, 4), refundAmount)
                 .query(`UPDATE Wallets SET balance = balance + @amt WHERE user_id = @uid`);
 
-            // 4. 🌟 บันทึกประวัติ Transaction เป็นยอดบวก (เพื่อให้แสดงเป็นสีเขียว)
             await transaction.request()
-                .input('uid', sql.Int, requester_id)
-                .input('amt', sql.Decimal(18, 4), refundAmount) // ใส่เป็นค่าบวก
-                .input('curr', sql.VarChar, requestData.currency)
-                .input('rid', sql.Int, request_id)
+                .input('uid', sql.Int, requester_id).input('amt', sql.Decimal(18, 4), refundAmount).input('curr', sql.VarChar, requestData.currency).input('rid', sql.Int, request_id)
                 .query(`
                     INSERT INTO Transactions (user_id, amount, transaction_type, title, status, created_at) 
                     VALUES (@uid, @amt, 'P2P_Withdraw_Refund', N'คืนเงินยกเลิกคำขอถอนเงิน P2P (Job ID: ' + CAST(@rid AS NVARCHAR) + ')', 'Completed', GETDATE())
@@ -7563,7 +7552,6 @@ app.post('/api/p2p/cancel-withdraw-request', async (req, res) => {
             throw err;
         }
     } catch (err) {
-        console.error("Cancel Withdraw Error:", err);
         res.status(500).json({ success: false, message: err.message });
     }
 });
@@ -7594,28 +7582,22 @@ app.get('/api/p2p/my-jobs/:userId', async (req, res) => {
         res.status(500).json({ success: false, message: err.message });
     }
 });
-// ==========================================
-// 📝 [GET] ดึงประวัติคำขอถอนเงิน (ในฐานะผู้ขอถอน)
-// ==========================================
 app.get('/api/p2p/my-requests/:userId', async (req, res) => {
     try {
         const uid = req.params.userId;
         if (!uid || uid === 'undefined') return res.status(400).json({ success: false, message: 'Invalid ID' });
 
         const pool = await sql.connect(dbConfig);
-        
         const reqDb = await pool.request()
             .input('uid', sql.Int, parseInt(uid, 10))
             .query(`
-                SELECT request_id, amount, net_amount, currency, status, created_at 
+                SELECT request_id, amount, net_amount, currency, status, created_at, expires_at 
                 FROM P2P_Requests 
                 WHERE requester_id = @uid AND request_type = 'WITHDRAW'
                 ORDER BY request_id DESC
             `);
-        
         res.json({ success: true, requests: reqDb.recordset });
     } catch (err) {
-        console.error("❌ Fetch My Requests Error:", err);
         res.status(500).json({ success: false, message: err.message });
     }
 });
