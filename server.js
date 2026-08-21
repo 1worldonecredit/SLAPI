@@ -7492,22 +7492,18 @@ app.post('/api/p2p/accept-job', async (req, res) => {
 });
 
 // ==========================================
-// 📥 [GET] ข้อมูลเตรียมถอนเงิน (ดึงกระเป๋า, ค่าธรรมเนียม, เรท USD เทียบสกุลเงินลูกค้า)
+// 📥 [GET] ข้อมูลเตรียมถอนเงิน (อัปเกรด: ใส่กันชนป้องกัน DB แคลช)
 // ==========================================
 app.get('/api/p2p/withdraw-info/:userId', async (req, res) => {
     try {
         const uid = req.params.userId;
-        console.log("👉 Fetching Withdraw Info for UID:", uid); // แจ้งเตือนใน Terminal
-
-        if (!uid || uid === 'undefined') {
-            return res.status(400).json({ success: false, message: 'Invalid User ID' });
-        }
+        if (!uid || uid === 'undefined') return res.status(400).json({ success: false, message: 'Invalid ID' });
 
         const pool = await sql.connect(dbConfig);
         
         // 1. ดึงข้อมูลกระเป๋า และ สกุลเงิน
         const userDb = await pool.request()
-            .input('uid', sql.Int, parseInt(uid, 10)) // 🌟 บังคับเป็นตัวเลข
+            .input('uid', sql.Int, parseInt(uid, 10))
             .query(`
                 SELECT u.currency_code, ISNULL(w.balance, 0) as balance 
                 FROM users u 
@@ -7515,32 +7511,33 @@ app.get('/api/p2p/withdraw-info/:userId', async (req, res) => {
                 WHERE u.user_id = @uid
             `);
         
-        if (userDb.recordset.length === 0) {
-            return res.json({ success: false, message: 'ไม่พบผู้ใช้' });
-        }
+        if (userDb.recordset.length === 0) return res.json({ success: false, message: 'ไม่พบผู้ใช้' });
         const { currency_code, balance } = userDb.recordset[0];
 
         // 2. ดึงค่าธรรมเนียมถอน (P2P_Settings)
         const setDb = await pool.request().query('SELECT TOP 1 withdraw_fee_percent FROM P2P_Settings');
         const feePercent = setDb.recordset.length > 0 ? parseFloat(setDb.recordset[0].withdraw_fee_percent) : 5;
 
-        // 3. ดึงอัตราแลกเปลี่ยน USD (แปลง 10$ เป็นสกุลเงินท้องถิ่น)
-        let usdRate = 1; 
-        if (currency_code !== 'USD') {
-            const rateDb = await pool.request()
-                .input('pair', sql.VarChar, `USD_${currency_code}`) // เช่น USD_THB หรือ USD_LAK
-                .query('SELECT rate FROM ExchangeRates WHERE pair = @pair');
-            
-            if (rateDb.recordset.length > 0) {
-                usdRate = parseFloat(rateDb.recordset[0].rate);
-            } else {
-                // ค่าสำรองกรณีลืมตั้งเรทในระบบ
-                usdRate = currency_code === 'THB' ? 35 : currency_code === 'LAK' ? 22000 : 1;
+        // 3. ดึงอัตราแลกเปลี่ยน USD 
+        // (🌟 ตั้งค่าเรทสำรองไว้ก่อนเลย ถ้า DB มีปัญหาจะได้ใช้ค่านี้แทน)
+        let usdRate = currency_code === 'THB' ? 35 : currency_code === 'LAK' ? 22000 : 1; 
+        
+        try {
+            if (currency_code !== 'USD') {
+                const rateDb = await pool.request()
+                    .input('pair', sql.VarChar, `USD_${currency_code}`)
+                    .query('SELECT rate FROM ExchangeRates WHERE pair = @pair');
+                
+                if (rateDb.recordset.length > 0) {
+                    usdRate = parseFloat(rateDb.recordset[0].rate);
+                }
             }
+        } catch (rateErr) {
+            // 🌟 ถ้าตาราง ExchangeRates ไม่มี หรือชื่อคอลัมน์ผิด มันจะลงมาตรงนี้แทนการพังครับ!
+            console.log("⚠️ ข้ามการดึงเรทจากตาราง ExchangeRates, ใช้เรทสำรองแทน:", usdRate);
         }
 
-        console.log(`✅ Success: ${balance} ${currency_code}`); // แจ้งเตือนว่าดึงสำเร็จ
-
+        // ส่งข้อมูลกลับไปให้หน้าเว็บโชว์อย่างสวยงาม
         res.json({
             success: true,
             currency: currency_code,
