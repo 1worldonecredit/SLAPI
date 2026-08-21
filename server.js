@@ -7475,13 +7475,13 @@ app.get('/api/p2p/withdraw-info/:userId', async (req, res) => {
         const { currency_code, balance } = userDb.recordset[0];
 
         // 2. ดึงบัญชีธนาคารที่อนุมัติแล้ว พร้อมดึง logo_url และ currency_code
+        // 2. ดึงบัญชีธนาคารที่อนุมัติแล้ว พร้อมดึง logo_url, currency_code และ country
         const banksDb = await pool.request().input('uid', sql.Int, uid).query(`
-            SELECT ub.user_bank_id, ub.account_number, ub.currency_code, bk.bank_name, bk.logo_url 
+            SELECT ub.user_bank_id, ub.account_number, ub.currency_code, bk.bank_name, bk.logo_url, bk.country 
             FROM UserBanks ub
             LEFT JOIN Banks bk ON ub.bank_id = bk.bank_id
             WHERE ub.user_id = @uid AND ub.status = 'Approved'
         `);
-
         // 3. ดึงค่าธรรมเนียม
         const setDb = await pool.request().query('SELECT TOP 1 withdraw_fee_percent FROM P2P_Settings');
         const feePercent = setDb.recordset.length > 0 ? parseFloat(setDb.recordset[0].withdraw_fee_percent) : 5;
