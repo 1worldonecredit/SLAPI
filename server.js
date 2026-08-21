@@ -7588,19 +7588,20 @@ app.post('/api/p2p/cancel-withdraw-request', async (req, res) => {
         res.status(500).json({ success: false, message: err.message });
     }
 });
-
+// ==========================================
+// 📋 [GET] ดึงรายการงาน P2P ที่ฉันรับมาดูแล (ฝั่งผู้รับงาน)
+// ==========================================
 app.get('/api/p2p/my-jobs/:userId', async (req, res) => {
     try {
         const pid = parseInt(req.params.userId, 10);
         const pool = await sql.connect(dbConfig);
         
-        // 🌟 JOIN กับบัญชีที่ล็อกไว้ในรหัส user_bank_id โดยตรง ไม่มีการเดาข้อมูล
         const jobsDb = await pool.request().input('pid', sql.Int, pid).query(`
             SELECT r.*, 
                    u.username AS requester_name, 
                    bk.bank_name AS req_bank_name, 
-                   bk.logo_url,           /* 🌟 เพิ่ม โลโก้ธนาคาร ตรงนี้ */
-                   bk.country,            /* 🌟 เพิ่ม ประเทศ ตรงนี้ */
+                   bk.logo_url,    /* 👈 ตรงนี้แหละครับ! */
+                   bk.country,     /* 👈 ตรงนี้แหละครับ! */
                    ub.account_number AS req_account_number,
                    ub.account_name AS req_account_name
             FROM P2P_Requests r
