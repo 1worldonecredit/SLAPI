@@ -7453,6 +7453,9 @@ app.post('/api/p2p/accept-job', async (req, res) => {
     }
 });
 
+// ==========================================
+// 🏦 [GET] ดึงข้อมูลเตรียมถอนเงิน (Wallet + Banks + Logo)
+// ==========================================
 app.get('/api/p2p/withdraw-info/:userId', async (req, res) => {
     try {
         const uid = parseInt(req.params.userId, 10);
@@ -7460,31 +7463,28 @@ app.get('/api/p2p/withdraw-info/:userId', async (req, res) => {
 
         const pool = await sql.connect(dbConfig);
         
-        // ดึงข้อมูล Wallet
-        // 🌟 ดึงบัญชีธนาคารที่อนุมัติแล้ว พร้อมดึง logo_url และ currency_code
+        // 1. ดึงข้อมูล Wallet
+        const userDb = await pool.request().input('uid', sql.Int, uid).query(`
+            SELECT currency_code, ISNULL((SELECT balance FROM Wallets WHERE user_id = @uid), 0) as balance 
+            FROM users WHERE user_id = @uid
+        `);
+        if (userDb.recordset.length === 0) return res.json({ success: false, message: 'ไม่พบผู้ใช้' });
+        
+        const { currency_code, balance } = userDb.recordset[0];
+
+        // 2. ดึงบัญชีธนาคารที่อนุมัติแล้ว พร้อมดึง logo_url และ currency_code
         const banksDb = await pool.request().input('uid', sql.Int, uid).query(`
             SELECT ub.user_bank_id, ub.account_number, ub.currency_code, bk.bank_name, bk.logo_url 
             FROM UserBanks ub
             LEFT JOIN Banks bk ON ub.bank_id = bk.bank_id
             WHERE ub.user_id = @uid AND ub.status = 'Approved'
         `);
-        if (userDb.recordset.length === 0) return res.json({ success: false, message: 'ไม่พบผู้ใช้' });
-        
-        const { currency_code, balance } = userDb.recordset[0];
 
-        // 🌟 ดึงบัญชีธนาคารที่อนุมัติแล้วของลูกค้ารายนี้
-        const banksDb = await pool.request().input('uid', sql.Int, uid).query(`
-            SELECT ub.user_bank_id, ub.account_number, bk.bank_name 
-            FROM UserBanks ub
-            LEFT JOIN Banks bk ON ub.bank_id = bk.bank_id
-            WHERE ub.user_id = @uid AND ub.status = 'Approved'
-        `);
-
-        // ดึงค่าธรรมเนียม
+        // 3. ดึงค่าธรรมเนียม
         const setDb = await pool.request().query('SELECT TOP 1 withdraw_fee_percent FROM P2P_Settings');
         const feePercent = setDb.recordset.length > 0 ? parseFloat(setDb.recordset[0].withdraw_fee_percent) : 5;
 
-        // อัตราแลกเปลี่ยนสำรอง
+        // 4. อัตราแลกเปลี่ยนสำรอง
         let usdRate = currency_code === 'THB' ? 35 : currency_code === 'LAK' ? 22000 : 1; 
 
         res.json({
@@ -7493,9 +7493,10 @@ app.get('/api/p2p/withdraw-info/:userId', async (req, res) => {
             balance: parseFloat(balance),
             fee_percent: feePercent,
             usd_rate: usdRate,
-            banks: banksDb.recordset // 🌟 ส่งรายชื่อบัญชีไปให้หน้าเว็บ
+            banks: banksDb.recordset // 🌟 ส่งรายชื่อบัญชี (พร้อมโลโก้) ไปให้หน้าเว็บ
         });
     } catch (err) {
+        console.error("withdraw-info API Error:", err);
         res.status(500).json({ success: false, message: err.message });
     }
 });
