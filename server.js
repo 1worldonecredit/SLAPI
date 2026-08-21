@@ -7563,6 +7563,77 @@ app.get('/api/p2p/withdraw-info/:userId', async (req, res) => {
 });
 
 // ==========================================
+// ❌ [CLIENT] ยืนยันยกเลิกคำขอถอนเงิน (คืนเงินเข้ากระเป๋าเต็มจำนวน)
+// ==========================================
+app.post('/api/p2p/cancel-withdraw-request', async (req, res) => {
+    try {
+        const { request_id, requester_id } = req.body;
+        if (!request_id || !requester_id) return res.status(400).json({ success: false, message: 'ข้อมูลไม่ครบถ้วน' });
+
+        const pool = await sql.connect(dbConfig);
+        const transaction = new sql.Transaction(pool);
+        await transaction.begin();
+
+        try {
+            // 1. เช็คว่าคำขอนี้มีอยู่จริง, เป็นของลูกค้าคนนี้, และยังไม่มีใครรับงาน (PENDING)
+            const reqCheck = await transaction.request()
+                .input('rid', sql.Int, request_id)
+                .input('uid', sql.Int, requester_id)
+                .query(`
+                    SELECT amount, currency, status 
+                    FROM P2P_Requests 
+                    WHERE request_id = @rid AND requester_id = @uid AND request_type = 'WITHDRAW'
+                `);
+
+            if (reqCheck.recordset.length === 0) {
+                throw new Error('ไม่พบคำขอ หรือคุณไม่มีสิทธิ์ยกเลิกคำขอนี้');
+            }
+
+            const requestData = reqCheck.recordset[0];
+
+            // ถ้ามีคนกดรับงานไปแล้ว จะไม่ให้ยกเลิกเองแล้วครับ ป้องกันการโกง
+            if (requestData.status !== 'PENDING') {
+                throw new Error('ไม่สามารถยกเลิกได้ เนื่องจากมีผู้รับงานไปแล้ว หรือสถานะเปลี่ยนไปแล้วครับ');
+            }
+
+            const refundAmount = parseFloat(requestData.amount); // ยอดเงินเต็มจำนวนที่หักไปตอนแรก
+
+            // 2. เปลี่ยนสถานะคำขอเป็น CANCELLED
+            await transaction.request()
+                .input('rid', sql.Int, request_id)
+                .query(`UPDATE P2P_Requests SET status = 'CANCELLED' WHERE request_id = @rid`);
+
+            // 3. 🌟 คืนเงินเข้า Wallet เต็มจำนวน (+ amount)
+            await transaction.request()
+                .input('uid', sql.Int, requester_id)
+                .input('amt', sql.Decimal(18, 4), refundAmount)
+                .query(`UPDATE Wallets SET balance = balance + @amt WHERE user_id = @uid`);
+
+            // 4. 🌟 บันทึกประวัติ Transaction เป็นยอดบวก (เพื่อให้แสดงเป็นสีเขียว)
+            await transaction.request()
+                .input('uid', sql.Int, requester_id)
+                .input('amt', sql.Decimal(18, 4), refundAmount) // ใส่เป็นค่าบวก
+                .input('curr', sql.VarChar, requestData.currency)
+                .input('rid', sql.Int, request_id)
+                .query(`
+                    INSERT INTO Transactions (user_id, amount, transaction_type, title, status, created_at) 
+                    VALUES (@uid, @amt, 'P2P_Withdraw_Refund', N'คืนเงินยกเลิกคำขอถอนเงิน P2P (Job ID: ' + CAST(@rid AS NVARCHAR) + ')', 'Completed', GETDATE())
+                `);
+
+            await transaction.commit();
+            res.json({ success: true, message: 'ยกเลิกคำขอและคืนเงินเข้ากระเป๋าเต็มจำนวนสำเร็จครับ' });
+
+        } catch (err) {
+            await transaction.rollback();
+            throw err;
+        }
+    } catch (err) {
+        console.error("Cancel Withdraw Error:", err);
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
+
+// ==========================================
 // 📋 [GET] ดึงประวัติรับงาน (อัปเกรด: แนบข้อมูลบัญชีลูกค้า สำหรับให้คนรับงานโอนเงิน P2P ถอน)
 // ==========================================
 app.get('/api/p2p/my-jobs/:userId', async (req, res) => {
