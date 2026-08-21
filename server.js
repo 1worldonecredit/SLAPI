@@ -7491,18 +7491,23 @@ app.post('/api/p2p/accept-job', async (req, res) => {
     }
 });
 
-
 // ==========================================
 // 📥 [GET] ข้อมูลเตรียมถอนเงิน (ดึงกระเป๋า, ค่าธรรมเนียม, เรท USD เทียบสกุลเงินลูกค้า)
 // ==========================================
 app.get('/api/p2p/withdraw-info/:userId', async (req, res) => {
     try {
         const uid = req.params.userId;
+        console.log("👉 Fetching Withdraw Info for UID:", uid); // แจ้งเตือนใน Terminal
+
+        if (!uid || uid === 'undefined') {
+            return res.status(400).json({ success: false, message: 'Invalid User ID' });
+        }
+
         const pool = await sql.connect(dbConfig);
         
         // 1. ดึงข้อมูลกระเป๋า และ สกุลเงิน
         const userDb = await pool.request()
-            .input('uid', sql.Int, parseInt(uid, 10))
+            .input('uid', sql.Int, parseInt(uid, 10)) // 🌟 บังคับเป็นตัวเลข
             .query(`
                 SELECT u.currency_code, ISNULL(w.balance, 0) as balance 
                 FROM users u 
@@ -7510,7 +7515,9 @@ app.get('/api/p2p/withdraw-info/:userId', async (req, res) => {
                 WHERE u.user_id = @uid
             `);
         
-        if (userDb.recordset.length === 0) return res.json({ success: false, message: 'ไม่พบผู้ใช้' });
+        if (userDb.recordset.length === 0) {
+            return res.json({ success: false, message: 'ไม่พบผู้ใช้' });
+        }
         const { currency_code, balance } = userDb.recordset[0];
 
         // 2. ดึงค่าธรรมเนียมถอน (P2P_Settings)
@@ -7532,6 +7539,8 @@ app.get('/api/p2p/withdraw-info/:userId', async (req, res) => {
             }
         }
 
+        console.log(`✅ Success: ${balance} ${currency_code}`); // แจ้งเตือนว่าดึงสำเร็จ
+
         res.json({
             success: true,
             currency: currency_code,
@@ -7541,6 +7550,7 @@ app.get('/api/p2p/withdraw-info/:userId', async (req, res) => {
         });
         
     } catch (err) {
+        console.error("❌ Withdraw Info Error:", err);
         res.status(500).json({ success: false, message: err.message });
     }
 });
