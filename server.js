@@ -7089,13 +7089,17 @@ app.get('/api/p2p/board', async (req, res) => {
                 WHERE w.user_id = @uid
             `);
         
-        // 🌟 ดึงเฉพาะ "งานว่าง" และเช็คว่า "ยังไม่หมดเวลา" (รวมร่าง 1+2)
+        // 🌟 ดึงเฉพาะ "งานว่าง" และเช็คว่า "ยังไม่หมดเวลา" (เพิ่ม JOIN ธนาคาร เพื่อไม่ให้กระทบโค้ดเดิม)
         const missionsResult = await pool.request()
             .input('uid', sql.Int, user_id)
             .query(`
-                SELECT r.*, u.username 
+                SELECT r.*, u.username,
+                       bk.bank_name, bk.logo_url, bk.country,
+                       ub.account_number
                 FROM P2P_Requests r 
                 LEFT JOIN Users u ON r.requester_id = u.user_id 
+                LEFT JOIN UserBanks ub ON r.user_bank_id = ub.user_bank_id
+                LEFT JOIN Banks bk ON ub.bank_id = bk.bank_id
                 WHERE r.status = 'PENDING' 
                   AND r.requester_id != @uid 
                   AND r.expires_at > DATEADD(hour, 7, GETUTCDATE())
@@ -7148,7 +7152,6 @@ app.get('/api/p2p/board', async (req, res) => {
         res.status(500).json({ success: false, message: err.message }); 
     }
 });
-
 // ==========================================
 // 🌟 API ใหม่: ดึงเฉพาะโฆษณา/วิดีโอ (ดึงแค่ครั้งเดียวตอนลูกค้าเปิดหน้าเว็บ)
 // ==========================================
