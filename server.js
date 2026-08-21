@@ -7572,17 +7572,19 @@ app.get('/api/p2p/my-jobs/:userId', async (req, res) => {
 
         const pool = await sql.connect(dbConfig);
         
+        // 📋 [GET] ดึงประวัติรับงาน (แนบข้อมูลบัญชีลูกค้า)
         const jobsDb = await pool.request()
             .input('pid', sql.Int, parseInt(pid, 10))
             .query(`
                 SELECT r.*, 
                        u.username AS requester_name, 
-                       b.bank_name AS req_bank_name, 
-                       b.account_number AS req_account_number,
-                       b.account_name AS req_account_name
+                       bk.bank_name AS req_bank_name, 
+                       ub.account_number AS req_account_number,
+                       ub.account_name AS req_account_name
                 FROM P2P_Requests r
                 LEFT JOIN users u ON r.requester_id = u.user_id
-                LEFT JOIN UserBanks b ON r.requester_id = b.user_id
+                LEFT JOIN UserBanks ub ON r.requester_id = ub.user_id
+                LEFT JOIN Banks bk ON ub.bank_id = bk.bank_id
                 WHERE r.provider_id = @pid 
                   AND r.status IN ('ACCEPTED', 'VERIFYING')
                 ORDER BY r.request_id DESC
