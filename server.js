@@ -7502,7 +7502,7 @@ app.get('/api/p2p/withdraw-info/:userId', async (req, res) => {
         
         // 1. ดึงข้อมูลกระเป๋า และ สกุลเงิน
         const userDb = await pool.request()
-            .input('uid', sql.Int, uid)
+            .input('uid', sql.Int, parseInt(uid, 10))
             .query(`
                 SELECT u.currency_code, ISNULL(w.balance, 0) as balance 
                 FROM users u 
