@@ -7284,14 +7284,12 @@ app.put('/api/admin/ads/:id', async (req, res) => {
 // ==========================================
 // 🌟 API P2P ฝั่งถอนเงิน เริ่ม 
 // ==========================================
-// ==========================================
-// 💸 [CLIENT] สร้างคำขอถอนเงิน (P2P Withdraw) - หักเงินทันที + หักค่าธรรมเนียม
-// ==========================================
 app.post('/api/p2p/request-withdraw', async (req, res) => {
     try {
-        const { requester_id, amount } = req.body; 
-        if (!requester_id || !amount || amount <= 0) {
-            return res.status(400).json({ success: false, message: 'ข้อมูลไม่ครบถ้วน หรือยอดเงินไม่ถูกต้อง' });
+        // 🌟 รับค่า user_bank_id มาจากหน้าเว็บ
+        const { requester_id, amount, user_bank_id } = req.body; 
+        if (!requester_id || !amount || amount <= 0 || !user_bank_id) {
+            return res.status(400).json({ success: false, message: 'กรุณาระบุจำนวนเงินและเลือกบัญชีธนาคาร' });
         }
 
         const pool = await sql.connect(dbConfig);
@@ -7299,96 +7297,50 @@ app.post('/api/p2p/request-withdraw', async (req, res) => {
         await transaction.begin();
 
         try {
-           // 1. ดึงข้อมูลกระเป๋าเงิน และสกุลเงินของลูกค้า (ดึงข้ามไปตาราง Banks ด้วย)
-            const userCheck = await transaction.request()
-                .input('uid', sql.Int, requester_id)
-                .query(`
-                    SELECT u.currency_code, w.balance, bk.bank_name, ub.account_number 
-                    FROM users u 
-                    LEFT JOIN Wallets w ON u.user_id = w.user_id 
-                    LEFT JOIN UserBanks ub ON u.user_id = ub.user_id
-                    LEFT JOIN Banks bk ON ub.bank_id = bk.bank_id
-                    WHERE u.user_id = @uid
-                `);
-            
-            if (userCheck.recordset.length === 0) throw new Error('ไม่พบข้อมูลผู้ใช้');
-            
-            const user = userCheck.recordset[0];
-
-            // 🛑 กฎเหล็ก: ลูกค้าต้องมีบัญชีธนาคารก่อน ถึงจะขอถอนเงินได้!
-            if (!user.bank_name || !user.account_number) {
-                throw new Error('กรุณาเพิ่มบัญชีธนาคารของคุณในระบบก่อนทำการถอนเงินครับ');
-            }
-            
-            const userCurrency = user.currency_code;
-            const currentBalance = parseFloat(user.balance || 0);
+            const userCheck = await transaction.request().input('uid', sql.Int, requester_id).query(`
+                SELECT u.currency_code, w.balance FROM users u LEFT JOIN Wallets w ON u.user_id = w.user_id WHERE u.user_id = @uid
+            `);
+            const userCurrency = userCheck.recordset[0].currency_code;
+            const currentBalance = parseFloat(userCheck.recordset[0].balance || 0);
             const reqAmount = parseFloat(amount);
 
-            // 2. ดึงการตั้งค่า P2P (ค่าธรรมเนียมถอน และ ค่าคอมคนรับงาน)
+            if (currentBalance < reqAmount) throw new Error('ยอดเงินไม่เพียงพอ');
+
             const settings = await transaction.request().query('SELECT TOP 1 * FROM P2P_Settings');
             const config = settings.recordset.length > 0 ? settings.recordset[0] : {};
-            
-            // คำนวณค่าธรรมเนียมถอน (เช่น 5%)
             const feePercent = parseFloat(config.withdraw_fee_percent || 5);
             const feeAmount = (reqAmount * feePercent) / 100;
-            
-            // ยอดเงินที่ลูกค้าจะได้รับเข้าบัญชีธนาคารจริงๆ (ยอดถอน - ค่าธรรมเนียม)
             const netAmount = reqAmount - feeAmount; 
+            const providerReward = (netAmount * parseFloat(config.provider_reward_percent || 15)) / 100;
 
-            // คำนวณค่าคอมมิชชั่นให้คนรับงาน (คิดจากยอด Net)
-            const providerRewardPercent = parseFloat(config.provider_reward_percent || 15);
-            const providerReward = (netAmount * providerRewardPercent) / 100;
-
-            const boardTimeout = config.mission_timeout_minutes || 15;
-
-            // 3. เช็คยอดเงินในกระเป๋าว่าพอให้หักหรือไม่ (ต้องมากกว่าหรือเท่ากับยอดถอน)
-            if (currentBalance < reqAmount) {
-                throw new Error(`ยอดเงินไม่เพียงพอ (ต้องการ ${reqAmount.toLocaleString()} ${userCurrency})`);
-            }
-
-            // 4. หักเงินจาก Wallet ลูกค้าทันที เพื่อเอามาพักไว้ (Escrow)
-            await transaction.request()
-                .input('uid', sql.Int, requester_id)
-                .input('amt', sql.Decimal(18, 4), reqAmount)
+            await transaction.request().input('uid', sql.Int, requester_id).input('amt', sql.Decimal(18, 4), reqAmount)
                 .query(`UPDATE Wallets SET balance = balance - @amt WHERE user_id = @uid`);
 
-            // 5. บันทึก Statement (Transactions) ว่าโดนหักเงินเพื่อรอถอน P2P
-            const txResult = await transaction.request()
-                .input('uid', sql.Int, requester_id)
-                .input('amt', sql.Decimal(18, 4), -reqAmount) // ยอดติดลบ
-                .input('curr', sql.VarChar, userCurrency)
-                .query(`
-                    INSERT INTO Transactions (user_id, amount, transaction_type, title, status, created_at) 
-                    OUTPUT INSERTED.transaction_id
-                    VALUES (@uid, @amt, 'P2P_Withdraw_Hold', N'หักเงินเพื่อสร้างคำขอถอนเงิน P2P', 'Pending', GETDATE())
-                `);
+            const txResult = await transaction.request().input('uid', sql.Int, requester_id).input('amt', sql.Decimal(18, 4), -reqAmount)
+                .query(`INSERT INTO Transactions (user_id, amount, transaction_type, title, status, created_at) OUTPUT INSERTED.transaction_id VALUES (@uid, @amt, 'P2P_Withdraw_Hold', N'หักเงินเพื่อสร้างคำขอถอนเงิน P2P', 'Pending', GETDATE())`);
             
-            const reqIdStr = txResult.recordset[0].transaction_id;
-
-            // 6. บันทึกคำขอลงตาราง P2P_Requests
+            // 🌟 บันทึก user_bank_id ลงตาราง P2P_Requests แบบล็อคเป้าหมาย
             await transaction.request()
                 .input('req_id', sql.Int, requester_id)
-                .input('type', sql.VarChar, 'WITHDRAW')
+                .input('bank_id', sql.Int, user_bank_id)
                 .input('curr', sql.VarChar, userCurrency)
                 .input('amt', sql.Decimal(18, 4), reqAmount)
                 .input('fee', sql.Decimal(18, 4), feeAmount)
                 .input('net', sql.Decimal(18, 4), netAmount)
                 .input('reward', sql.Decimal(18, 4), providerReward)
-                .input('timeout', sql.Int, boardTimeout)
+                .input('timeout', sql.Int, config.mission_timeout_minutes || 15)
                 .query(`
-                    INSERT INTO P2P_Requests (requester_id, request_type, currency, amount, bonus_or_fee, net_amount, provider_reward, status, created_at, expires_at) 
-                    VALUES (@req_id, @type, @curr, @amt, @fee, @net, @reward, 'PENDING', DATEADD(hour, 7, GETUTCDATE()), DATEADD(minute, @timeout, DATEADD(hour, 7, GETUTCDATE())))
+                    INSERT INTO P2P_Requests (requester_id, user_bank_id, request_type, currency, amount, bonus_or_fee, net_amount, provider_reward, status, created_at, expires_at) 
+                    VALUES (@req_id, @bank_id, 'WITHDRAW', @curr, @amt, @fee, @net, @reward, 'PENDING', DATEADD(hour, 7, GETUTCDATE()), DATEADD(minute, @timeout, DATEADD(hour, 7, GETUTCDATE())))
                 `);
 
             await transaction.commit();
-            res.json({ success: true, message: 'สร้างคำขอถอนเงินสำเร็จ ระบบหักเงินรอการโอนแล้ว' });
-
+            res.json({ success: true, message: 'สร้างคำขอถอนเงินสำเร็จ' });
         } catch (err) {
             await transaction.rollback();
             throw err;
         }
     } catch (err) {
-        console.error("Withdraw Request Error:", err);
         res.status(500).json({ success: false, message: err.message });
     }
 });
@@ -7501,63 +7453,46 @@ app.post('/api/p2p/accept-job', async (req, res) => {
     }
 });
 
-// ==========================================
-// 📥 [GET] ข้อมูลเตรียมถอนเงิน (อัปเกรด: ใส่กันชนป้องกัน DB แคลช)
-// ==========================================
 app.get('/api/p2p/withdraw-info/:userId', async (req, res) => {
     try {
-        const uid = req.params.userId;
-        if (!uid || uid === 'undefined') return res.status(400).json({ success: false, message: 'Invalid ID' });
+        const uid = parseInt(req.params.userId, 10);
+        if (!uid) return res.status(400).json({ success: false, message: 'Invalid ID' });
 
         const pool = await sql.connect(dbConfig);
         
-        // 1. ดึงข้อมูลกระเป๋า และ สกุลเงิน
-        const userDb = await pool.request()
-            .input('uid', sql.Int, parseInt(uid, 10))
-            .query(`
-                SELECT u.currency_code, ISNULL(w.balance, 0) as balance 
-                FROM users u 
-                LEFT JOIN Wallets w ON u.user_id = w.user_id 
-                WHERE u.user_id = @uid
-            `);
-        
+        // ดึงข้อมูล Wallet
+        const userDb = await pool.request().input('uid', sql.Int, uid).query(`
+            SELECT currency_code, ISNULL((SELECT balance FROM Wallets WHERE user_id = @uid), 0) as balance 
+            FROM users WHERE user_id = @uid
+        `);
         if (userDb.recordset.length === 0) return res.json({ success: false, message: 'ไม่พบผู้ใช้' });
+        
         const { currency_code, balance } = userDb.recordset[0];
 
-        // 2. ดึงค่าธรรมเนียมถอน (P2P_Settings)
+        // 🌟 ดึงบัญชีธนาคารที่อนุมัติแล้วของลูกค้ารายนี้
+        const banksDb = await pool.request().input('uid', sql.Int, uid).query(`
+            SELECT ub.user_bank_id, ub.account_number, bk.bank_name 
+            FROM UserBanks ub
+            LEFT JOIN Banks bk ON ub.bank_id = bk.bank_id
+            WHERE ub.user_id = @uid AND ub.status = 'Approved'
+        `);
+
+        // ดึงค่าธรรมเนียม
         const setDb = await pool.request().query('SELECT TOP 1 withdraw_fee_percent FROM P2P_Settings');
         const feePercent = setDb.recordset.length > 0 ? parseFloat(setDb.recordset[0].withdraw_fee_percent) : 5;
 
-        // 3. ดึงอัตราแลกเปลี่ยน USD 
-        // (🌟 ตั้งค่าเรทสำรองไว้ก่อนเลย ถ้า DB มีปัญหาจะได้ใช้ค่านี้แทน)
+        // อัตราแลกเปลี่ยนสำรอง
         let usdRate = currency_code === 'THB' ? 35 : currency_code === 'LAK' ? 22000 : 1; 
-        
-        try {
-            if (currency_code !== 'USD') {
-                const rateDb = await pool.request()
-                    .input('pair', sql.VarChar, `USD_${currency_code}`)
-                    .query('SELECT rate FROM ExchangeRates WHERE pair = @pair');
-                
-                if (rateDb.recordset.length > 0) {
-                    usdRate = parseFloat(rateDb.recordset[0].rate);
-                }
-            }
-        } catch (rateErr) {
-            // 🌟 ถ้าตาราง ExchangeRates ไม่มี หรือชื่อคอลัมน์ผิด มันจะลงมาตรงนี้แทนการพังครับ!
-            console.log("⚠️ ข้ามการดึงเรทจากตาราง ExchangeRates, ใช้เรทสำรองแทน:", usdRate);
-        }
 
-        // ส่งข้อมูลกลับไปให้หน้าเว็บโชว์อย่างสวยงาม
         res.json({
             success: true,
             currency: currency_code,
             balance: parseFloat(balance),
             fee_percent: feePercent,
-            usd_rate: usdRate
+            usd_rate: usdRate,
+            banks: banksDb.recordset // 🌟 ส่งรายชื่อบัญชีไปให้หน้าเว็บ
         });
-        
     } catch (err) {
-        console.error("❌ Withdraw Info Error:", err);
         res.status(500).json({ success: false, message: err.message });
     }
 });
@@ -7633,37 +7568,29 @@ app.post('/api/p2p/cancel-withdraw-request', async (req, res) => {
     }
 });
 
-// ==========================================
-// 📋 [GET] ดึงประวัติรับงาน (อัปเกรด: แนบข้อมูลบัญชีลูกค้า สำหรับให้คนรับงานโอนเงิน P2P ถอน)
-// ==========================================
 app.get('/api/p2p/my-jobs/:userId', async (req, res) => {
     try {
-        const pid = req.params.userId;
-        if (!pid || pid === 'undefined') return res.status(400).json({ success: false, message: 'Invalid ID' });
-
+        const pid = parseInt(req.params.userId, 10);
         const pool = await sql.connect(dbConfig);
         
-        // 📋 [GET] ดึงประวัติรับงาน (แนบข้อมูลบัญชีลูกค้า)
-        const jobsDb = await pool.request()
-            .input('pid', sql.Int, parseInt(pid, 10))
-            .query(`
-                SELECT r.*, 
-                       u.username AS requester_name, 
-                       bk.bank_name AS req_bank_name, 
-                       ub.account_number AS req_account_number,
-                       ub.account_name AS req_account_name
-                FROM P2P_Requests r
-                LEFT JOIN users u ON r.requester_id = u.user_id
-                LEFT JOIN UserBanks ub ON r.requester_id = ub.user_id
-                LEFT JOIN Banks bk ON ub.bank_id = bk.bank_id
-                WHERE r.provider_id = @pid 
-                  AND r.status IN ('ACCEPTED', 'VERIFYING')
-                ORDER BY r.request_id DESC
-            `);
+        // 🌟 JOIN กับบัญชีที่ล็อกไว้ในรหัส user_bank_id โดยตรง ไม่มีการเดาข้อมูล
+        const jobsDb = await pool.request().input('pid', sql.Int, pid).query(`
+            SELECT r.*, 
+                   u.username AS requester_name, 
+                   bk.bank_name AS req_bank_name, 
+                   ub.account_number AS req_account_number,
+                   ub.account_name AS req_account_name
+            FROM P2P_Requests r
+            LEFT JOIN users u ON r.requester_id = u.user_id
+            LEFT JOIN UserBanks ub ON r.user_bank_id = ub.user_bank_id
+            LEFT JOIN Banks bk ON ub.bank_id = bk.bank_id
+            WHERE r.provider_id = @pid 
+              AND r.status IN ('ACCEPTED', 'VERIFYING')
+            ORDER BY r.request_id DESC
+        `);
         
         res.json({ success: true, jobs: jobsDb.recordset });
     } catch (err) {
-        console.error("❌ My Jobs Error:", err);
         res.status(500).json({ success: false, message: err.message });
     }
 });
