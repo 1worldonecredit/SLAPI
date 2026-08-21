@@ -7600,14 +7600,27 @@ app.get('/api/p2p/my-jobs/:userId', async (req, res) => {
             SELECT r.*, 
                    u.username AS requester_name, 
                    bk.bank_name AS req_bank_name, 
-                   bk.logo_url,    /* 👈 ตรงนี้แหละครับ! */
-                   bk.country,     /* 👈 ตรงนี้แหละครับ! */
+                   bk.logo_url, 
+                   bk.country,
                    ub.account_number AS req_account_number,
                    ub.account_name AS req_account_name
             FROM P2P_Requests r
-            LEFT JOIN users u ON r.requester_id = u.user_id
-            LEFT JOIN UserBanks ub ON r.user_bank_id = ub.user_bank_id
+            
+            -- 1. หาว่า "ใครคือผู้ส่งคำขอ"
+            LEFT JOIN Users u ON r.requester_id = u.user_id
+            
+            -- 2. หา "บัญชีธนาคารของเขา" จาก requester_id ตรงๆ (แก้ปัญหาดึงข้อมูลไม่มา)
+            OUTER APPLY (
+                SELECT TOP 1 b.account_number, b.account_name, b.bank_id
+                FROM UserBanks b
+                WHERE b.user_id = r.requester_id 
+                  AND b.currency_code = r.currency 
+                  AND b.status = 'Approved'
+            ) ub
+            
+            -- 3. หา "ชื่อธนาคาร โลโก้ และประเทศ"
             LEFT JOIN Banks bk ON ub.bank_id = bk.bank_id
+            
             WHERE r.provider_id = @pid 
               AND r.status IN ('ACCEPTED', 'VERIFYING')
             ORDER BY r.request_id DESC
@@ -7618,7 +7631,6 @@ app.get('/api/p2p/my-jobs/:userId', async (req, res) => {
         res.status(500).json({ success: false, message: err.message });
     }
 });
-
 // ==========================================
 // 📋 [GET] ดึงประวัติคำขอถอนเงินของลูกค้า (ดึงข้อมูลฝั่งผู้รับงานมาด้วย)
 // ==========================================
