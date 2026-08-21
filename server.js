@@ -7588,6 +7588,10 @@ app.get('/api/p2p/my-jobs/:userId', async (req, res) => {
         res.status(500).json({ success: false, message: err.message });
     }
 });
+
+// ==========================================
+// 📋 [GET] ดึงประวัติคำขอถอนเงินของลูกค้า (ดึงข้อมูลธนาคารมาด้วย)
+// ==========================================
 app.get('/api/p2p/my-requests/:userId', async (req, res) => {
     try {
         const uid = req.params.userId;
@@ -7597,17 +7601,20 @@ app.get('/api/p2p/my-requests/:userId', async (req, res) => {
         const reqDb = await pool.request()
             .input('uid', sql.Int, parseInt(uid, 10))
             .query(`
-                SELECT request_id, amount, net_amount, currency, status, created_at, expires_at 
-                FROM P2P_Requests 
-                WHERE requester_id = @uid AND request_type = 'WITHDRAW'
-                ORDER BY request_id DESC
+                SELECT r.request_id, r.amount, r.net_amount, r.currency, r.status, r.created_at, r.expires_at, r.slip_url,
+                       bk.bank_name, bk.logo_url, bk.country, ub.account_number
+                FROM P2P_Requests r
+                LEFT JOIN UserBanks ub ON r.user_bank_id = ub.user_bank_id
+                LEFT JOIN Banks bk ON ub.bank_id = bk.bank_id
+                WHERE r.requester_id = @uid AND r.request_type = 'WITHDRAW'
+                ORDER BY r.request_id DESC
             `);
         res.json({ success: true, requests: reqDb.recordset });
     } catch (err) {
+        console.error("My Requests API Error:", err);
         res.status(500).json({ success: false, message: err.message });
     }
 });
-
 // ==========================================
 // 📤 [PROVIDER] อัปโหลดสลิปโอนเงิน (สำหรับงานฝั่ง WITHDRAW)
 // ==========================================
