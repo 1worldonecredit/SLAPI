@@ -7461,9 +7461,12 @@ app.get('/api/p2p/withdraw-info/:userId', async (req, res) => {
         const pool = await sql.connect(dbConfig);
         
         // ดึงข้อมูล Wallet
-        const userDb = await pool.request().input('uid', sql.Int, uid).query(`
-            SELECT currency_code, ISNULL((SELECT balance FROM Wallets WHERE user_id = @uid), 0) as balance 
-            FROM users WHERE user_id = @uid
+        // 🌟 ดึงบัญชีธนาคารที่อนุมัติแล้ว พร้อมดึง logo_url และ currency_code
+        const banksDb = await pool.request().input('uid', sql.Int, uid).query(`
+            SELECT ub.user_bank_id, ub.account_number, ub.currency_code, bk.bank_name, bk.logo_url 
+            FROM UserBanks ub
+            LEFT JOIN Banks bk ON ub.bank_id = bk.bank_id
+            WHERE ub.user_id = @uid AND ub.status = 'Approved'
         `);
         if (userDb.recordset.length === 0) return res.json({ success: false, message: 'ไม่พบผู้ใช้' });
         
