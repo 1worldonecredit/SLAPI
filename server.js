@@ -7552,7 +7552,38 @@ app.get('/api/p2p/withdraw-info/:userId', async (req, res) => {
     }
 });
 
+// ==========================================
+// 📋 [GET] ดึงประวัติรับงาน (อัปเกรด: แนบข้อมูลบัญชีลูกค้า สำหรับให้คนรับงานโอนเงิน P2P ถอน)
+// ==========================================
+app.get('/api/p2p/my-jobs/:userId', async (req, res) => {
+    try {
+        const pid = req.params.userId;
+        if (!pid || pid === 'undefined') return res.status(400).json({ success: false, message: 'Invalid ID' });
 
+        const pool = await sql.connect(dbConfig);
+        
+        const jobsDb = await pool.request()
+            .input('pid', sql.Int, parseInt(pid, 10))
+            .query(`
+                SELECT r.*, 
+                       u.username AS requester_name, 
+                       b.bank_name AS req_bank_name, 
+                       b.account_number AS req_account_number,
+                       b.account_name AS req_account_name
+                FROM P2P_Requests r
+                LEFT JOIN users u ON r.requester_id = u.user_id
+                LEFT JOIN UserBanks b ON r.requester_id = b.user_id
+                WHERE r.provider_id = @pid 
+                  AND r.status IN ('ACCEPTED', 'VERIFYING')
+                ORDER BY r.request_id DESC
+            `);
+        
+        res.json({ success: true, jobs: jobsDb.recordset });
+    } catch (err) {
+        console.error("❌ My Jobs Error:", err);
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
 // ==========================================
 // 📝 [GET] ดึงประวัติคำขอถอนเงิน (ในฐานะผู้ขอถอน)
 // ==========================================
@@ -7578,6 +7609,8 @@ app.get('/api/p2p/my-requests/:userId', async (req, res) => {
         res.status(500).json({ success: false, message: err.message });
     }
 });
+
+
 // ==========================================
 // 🌟 API P2P ฝั่งถอนเงิน สินสุด
 // ==========================================
