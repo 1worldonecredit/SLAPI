@@ -7299,14 +7299,15 @@ app.post('/api/p2p/request-withdraw', async (req, res) => {
         await transaction.begin();
 
         try {
-           // 1. ดึงข้อมูลกระเป๋าเงิน และสกุลเงินของลูกค้า (อัปเกรด: เช็คบัญชีธนาคารด้วย)
+           // 1. ดึงข้อมูลกระเป๋าเงิน และสกุลเงินของลูกค้า (ดึงข้ามไปตาราง Banks ด้วย)
             const userCheck = await transaction.request()
                 .input('uid', sql.Int, requester_id)
                 .query(`
-                    SELECT u.currency_code, w.balance, b.bank_name, b.account_number 
+                    SELECT u.currency_code, w.balance, bk.bank_name, ub.account_number 
                     FROM users u 
                     LEFT JOIN Wallets w ON u.user_id = w.user_id 
-                    LEFT JOIN UserBanks b ON u.user_id = b.user_id
+                    LEFT JOIN UserBanks ub ON u.user_id = ub.user_id
+                    LEFT JOIN Banks bk ON ub.bank_id = bk.bank_id
                     WHERE u.user_id = @uid
                 `);
             
@@ -7424,13 +7425,14 @@ app.post('/api/p2p/accept-job', async (req, res) => {
                 throw new Error('ไม่สามารถรับงานของตัวเองได้ครับ');
             }
 
-            // 2. ดึงข้อมูล "ผู้รับงาน" (เช็คประเทศ, สกุลเงิน และ บัญชีธนาคาร)
+           // 2. ดึงข้อมูล "ผู้รับงาน" (เช็คประเทศ, สกุลเงิน และ บัญชีธนาคาร)
             const provCheck = await transaction.request()
                 .input('pid', sql.Int, provider_id)
                 .query(`
-                    SELECT u.country, u.currency_code, b.bank_name, b.account_number 
+                    SELECT u.country, u.currency_code, bk.bank_name, ub.account_number 
                     FROM users u
-                    LEFT JOIN UserBanks b ON u.user_id = b.user_id
+                    LEFT JOIN UserBanks ub ON u.user_id = ub.user_id
+                    LEFT JOIN Banks bk ON ub.bank_id = bk.bank_id
                     WHERE u.user_id = @pid
                 `);
             
