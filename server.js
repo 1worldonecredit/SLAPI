@@ -7622,6 +7622,9 @@ app.get('/api/p2p/my-jobs/:userId', async (req, res) => {
 // ==========================================
 // 📋 [GET] ดึงประวัติคำขอถอนเงินของลูกค้า (ดึงข้อมูลฝั่งผู้รับงานมาด้วย)
 // ==========================================
+// ==========================================
+// 📋 [GET] ดึงประวัติคำขอถอนเงินของลูกค้า (ดึงข้อมูลฝั่งผู้รับงานมาด้วย)
+// ==========================================
 app.get('/api/p2p/my-requests/:userId', async (req, res) => {
     try {
         const uid = req.params.userId;
@@ -7641,8 +7644,11 @@ app.get('/api/p2p/my-requests/:userId', async (req, res) => {
                 FROM P2P_Requests r
                 LEFT JOIN UserBanks ub ON r.user_bank_id = ub.user_bank_id
                 LEFT JOIN Banks bk ON ub.bank_id = bk.bank_id
-                -- 🌟 เชื่อมตารางเพื่อดึงข้อมูลฝั่ง "ผู้รับงาน" (Provider)
+                
+                -- 🌟 เชื่อมตาราง Users เพื่อเอาชื่อคนรับงาน
                 LEFT JOIN Users pu ON r.provider_id = pu.user_id
+                
+                -- 🌟 แก้ไขตรงนี้: ดึงบัญชีของผู้รับงาน ที่ผูกกับระบบและตรงกับสกุลเงินของงาน
                 OUTER APPLY (
                     SELECT TOP 1 b.account_number, b.bank_id
                     FROM UserBanks b
@@ -7651,6 +7657,7 @@ app.get('/api/p2p/my-requests/:userId', async (req, res) => {
                       AND b.status = 'Approved'
                 ) pb
                 LEFT JOIN Banks pbk ON pb.bank_id = pbk.bank_id
+                
                 WHERE r.requester_id = @uid AND r.request_type = 'WITHDRAW'
                 ORDER BY r.request_id DESC
             `);
