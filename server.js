@@ -7551,6 +7551,33 @@ app.get('/api/p2p/withdraw-info/:userId', async (req, res) => {
         res.status(500).json({ success: false, message: err.message });
     }
 });
+
+
+// ==========================================
+// 📝 [GET] ดึงประวัติคำขอถอนเงิน (ในฐานะผู้ขอถอน)
+// ==========================================
+app.get('/api/p2p/my-requests/:userId', async (req, res) => {
+    try {
+        const uid = req.params.userId;
+        if (!uid || uid === 'undefined') return res.status(400).json({ success: false, message: 'Invalid ID' });
+
+        const pool = await sql.connect(dbConfig);
+        
+        const reqDb = await pool.request()
+            .input('uid', sql.Int, parseInt(uid, 10))
+            .query(`
+                SELECT request_id, amount, net_amount, currency, status, created_at 
+                FROM P2P_Requests 
+                WHERE requester_id = @uid AND request_type = 'WITHDRAW'
+                ORDER BY request_id DESC
+            `);
+        
+        res.json({ success: true, requests: reqDb.recordset });
+    } catch (err) {
+        console.error("❌ Fetch My Requests Error:", err);
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
 // ==========================================
 // 🌟 API P2P ฝั่งถอนเงิน สินสุด
 // ==========================================
