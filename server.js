@@ -7491,6 +7491,59 @@ app.post('/api/p2p/accept-job', async (req, res) => {
     }
 });
 
+
+// ==========================================
+// 📥 [GET] ข้อมูลเตรียมถอนเงิน (ดึงกระเป๋า, ค่าธรรมเนียม, เรท USD เทียบสกุลเงินลูกค้า)
+// ==========================================
+app.get('/api/p2p/withdraw-info/:userId', async (req, res) => {
+    try {
+        const uid = req.params.userId;
+        const pool = await sql.connect(dbConfig);
+        
+        // 1. ดึงข้อมูลกระเป๋า และ สกุลเงิน
+        const userDb = await pool.request()
+            .input('uid', sql.Int, uid)
+            .query(`
+                SELECT u.currency_code, ISNULL(w.balance, 0) as balance 
+                FROM users u 
+                LEFT JOIN Wallets w ON u.user_id = w.user_id 
+                WHERE u.user_id = @uid
+            `);
+        
+        if (userDb.recordset.length === 0) return res.json({ success: false, message: 'ไม่พบผู้ใช้' });
+        const { currency_code, balance } = userDb.recordset[0];
+
+        // 2. ดึงค่าธรรมเนียมถอน (P2P_Settings)
+        const setDb = await pool.request().query('SELECT TOP 1 withdraw_fee_percent FROM P2P_Settings');
+        const feePercent = setDb.recordset.length > 0 ? parseFloat(setDb.recordset[0].withdraw_fee_percent) : 5;
+
+        // 3. ดึงอัตราแลกเปลี่ยน USD (แปลง 10$ เป็นสกุลเงินท้องถิ่น)
+        let usdRate = 1; 
+        if (currency_code !== 'USD') {
+            const rateDb = await pool.request()
+                .input('pair', sql.VarChar, `USD_${currency_code}`) // เช่น USD_THB หรือ USD_LAK
+                .query('SELECT rate FROM ExchangeRates WHERE pair = @pair');
+            
+            if (rateDb.recordset.length > 0) {
+                usdRate = parseFloat(rateDb.recordset[0].rate);
+            } else {
+                // ค่าสำรองกรณีลืมตั้งเรทในระบบ
+                usdRate = currency_code === 'THB' ? 35 : currency_code === 'LAK' ? 22000 : 1;
+            }
+        }
+
+        res.json({
+            success: true,
+            currency: currency_code,
+            balance: parseFloat(balance),
+            fee_percent: feePercent,
+            usd_rate: usdRate
+        });
+        
+    } catch (err) {
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
 // ==========================================
 // 🌟 API P2P ฝั่งถอนเงิน สินสุด
 // ==========================================
