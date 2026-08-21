@@ -7610,6 +7610,47 @@ app.get('/api/p2p/my-requests/:userId', async (req, res) => {
     }
 });
 
+// ==========================================
+// 📤 [PROVIDER] อัปโหลดสลิปโอนเงิน (สำหรับงานฝั่ง WITHDRAW)
+// ==========================================
+app.post('/api/p2p/upload-slip', async (req, res) => {
+    try {
+        const { provider_id, request_id, slip_image } = req.body;
+        
+        if (!provider_id || !request_id || !slip_image) {
+            return res.status(400).json({ success: false, message: 'ข้อมูลไม่ครบถ้วน หรือไม่มีรูปภาพ' });
+        }
+
+        const pool = await sql.connect(dbConfig);
+        
+        // 1. เช็คก่อนว่าเป็นงานของคนนี้จริงๆ ไหม และสถานะเป็น ACCEPTED ไหม
+        const jobCheck = await pool.request()
+            .input('rid', sql.Int, request_id)
+            .input('pid', sql.Int, provider_id)
+            .query(`SELECT * FROM P2P_Requests WHERE request_id = @rid AND provider_id = @pid AND status = 'ACCEPTED'`);
+        
+        if (jobCheck.recordset.length === 0) {
+            return res.json({ success: false, message: 'ไม่พบงานนี้ หรือสถานะงานไม่ถูกต้อง' });
+        }
+
+        // 2. อัปเดตสลิปและเปลี่ยนสถานะเป็น 'VERIFYING' (รอให้ลูกค้าตรวจสลิป)
+        await pool.request()
+            .input('rid', sql.Int, request_id)
+            .input('slip', sql.NVarChar(sql.MAX), slip_image) // รองรับ string ยาวมากๆ
+            .query(`
+                UPDATE P2P_Requests 
+                SET slip_url = @slip, 
+                    status = 'VERIFYING' 
+                WHERE request_id = @rid
+            `);
+
+        res.json({ success: true, message: '✅ อัปโหลดสลิปสำเร็จ! ระบบส่งให้ลูกค้าตรวจสอบแล้ว' });
+
+    } catch (err) {
+        console.error("Upload Slip Error:", err);
+        res.status(500).json({ success: false, message: 'Server Error: ' + err.message });
+    }
+});
 
 // ==========================================
 // 🌟 API P2P ฝั่งถอนเงิน สินสุด
