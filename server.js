@@ -7299,20 +7299,28 @@ app.post('/api/p2p/request-withdraw', async (req, res) => {
         await transaction.begin();
 
         try {
-            // 1. ดึงข้อมูลกระเป๋าเงิน และสกุลเงินของลูกค้า
+           // 1. ดึงข้อมูลกระเป๋าเงิน และสกุลเงินของลูกค้า (อัปเกรด: เช็คบัญชีธนาคารด้วย)
             const userCheck = await transaction.request()
                 .input('uid', sql.Int, requester_id)
                 .query(`
-                    SELECT u.currency_code, w.balance 
+                    SELECT u.currency_code, w.balance, b.bank_name, b.account_number 
                     FROM users u 
                     LEFT JOIN Wallets w ON u.user_id = w.user_id 
+                    LEFT JOIN UserBanks b ON u.user_id = b.user_id
                     WHERE u.user_id = @uid
                 `);
             
             if (userCheck.recordset.length === 0) throw new Error('ไม่พบข้อมูลผู้ใช้');
             
-            const userCurrency = userCheck.recordset[0].currency_code;
-            const currentBalance = parseFloat(userCheck.recordset[0].balance || 0);
+            const user = userCheck.recordset[0];
+
+            // 🛑 กฎเหล็ก: ลูกค้าต้องมีบัญชีธนาคารก่อน ถึงจะขอถอนเงินได้!
+            if (!user.bank_name || !user.account_number) {
+                throw new Error('กรุณาเพิ่มบัญชีธนาคารของคุณในระบบก่อนทำการถอนเงินครับ');
+            }
+            
+            const userCurrency = user.currency_code;
+            const currentBalance = parseFloat(user.balance || 0);
             const reqAmount = parseFloat(amount);
 
             // 2. ดึงการตั้งค่า P2P (ค่าธรรมเนียมถอน และ ค่าคอมคนรับงาน)
