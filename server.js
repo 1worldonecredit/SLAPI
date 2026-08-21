@@ -7320,6 +7320,7 @@ app.post('/api/p2p/request-withdraw', async (req, res) => {
                 .query(`INSERT INTO Transactions (user_id, amount, transaction_type, title, status, created_at) OUTPUT INSERTED.transaction_id VALUES (@uid, @amt, 'P2P_Withdraw_Hold', N'หักเงินเพื่อสร้างคำขอถอนเงิน P2P', 'Pending', GETDATE())`);
             
             // 🌟 บันทึก user_bank_id ลงตาราง P2P_Requests แบบล็อคเป้าหมาย
+           // 🌟 แก้ชื่อคอลัมน์ดึงเวลา Timeout ให้ตรงกับฐานข้อมูลเป๊ะๆ
             await transaction.request()
                 .input('req_id', sql.Int, requester_id)
                 .input('bank_id', sql.Int, user_bank_id)
@@ -7328,7 +7329,8 @@ app.post('/api/p2p/request-withdraw', async (req, res) => {
                 .input('fee', sql.Decimal(18, 4), feeAmount)
                 .input('net', sql.Decimal(18, 4), netAmount)
                 .input('reward', sql.Decimal(18, 4), providerReward)
-                .input('timeout', sql.Int, config.mission_timeout_minutes || 15)
+                // 👇 เปลี่ยนเป็น config.request_timeout_minutes ตรงนี้ครับ 👇
+                .input('timeout', sql.Int, parseInt(config.request_timeout_minutes || 15)) 
                 .query(`
                     INSERT INTO P2P_Requests (requester_id, user_bank_id, request_type, currency, amount, bonus_or_fee, net_amount, provider_reward, status, created_at, expires_at) 
                     VALUES (@req_id, @bank_id, 'WITHDRAW', @curr, @amt, @fee, @net, @reward, 'PENDING', DATEADD(hour, 7, GETUTCDATE()), DATEADD(minute, @timeout, DATEADD(hour, 7, GETUTCDATE())))
