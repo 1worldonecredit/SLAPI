@@ -7107,17 +7107,34 @@ app.get('/api/p2p/board', async (req, res) => {
             `);
 
         // 🌟 แยกตะกร้าดึง "งานที่ฉันกดรับมาดูแล" (เพิ่ม JOIN ธนาคาร เพื่อโชว์ในหน้าประวัติ)
+        // 🌟 แยกตะกร้าดึง "งานที่ฉันกดรับมาดูแล" (เพิ่มสูตรดึงบัญชีจากคนส่งคำขอโดยตรง!)
         const myAcceptedResult = await pool.request()
             .input('uid', sql.Int, user_id)
             .query(`
-                SELECT r.*, u.username,
-                       bk.bank_name AS req_bank_name, bk.logo_url, bk.country,
+                SELECT r.*, 
+                       u.username AS requester_name,
+                       bk.bank_name AS req_bank_name, 
+                       bk.logo_url, 
+                       bk.country,
                        ub.account_number AS req_account_number,
                        ub.account_name AS req_account_name
                 FROM P2P_Requests r 
+                
+                -- 1. หาตัวตนคนส่งคำขอ
                 LEFT JOIN Users u ON r.requester_id = u.user_id 
-                LEFT JOIN UserBanks ub ON r.user_bank_id = ub.user_bank_id
+                
+                -- 2. วิ่งทะลุไปหาบัญชีคนส่งคำขอตรงๆ (แก้ปัญหา ID เก่าที่ไม่มี user_bank_id)
+                OUTER APPLY (
+                    SELECT TOP 1 b.account_number, b.account_name, b.bank_id
+                    FROM UserBanks b
+                    WHERE b.user_id = r.requester_id 
+                      AND b.currency_code = r.currency 
+                      AND b.status = 'Approved'
+                ) ub
+                
+                -- 3. เอาโลโก้และชื่อธนาคารมาโชว์
                 LEFT JOIN Banks bk ON ub.bank_id = bk.bank_id
+                
                 WHERE r.provider_id = @uid AND r.status IN ('ACCEPTED', 'VERIFYING')
                 ORDER BY r.created_at DESC
             `);
