@@ -7671,47 +7671,106 @@ app.get('/api/p2p/my-requests/:userId', async (req, res) => {
     }
 });
 // ==========================================
-// 📤 [PROVIDER] อัปโหลดสลิปโอนเงิน (แบบเก็บข้อมูลป้องกันสลิปปลอม 100%)
+// 📤 [POST] อัปโหลดสลิปโอนเงิน (ระบบ Anti-Fraud เช็คยอด 3 ครั้ง)
 // ==========================================
 app.post('/api/p2p/upload-slip', async (req, res) => {
     try {
-        // 🌟 รับค่ามาให้ครบทุกตัว จาก Pop-up หน้าเว็บ
         const { provider_id, request_id, slip_image, transfer_amount, transfer_date, transfer_time } = req.body;
         
-        if (!provider_id || !request_id || !slip_image) {
-            return res.status(400).json({ success: false, message: 'ข้อมูลไม่ครบถ้วน หรือไม่มีรูปภาพ' });
+        if (!provider_id || !request_id || !slip_image || !transfer_amount || !transfer_date || !transfer_time) {
+            return res.status(400).json({ success: false, message: 'กรุณากรอกข้อมูลให้ครบถ้วน รวมถึงแนบรูปภาพ ยอดเงิน และเวลาโอน' });
         }
 
         const pool = await sql.connect(dbConfig);
         
-        // 1. เช็คก่อนว่าเป็นงานของคนนี้จริงๆ ไหม และสถานะเป็น ACCEPTED ไหม
+        // 1. ดึงข้อมูลงานมาตรวจสอบ
         const jobCheck = await pool.request()
             .input('rid', sql.Int, request_id)
             .input('pid', sql.Int, provider_id)
             .query(`SELECT * FROM P2P_Requests WHERE request_id = @rid AND provider_id = @pid AND status = 'ACCEPTED'`);
         
         if (jobCheck.recordset.length === 0) {
-            return res.json({ success: false, message: 'ไม่พบงานนี้ หรือสถานะงานไม่ถูกต้อง' });
+            return res.status(400).json({ success: false, message: 'ไม่พบงานนี้ หรือสถานะงานไม่ถูกต้อง' });
         }
 
-        // 2. อัปเดตสลิป + ยอดเงิน + วันเวลา และเปลี่ยนสถานะเป็น 'VERIFYING'
+        const job = jobCheck.recordset[0];
+        const expectedAmount = parseFloat(job.net_amount);
+        const inputAmount = parseFloat(transfer_amount);
+
+        // 🚨 2. ระบบตรวจสอบเจตนาทุจริต (Anti-Fraud)
+        if (inputAmount !== expectedAmount) {
+            const currentErrorCount = (job.slip_error_count || 0) + 1;
+
+            if (currentErrorCount >= 3) {
+                // 💥 ทุจริตครบ 3 ครั้ง: ลงดาบแบนผู้รับงาน & ยกเลิกงาน & คืนเงินลูกค้า
+                
+                // 2.1 บล็อกผู้รับงาน (เปลี่ยนสถานะ User เป็น Blocked)
+                await pool.request()
+                    .input('pid', sql.Int, provider_id)
+                    .query(`UPDATE Users SET status = 'Blocked' WHERE user_id = @pid`);
+
+                // 2.2 ยกเลิกงาน และคืนเงินให้ผู้ส่งคำขอถอน (Requester)
+                // ⚠️ หมายเหตุ: ตรวจสอบชื่อคอลัมน์กระเป๋าเงิน (เช่น wallet หรือ balance) ให้ตรงกับ Database ของเจ้านายนะครับ
+                await pool.request()
+                    .input('rid', sql.Int, request_id)
+                    .input('req_id', sql.Int, job.requester_id)
+                    .input('amount', sql.Decimal(18,2), job.amount)
+                    .query(`
+                        UPDATE P2P_Requests SET status = 'CANCELLED' WHERE request_id = @rid;
+                        UPDATE Users SET wallet = wallet + @amount WHERE user_id = @req_id;
+                    `);
+
+                // 2.3 สร้างการแจ้งเตือนส่งไปให้ "ผู้ส่งคำขอ" (ถ้ามีตาราง Notifications)
+                try {
+                    await pool.request()
+                        .input('req_id', sql.Int, job.requester_id)
+                        .input('msg', sql.NVarChar(sql.MAX), 'ผู้รับงานมีเจตนาทุจริต ผู้รับงานโดนบล็อกแล้ว ให้ส่งคำขอใหม่ (เราได้คืนเงินกลับให้คุณแล้วกรุณาตรวจสอบ)')
+                        .query(`
+                            INSERT INTO Notifications (user_id, message, type, is_read, created_at)
+                            VALUES (@req_id, @msg, 'SYSTEM', 0, GETDATE())
+                        `);
+                } catch (notiErr) {
+                    console.log("ไม่มีตาราง Notifications ข้ามการส่งแจ้งเตือนไป");
+                }
+
+                return res.status(403).json({ 
+                    success: false, 
+                    message: '🚨 บัญชีของคุณถูกระงับการใช้งาน! เนื่องจากตรวจพบเจตนาทุจริต กรุณาติดต่อ Admin' 
+                });
+
+            } else {
+                // ⚠️ กรอกผิดแต่ยังไม่ครบ 3 ครั้ง: อัปเดตตัวนับและแจ้งเตือน
+                await pool.request()
+                    .input('rid', sql.Int, request_id)
+                    .input('errCount', sql.Int, currentErrorCount)
+                    .query(`UPDATE P2P_Requests SET slip_error_count = @errCount WHERE request_id = @rid`);
+
+                return res.status(400).json({ 
+                    success: false, 
+                    message: `❌ ยอดเงินไม่ถูกต้อง! คุณต้องระบุยอดโอนให้ตรงกับที่ระบบกำหนด คือ ${expectedAmount.toLocaleString()} ${job.currency}\n(เตือนครั้งที่ ${currentErrorCount}/3 หากผิดครบ 3 ครั้งบัญชีจะถูกระงับ!)` 
+                });
+            }
+        }
+
+        // 🌟 3. ถ้ายอดเงินตรงกันเป๊ะ: บันทึกข้อมูลและเปลี่ยนสถานะเป็น VERIFYING
         await pool.request()
             .input('rid', sql.Int, request_id)
             .input('slip', sql.NVarChar(sql.MAX), slip_image) 
-            .input('t_amount', sql.Decimal(18,2), transfer_amount || null)
-            .input('t_date', sql.Date, transfer_date || null)
-            .input('t_time', sql.Time, transfer_time || null)
+            .input('t_amount', sql.Decimal(18,2), inputAmount)
+            .input('t_date', sql.Date, transfer_date)
+            .input('t_time', sql.Time, transfer_time)
             .query(`
                 UPDATE P2P_Requests 
                 SET slip_url = @slip, 
                     transfer_amount = @t_amount,
                     transfer_date = @t_date,
                     transfer_time = @t_time,
+                    slip_error_count = 0, -- รีเซ็ตค่าหากตอบถูก
                     status = 'VERIFYING' 
                 WHERE request_id = @rid
             `);
 
-        res.json({ success: true, message: '✅ อัปโหลดสลิปสำเร็จ! ระบบบันทึกข้อมูลหลักฐานเรียบร้อยแล้ว' });
+        res.json({ success: true, message: '✅ ส่งหลักฐานสำเร็จ! ระบบบันทึกข้อมูลและส่งให้ลูกค้าตรวจสอบแล้ว' });
 
     } catch (err) {
         console.error("Upload Slip Error:", err);
