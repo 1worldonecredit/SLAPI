@@ -7598,6 +7598,7 @@ app.get('/api/p2p/my-jobs/:userId', async (req, res) => {
         const pid = parseInt(req.params.userId, 10);
         const pool = await sql.connect(dbConfig);
         
+        // 🌟 ดึงแบบตรงไปตรงมา ผ่าน user_bank_id เหมือนหน้าบอร์ดเลยครับ!
         const jobsDb = await pool.request().input('pid', sql.Int, pid).query(`
             SELECT r.*, 
                    u.username AS requester_name, 
@@ -7607,16 +7608,9 @@ app.get('/api/p2p/my-jobs/:userId', async (req, res) => {
                    ub.account_number AS req_account_number,
                    ub.account_name AS req_account_name
             FROM P2P_Requests r
-            
-            -- 1. เชื่อมเอาชื่อผู้ส่งคำขอ
             LEFT JOIN Users u ON r.requester_id = u.user_id
-            
-            -- 2. เชื่อมเอาบัญชีธนาคาร (ใช้ท่าเดียวกับหน้า Mission เป๊ะๆ 100%)
             LEFT JOIN UserBanks ub ON r.user_bank_id = ub.user_bank_id
-            
-            -- 3. เชื่อมเอาโลโก้และชื่อธนาคาร
             LEFT JOIN Banks bk ON ub.bank_id = bk.bank_id
-            
             WHERE r.provider_id = @pid 
               AND r.status IN ('ACCEPTED', 'VERIFYING')
             ORDER BY r.request_id DESC
