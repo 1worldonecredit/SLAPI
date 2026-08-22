@@ -7623,19 +7623,13 @@ app.get('/api/p2p/my-jobs/:userId', async (req, res) => {
                    ub.account_name AS req_account_name
             FROM P2P_Requests r
             
-            -- 1. ดึงชื่อ Username ของคนส่งคำขอ
+            -- 1. เชื่อมเอาชื่อผู้ส่งคำขอ
             LEFT JOIN Users u ON r.requester_id = u.user_id
             
-            -- 2. ทะลวงหาบัญชีธนาคาร (รองรับทั้งงานเก่าที่ไม่มี ID และงานใหม่)
-            OUTER APPLY (
-                SELECT TOP 1 b.account_number, b.account_name, b.bank_id
-                FROM UserBanks b
-                WHERE (r.user_bank_id IS NOT NULL AND b.user_bank_id = r.user_bank_id)
-                   OR (r.user_bank_id IS NULL AND b.user_id = r.requester_id AND b.currency_code = r.currency)
-                ORDER BY CASE WHEN b.status = 'Approved' THEN 1 ELSE 2 END ASC
-            ) ub
+            -- 2. เชื่อมเอาบัญชีธนาคาร (ใช้ท่าเดียวกับหน้า Mission เป๊ะๆ 100%)
+            LEFT JOIN UserBanks ub ON r.user_bank_id = ub.user_bank_id
             
-            -- 3. ดึงโลโก้และชื่อธนาคาร
+            -- 3. เชื่อมเอาโลโก้และชื่อธนาคาร
             LEFT JOIN Banks bk ON ub.bank_id = bk.bank_id
             
             WHERE r.provider_id = @pid 
