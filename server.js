@@ -482,6 +482,25 @@ app.post('/api/register', async (req, res) => {
   }
 });
 
+// ดึงยอดเงินปัจจุบันมาเช็คก่อน
+const checkWallet = await transaction.request()
+    .input('uid', sql.Int, user_id)
+    .query(`SELECT balance FROM Wallets WHERE user_id = @uid`);
+
+const currentBalance = checkWallet.recordset[0].balance;
+
+// ถ้าเงินที่มี "น้อยกว่า" เงินที่ต้องหัก ให้เตะออกเลย!
+if (currentBalance < required_amount) {
+    throw new Error('ยอดเงินใน Wallet ไม่เพียงพอสำหรับทำรายการนี้'); 
+    // (ถ้าไม่ได้ใช้ Transaction ก็ใช้ return res.status(400).json(...) แทนครับ)
+}
+
+// ถ้าเงินพอ ค่อยอนุญาตให้หักเงิน
+await transaction.request()
+    .input('uid', sql.Int, user_id)
+    .input('amount', sql.Decimal(18,4), required_amount)
+    .query(`UPDATE Wallets SET balance = balance - @amount WHERE user_id = @uid`);
+
 
 // ==========================================
 // API 1: ดึงรายชื่อธนาคารทั้งหมด (จากตาราง Banks)
