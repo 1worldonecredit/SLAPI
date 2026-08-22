@@ -7651,12 +7651,28 @@ app.get('/api/p2p/my-requests/:userId', async (req, res) => {
 // ==========================================
 // 📤 [POST] อัปโหลดสลิปโอนเงิน (พร้อมระบบ Anti-Fraud + การคืนเงินที่ปลอดภัย 100%)
 // ==========================================
+// ==========================================
+// 📤 [POST] อัปโหลดสลิปโอนเงิน (พร้อมระบบ Anti-Fraud และระบบตรวจสอบตัวแปรหาย)
+// ==========================================
 app.post('/api/p2p/upload-slip', async (req, res) => {
     try {
         const { provider_id, request_id, slip_image, transfer_amount, transfer_date, transfer_time } = req.body;
         
-        if (!provider_id || !request_id || !slip_image || !transfer_amount || !transfer_date || !transfer_time) {
-            return res.status(400).json({ success: false, message: 'กรุณากรอกข้อมูลให้ครบถ้วน รวมถึงแนบรูปภาพ ยอดเงิน และเวลาโอน' });
+        // 🕵️‍♂️ โค้ดนักสืบ: ตรวจทีละตัวว่าใครหายไป
+        let missingFields = [];
+        if (!provider_id) missingFields.push('provider_id (รหัสผู้รับงาน)');
+        if (!request_id) missingFields.push('request_id (รหัสงาน)');
+        if (!slip_image) missingFields.push('slip_image (รูปสลิป)');
+        if (!transfer_amount) missingFields.push('transfer_amount (ยอดเงิน)');
+        if (!transfer_date) missingFields.push('transfer_date (วันที่โอน)');
+        if (!transfer_time) missingFields.push('transfer_time (เวลาที่โอน)');
+
+        // ถ้ามีตัวไหนหายไป ให้ Alert บอกหน้าเว็บชัดๆ เลยว่าตัวไหน!
+        if (missingFields.length > 0) {
+            return res.status(400).json({ 
+                success: false, 
+                message: `❌ ข้อมูลส่งมาไม่ครบ! ตัวที่ขาดหายไปคือ: ${missingFields.join(', ')}` 
+            });
         }
 
         const pool = await sql.connect(dbConfig);
@@ -7702,7 +7718,7 @@ app.post('/api/p2p/upload-slip', async (req, res) => {
                         .input('amt', sql.Decimal(18, 4), refundAmount)
                         .query(`UPDATE Wallets SET balance = balance + @amt WHERE user_id = @uid`);
 
-                    // 2.4 บันทึกประวัติ Transaction (แบบเดียวกับที่เจ้านายทำไว้)
+                    // 2.4 บันทึกประวัติ Transaction
                     await transaction.request()
                         .input('uid', sql.Int, job.requester_id)
                         .input('amt', sql.Decimal(18, 4), refundAmount)
