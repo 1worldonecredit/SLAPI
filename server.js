@@ -7671,7 +7671,7 @@ app.get('/api/p2p/my-requests/:userId', async (req, res) => {
     }
 });
 // ==========================================
-// 📤 [POST] อัปโหลดสลิปโอนเงิน (ระบบ Anti-Fraud เช็คยอด 3 ครั้ง)
+// 📤 [POST] อัปโหลดสลิปโอนเงิน (พร้อมระบบ Anti-Fraud + การคืนเงินที่ปลอดภัย 100%)
 // ==========================================
 app.post('/api/p2p/upload-slip', async (req, res) => {
     try {
@@ -7702,41 +7702,63 @@ app.post('/api/p2p/upload-slip', async (req, res) => {
             const currentErrorCount = (job.slip_error_count || 0) + 1;
 
             if (currentErrorCount >= 3) {
-                // 💥 ทุจริตครบ 3 ครั้ง: ลงดาบแบนผู้รับงาน & ยกเลิกงาน & คืนเงินลูกค้า
-                
-                // 2.1 บล็อกผู้รับงาน (เปลี่ยนสถานะ User เป็น Blocked)
-                await pool.request()
-                    .input('pid', sql.Int, provider_id)
-                    .query(`UPDATE Users SET status = 'Blocked' WHERE user_id = @pid`);
+                // 💥 ทุจริตครบ 3 ครั้ง: ใช้ Transaction คืนเงินตามสูตรของเจ้านายเป๊ะๆ
+                const transaction = new sql.Transaction(pool);
+                await transaction.begin();
 
-                // 2.2 ยกเลิกงาน และคืนเงินให้ผู้ส่งคำขอถอน (Requester)
-                // ⚠️ หมายเหตุ: ตรวจสอบชื่อคอลัมน์กระเป๋าเงิน (เช่น wallet หรือ balance) ให้ตรงกับ Database ของเจ้านายนะครับ
-                await pool.request()
-                    .input('rid', sql.Int, request_id)
-                    .input('req_id', sql.Int, job.requester_id)
-                    .input('amount', sql.Decimal(18,2), job.amount)
-                    .query(`
-                        UPDATE P2P_Requests SET status = 'CANCELLED' WHERE request_id = @rid;
-                        UPDATE Users SET wallet = wallet + @amount WHERE user_id = @req_id;
-                    `);
-
-                // 2.3 สร้างการแจ้งเตือนส่งไปให้ "ผู้ส่งคำขอ" (ถ้ามีตาราง Notifications)
                 try {
-                    await pool.request()
-                        .input('req_id', sql.Int, job.requester_id)
-                        .input('msg', sql.NVarChar(sql.MAX), 'ผู้รับงานมีเจตนาทุจริต ผู้รับงานโดนบล็อกแล้ว ให้ส่งคำขอใหม่ (เราได้คืนเงินกลับให้คุณแล้วกรุณาตรวจสอบ)')
-                        .query(`
-                            INSERT INTO Notifications (user_id, message, type, is_read, created_at)
-                            VALUES (@req_id, @msg, 'SYSTEM', 0, GETDATE())
-                        `);
-                } catch (notiErr) {
-                    console.log("ไม่มีตาราง Notifications ข้ามการส่งแจ้งเตือนไป");
-                }
+                    // 2.1 บล็อกผู้รับงาน
+                    await transaction.request()
+                        .input('pid', sql.Int, provider_id)
+                        .query(`UPDATE Users SET status = 'Blocked' WHERE user_id = @pid`);
 
-                return res.status(403).json({ 
-                    success: false, 
-                    message: '🚨 บัญชีของคุณถูกระงับการใช้งาน! เนื่องจากตรวจพบเจตนาทุจริต กรุณาติดต่อ Admin' 
-                });
+                    // 2.2 ยกเลิกงาน
+                    await transaction.request()
+                        .input('rid', sql.Int, request_id)
+                        .query(`UPDATE P2P_Requests SET status = 'CANCELLED' WHERE request_id = @rid`);
+
+                    // 2.3 คืนเงินเข้ากระเป๋าผู้ส่งคำขอถอน
+                    const refundAmount = parseFloat(job.amount);
+                    await transaction.request()
+                        .input('uid', sql.Int, job.requester_id)
+                        .input('amt', sql.Decimal(18, 4), refundAmount)
+                        .query(`UPDATE Wallets SET balance = balance + @amt WHERE user_id = @uid`);
+
+                    // 2.4 บันทึกประวัติ Transaction (แบบเดียวกับที่เจ้านายทำไว้)
+                    await transaction.request()
+                        .input('uid', sql.Int, job.requester_id)
+                        .input('amt', sql.Decimal(18, 4), refundAmount)
+                        .input('curr', sql.VarChar, job.currency)
+                        .input('rid', sql.Int, request_id)
+                        .query(`
+                            INSERT INTO Transactions (user_id, amount, transaction_type, title, status, created_at) 
+                            VALUES (@uid, @amt, 'P2P_Withdraw_Refund', N'คืนเงินระบบ P2P เนื่องจากผู้รับงานทุจริต (Job ID: ' + CAST(@rid AS NVARCHAR) + ')', 'Completed', GETDATE())
+                        `);
+
+                    // 2.5 ส่งแจ้งเตือนหาลูกค้า
+                    try {
+                        await transaction.request()
+                            .input('req_id', sql.Int, job.requester_id)
+                            .input('msg', sql.NVarChar(sql.MAX), 'ผู้รับงานมีเจตนาทุจริต ผู้รับงานโดนบล็อกแล้ว ให้ส่งคำขอใหม่ (เราได้คืนเงินกลับให้คุณแล้วกรุณาตรวจสอบ)')
+                            .query(`
+                                INSERT INTO Notifications (user_id, message, type, is_read, created_at)
+                                VALUES (@req_id, @msg, 'SYSTEM', 0, GETDATE())
+                            `);
+                    } catch (notiErr) {
+                        // ข้ามถ้าไม่มีตารางแจ้งเตือน
+                    }
+
+                    await transaction.commit(); // จบ Transaction ปลอดภัย 100%
+
+                    return res.status(403).json({ 
+                        success: false, 
+                        message: '🚨 บัญชีของคุณถูกระงับการใช้งาน! เนื่องจากตรวจพบเจตนาทุจริต กรุณาติดต่อ Admin' 
+                    });
+
+                } catch (transactionErr) {
+                    await transaction.rollback(); // ถ้าพังตรงไหน ย้อนกลับทุกอย่าง
+                    throw transactionErr;
+                }
 
             } else {
                 // ⚠️ กรอกผิดแต่ยังไม่ครบ 3 ครั้ง: อัปเดตตัวนับและแจ้งเตือน
@@ -7747,7 +7769,7 @@ app.post('/api/p2p/upload-slip', async (req, res) => {
 
                 return res.status(400).json({ 
                     success: false, 
-                    message: `❌ ยอดเงินไม่ถูกต้อง! คุณต้องระบุยอดโอนให้ตรงกับที่ระบบกำหนด คือ ${expectedAmount.toLocaleString()} ${job.currency}\n(เตือนครั้งที่ ${currentErrorCount}/3 หากผิดครบ 3 ครั้งบัญชีจะถูกระงับ!)` 
+                    message: `❌ ยอดเงินไม่ถูกต้อง! คุณต้องระบุยอดโอนให้ตรงกับที่ระบบกำหนด คือ ${expectedAmount.toLocaleString()} ${job.currency}\n(เตือนครั้งที่ ${currentErrorCount}/3 หากผิดครบ 3 ครั้งบัญชีจะถูกระงับและยกเลิกงาน!)` 
                 });
             }
         }
@@ -7756,7 +7778,7 @@ app.post('/api/p2p/upload-slip', async (req, res) => {
         await pool.request()
             .input('rid', sql.Int, request_id)
             .input('slip', sql.NVarChar(sql.MAX), slip_image) 
-            .input('t_amount', sql.Decimal(18,2), inputAmount)
+            .input('t_amount', sql.Decimal(18,4), inputAmount)
             .input('t_date', sql.Date, transfer_date)
             .input('t_time', sql.Time, transfer_time)
             .query(`
@@ -7765,7 +7787,7 @@ app.post('/api/p2p/upload-slip', async (req, res) => {
                     transfer_amount = @t_amount,
                     transfer_date = @t_date,
                     transfer_time = @t_time,
-                    slip_error_count = 0, -- รีเซ็ตค่าหากตอบถูก
+                    slip_error_count = 0, -- รีเซ็ตค่าเพื่อความสะอาด
                     status = 'VERIFYING' 
                 WHERE request_id = @rid
             `);
@@ -7777,7 +7799,6 @@ app.post('/api/p2p/upload-slip', async (req, res) => {
         res.status(500).json({ success: false, message: 'Server Error: ' + err.message });
     }
 });
-
 // ==========================================
 // 🌟 API P2P ฝั่งถอนเงิน สินสุด
 // ==========================================
