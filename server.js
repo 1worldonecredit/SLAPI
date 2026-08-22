@@ -7803,6 +7803,61 @@ app.post('/api/p2p/upload-slip', async (req, res) => {
 // 🌟 API P2P ฝั่งถอนเงิน สินสุด
 // ==========================================
 
+// ==========================================
+// 🔔 [NOTIFICATION APIs]
+// ==========================================
+
+// 1. ดึงรายการแจ้งเตือนทั้งหมดของ User (เฉพาะที่ยังไม่ลบ)
+app.get('/api/notifications/:userId', async (req, res) => {
+    try {
+        const uid = parseInt(req.params.userId, 10);
+        const pool = await sql.connect(dbConfig);
+        const result = await pool.request()
+            .input('uid', sql.Int, uid)
+            .query(`
+                SELECT notification_id, title, message, type, is_read, created_at
+                FROM Notifications
+                WHERE user_id = @uid AND is_deleted = 0
+                ORDER BY created_at DESC
+            `);
+
+        const unreadCount = result.recordset.filter(n => !n.is_read).length;
+        res.json({ success: true, notifications: result.recordset, unreadCount });
+    } catch (err) {
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
+
+// 2. ปรับสถานะเป็นอ่านแล้ว (Mark as Read)
+app.post('/api/notifications/read', async (req, res) => {
+    try {
+        const { notification_id, user_id } = req.body;
+        const pool = await sql.connect(dbConfig);
+        await pool.request()
+            .input('nid', sql.Int, notification_id)
+            .input('uid', sql.Int, user_id)
+            .query(`UPDATE Notifications SET is_read = 1 WHERE notification_id = @nid AND user_id = @uid`);
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
+
+// 3. ปรับสถานะเป็นลบ (Soft Delete - ไม่ลบจริง)
+app.post('/api/notifications/delete', async (req, res) => {
+    try {
+        const { notification_id, user_id } = req.body;
+        const pool = await sql.connect(dbConfig);
+        await pool.request()
+            .input('nid', sql.Int, notification_id)
+            .input('uid', sql.Int, user_id)
+            .query(`UPDATE Notifications SET is_deleted = 1 WHERE notification_id = @nid AND user_id = @uid`);
+        res.json({ success: true, message: 'ลบการแจ้งเตือนเรียบร้อยแล้ว' });
+    } catch (err) {
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
+
 app.listen(port, () => {
     console.log(`🚀 Server เปิดทำงานแล้วที่พอร์ต ${port}`);
 });
