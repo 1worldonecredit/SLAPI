@@ -7671,11 +7671,12 @@ app.get('/api/p2p/my-requests/:userId', async (req, res) => {
     }
 });
 // ==========================================
-// 📤 [PROVIDER] อัปโหลดสลิปโอนเงิน (สำหรับงานฝั่ง WITHDRAW)
+// 📤 [PROVIDER] อัปโหลดสลิปโอนเงิน (แบบเก็บข้อมูลป้องกันสลิปปลอม 100%)
 // ==========================================
 app.post('/api/p2p/upload-slip', async (req, res) => {
     try {
-        const { provider_id, request_id, slip_image } = req.body;
+        // 🌟 รับค่ามาให้ครบทุกตัว จาก Pop-up หน้าเว็บ
+        const { provider_id, request_id, slip_image, transfer_amount, transfer_date, transfer_time } = req.body;
         
         if (!provider_id || !request_id || !slip_image) {
             return res.status(400).json({ success: false, message: 'ข้อมูลไม่ครบถ้วน หรือไม่มีรูปภาพ' });
@@ -7693,18 +7694,24 @@ app.post('/api/p2p/upload-slip', async (req, res) => {
             return res.json({ success: false, message: 'ไม่พบงานนี้ หรือสถานะงานไม่ถูกต้อง' });
         }
 
-        // 2. อัปเดตสลิปและเปลี่ยนสถานะเป็น 'VERIFYING' (รอให้ลูกค้าตรวจสลิป)
+        // 2. อัปเดตสลิป + ยอดเงิน + วันเวลา และเปลี่ยนสถานะเป็น 'VERIFYING'
         await pool.request()
             .input('rid', sql.Int, request_id)
-            .input('slip', sql.NVarChar(sql.MAX), slip_image) // รองรับ string ยาวมากๆ
+            .input('slip', sql.NVarChar(sql.MAX), slip_image) 
+            .input('t_amount', sql.Decimal(18,2), transfer_amount || null)
+            .input('t_date', sql.Date, transfer_date || null)
+            .input('t_time', sql.Time, transfer_time || null)
             .query(`
                 UPDATE P2P_Requests 
                 SET slip_url = @slip, 
+                    transfer_amount = @t_amount,
+                    transfer_date = @t_date,
+                    transfer_time = @t_time,
                     status = 'VERIFYING' 
                 WHERE request_id = @rid
             `);
 
-        res.json({ success: true, message: '✅ อัปโหลดสลิปสำเร็จ! ระบบส่งให้ลูกค้าตรวจสอบแล้ว' });
+        res.json({ success: true, message: '✅ อัปโหลดสลิปสำเร็จ! ระบบบันทึกข้อมูลหลักฐานเรียบร้อยแล้ว' });
 
     } catch (err) {
         console.error("Upload Slip Error:", err);
