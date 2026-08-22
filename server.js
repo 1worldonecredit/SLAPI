@@ -7623,19 +7623,19 @@ app.get('/api/p2p/my-jobs/:userId', async (req, res) => {
                    ub.account_name AS req_account_name
             FROM P2P_Requests r
             
-            -- 1. หาว่า "ใครคือผู้ส่งคำขอ"
+            -- 1. ดึงชื่อ Username ของคนส่งคำขอ
             LEFT JOIN Users u ON r.requester_id = u.user_id
             
-            -- 2. หา "บัญชีธนาคารของเขา" จาก requester_id ตรงๆ (แก้ปัญหาดึงข้อมูลไม่มา)
+            -- 2. ทะลวงหาบัญชีธนาคาร (รองรับทั้งงานเก่าที่ไม่มี ID และงานใหม่)
             OUTER APPLY (
                 SELECT TOP 1 b.account_number, b.account_name, b.bank_id
                 FROM UserBanks b
-                WHERE b.user_id = r.requester_id 
-                  AND b.currency_code = r.currency 
-                  AND b.status = 'Approved'
+                WHERE (r.user_bank_id IS NOT NULL AND b.user_bank_id = r.user_bank_id)
+                   OR (r.user_bank_id IS NULL AND b.user_id = r.requester_id AND b.currency_code = r.currency)
+                ORDER BY CASE WHEN b.status = 'Approved' THEN 1 ELSE 2 END ASC
             ) ub
             
-            -- 3. หา "ชื่อธนาคาร โลโก้ และประเทศ"
+            -- 3. ดึงโลโก้และชื่อธนาคาร
             LEFT JOIN Banks bk ON ub.bank_id = bk.bank_id
             
             WHERE r.provider_id = @pid 
@@ -7645,6 +7645,7 @@ app.get('/api/p2p/my-jobs/:userId', async (req, res) => {
         
         res.json({ success: true, jobs: jobsDb.recordset });
     } catch (err) {
+        console.error("My Jobs API Error:", err);
         res.status(500).json({ success: false, message: err.message });
     }
 });
