@@ -6419,25 +6419,22 @@ app.post('/api/p2p/accept-job', async (req, res) => {
                 throw new Error('ไม่สามารถรับงานของตัวเองได้ครับ');
             }
 
-            // 2. ดึงข้อมูล "ผู้รับงาน"
-            const provCheck = await transaction.request()
+            // 🌟 2. ดึงข้อมูล "บัญชีธนาคารของผู้รับงาน" (เช็คให้ตรงกับสกุลเงินของงาน)
+            const provBankCheck = await transaction.request()
                 .input('pid', sql.Int, provider_id)
+                .input('reqCurrency', sql.VarChar, job.req_currency) // สกุลเงินของงาน
                 .query(`
-                    SELECT u.country, u.currency_code, bk.bank_name, ub.account_number 
-                    FROM users u
-                    LEFT JOIN UserBanks ub ON u.user_id = ub.user_id
-                    LEFT JOIN Banks bk ON ub.bank_id = bk.bank_id
-                    WHERE u.user_id = @pid
+                    SELECT TOP 1 ub.account_number, bk.bank_name 
+                    FROM UserBanks ub
+                    INNER JOIN Banks bk ON ub.bank_id = bk.bank_id
+                    WHERE ub.user_id = @pid 
+                    AND ub.currency = @reqCurrency 
+                    AND ub.status = 'APPROVED'
                 `);
             
-            const provider = provCheck.recordset[0];
-
-            if (!provider.bank_name || !provider.account_number) {
-                throw new Error('คุณต้องผูกบัญชีธนาคารก่อน จึงจะสามารถรับงาน P2P ได้ครับ');
-            }
-
-            if (provider.country !== job.req_country || provider.currency_code !== job.req_currency) {
-                throw new Error(`ไม่สามารถรับงานได้! งานนี้สำหรับบัญชีประเทศ ${job.req_country} (${job.req_currency}) เท่านั้น`);
+            // ถ้าหาบัญชีไม่เจอ (ไม่มีบัญชี หรือมีแต่ยังไม่อนุมัติ หรือสกุลเงินไม่ตรง)
+            if (provBankCheck.recordset.length === 0) {
+                throw new Error(`ไม่สามารถรับงานได้! งานนี้สำหรับบัญชีสกุลเงิน ${job.req_currency} เท่านั้น (คุณต้องผูกและรออนุมัติบัญชีก่อน)`);
             }
 
             // 3. แยก Logics ตามประเภทงาน (DEPOSIT / WITHDRAW)
@@ -6487,7 +6484,8 @@ app.post('/api/p2p/accept-job', async (req, res) => {
         }
     } catch (err) {
         console.error("Accept Job Error:", err);
-        res.status(500).json({ success: false, message: err.message });
+        // 🌟 แก้ 500 เป็น 400 เพื่อให้หน้าเว็บจับ Error ไปโชว์เป็น Alert ได้!
+        res.status(400).json({ success: false, message: err.message });
     }
 });
 
