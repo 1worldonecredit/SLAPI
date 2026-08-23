@@ -6389,7 +6389,7 @@ app.post('/api/admin/p2p-time-update', async (req, res) => {
 
 
 // ==========================================
-// 🚀 [PROVIDER] ผู้รับงานกด "รับงาน" (ACCEPT JOB) - อัปเกรดกันเงินติดลบ
+// 🚀 [PROVIDER] ผู้รับงานกด "รับงาน" (ACCEPT JOB) - อัปเกรดกันเงินติดลบ & แก้บั๊กประเทศ
 // ==========================================
 app.post('/api/p2p/accept-job', async (req, res) => {
     try {
@@ -6427,18 +6427,18 @@ app.post('/api/p2p/accept-job', async (req, res) => {
                     FROM UserBanks ub
                     INNER JOIN Banks bk ON ub.bank_id = bk.bank_id
                     WHERE ub.user_id = @pid 
-                    AND ub.currency = @reqCurrency 
-                    AND ub.status = 'APPROVED'
+                    AND ub.currency_code = @reqCurrency  -- ✅ แก้เป็น currency_code ตามโครงสร้าง DB แล้ว
+                    AND (ub.status = 'Approved' OR ub.status = 'APPROVED')
                 `);
             
-            // ถ้าหาบัญชีไม่เจอ (ไม่มีบัญชี หรือมีแต่ยังไม่อนุมัติ หรือสกุลเงินไม่ตรง)
+            // ถ้าหาบัญชีไม่เจอ
             if (provBankCheck.recordset.length === 0) {
                 throw new Error(`ไม่สามารถรับงานได้! งานนี้สำหรับบัญชีสกุลเงิน ${job.req_currency} เท่านั้น (คุณต้องผูกและรออนุมัติบัญชีก่อน)`);
             }
 
             // 3. แยก Logics ตามประเภทงาน (DEPOSIT / WITHDRAW)
             if (job.request_type === 'DEPOSIT') {
-                // 🚨 ดักชั้นที่ 1 สำหรับฝั่งรับฝาก: เช็คเงินคนรับงานว่ามีพอให้หักค้ำประกันไหม
+                // เช็คเงินค้ำประกัน
                 const provWalletCheck = await transaction.request()
                     .input('pid', sql.Int, provider_id)
                     .query('SELECT balance FROM Wallets WHERE user_id = @pid');
@@ -6450,19 +6450,28 @@ app.post('/api/p2p/accept-job', async (req, res) => {
                     throw new Error(`ยอดเงินค้ำประกันไม่พอ (คุณมี ${provBalance.toLocaleString()} ${job.currency} แต่ต้องใช้อย่างน้อย ${requireAmount.toLocaleString()} ${job.currency})`);
                 }
 
-                // หักเงินค้ำประกันคนรับงาน (ปลอดภัยแน่นอน)
+                // หักเงินค้ำประกัน (ป้องกันเงินติดลบ)
+                const escrowUpdate = await transaction.request()
+                    .input('pid', sql.Int, provider_id)
+                    .input('amt', sql.Decimal(18, 4), requireAmount)
+                    .query(`UPDATE Wallets SET balance = balance - @amt WHERE user_id = @pid AND balance >= @amt`);
+
+                if (escrowUpdate.rowsAffected[0] === 0) {
+                    throw new Error('ยอดเงินค้ำประกันไม่เพียงพอ หรือมีการทำรายการซ้อนทับกันครับ');
+                }
+
+                // บันทึก Transaction
                 await transaction.request()
                     .input('pid', sql.Int, provider_id)
                     .input('amt', sql.Decimal(18, 4), requireAmount)
                     .input('reqId', sql.Int, request_id)
                     .query(`
-                        UPDATE Wallets SET balance = balance - @amt WHERE user_id = @pid;
                         INSERT INTO Transactions (user_id, amount, transaction_type, title, status, created_at) 
                         VALUES (@pid, -@amt, 'P2P_Escrow', N'หักเงินค้ำประกัน รอโอน P2P (Job ID: ' + CAST(@reqId AS NVARCHAR) + N')', 'Completed', GETDATE());
                     `);
             } 
 
-            // 4. เปลี่ยนสถานะงานเป็น ACCEPTED และอัปเดตเวลา
+            // 4. เปลี่ยนสถานะงานเป็น ACCEPTED 
             await transaction.request()
                 .input('rid', sql.Int, request_id)
                 .input('pid', sql.Int, provider_id)
@@ -6478,12 +6487,11 @@ app.post('/api/p2p/accept-job', async (req, res) => {
             res.json({ success: true, message: '✅ รับงานสำเร็จ! กรุณาตรวจสอบและดำเนินการตามเวลาที่กำหนด' });
 
         } catch (err) {
-            await transaction.rollback(); // ย้อนกลับทุกอย่างถ้าพัง ไม่กระทบเงิน
+            await transaction.rollback(); 
             throw err;
         }
     } catch (err) {
         console.error("Accept Job Error:", err);
-        // 🌟 แก้ 500 เป็น 400 เพื่อให้หน้าเว็บจับ Error ไปโชว์เป็น Alert ได้!
         res.status(400).json({ success: false, message: err.message });
     }
 });
@@ -7352,121 +7360,6 @@ app.post('/api/p2p/request-withdraw', async (req, res) => {
 });
 
 
-// ==========================================
-// 🚀 [PROVIDER] ผู้รับงานกด "รับงาน" (ACCEPT JOB) - อัปเกรดระบบตรวจสอบประเทศ/บัญชี
-// ==========================================
-app.post('/api/p2p/accept-job', async (req, res) => {
-    try {
-        const { provider_id, request_id } = req.body;
-        const pool = await sql.connect(dbConfig);
-        const transaction = new sql.Transaction(pool);
-        await transaction.begin();
-
-        try {
-            // 1. ดึงข้อมูลงาน และ ข้อมูลคนที่ขอฝาก/ถอน
-            const jobCheck = await transaction.request()
-                .input('rid', sql.Int, request_id)
-                .query(`
-                    SELECT r.*, u.country AS req_country, u.currency_code AS req_currency 
-                    FROM P2P_Requests r
-                    INNER JOIN users u ON r.requester_id = u.user_id
-                    WHERE r.request_id = @rid AND r.status = 'PENDING'
-                `);
-            
-            if (jobCheck.recordset.length === 0) {
-                throw new Error('งานนี้ถูกรับไปแล้ว หรือหมดเวลาแล้วครับ');
-            }
-            const job = jobCheck.recordset[0];
-
-            // 🚨 ป้องกันกดรับงานตัวเอง
-            if (job.requester_id === provider_id) {
-                throw new Error('ไม่สามารถรับงานของตัวเองได้ครับ');
-            }
-
-           // 2. ดึงข้อมูล "ผู้รับงาน" (เช็คประเทศ, สกุลเงิน และ บัญชีธนาคาร)
-            const provCheck = await transaction.request()
-                .input('pid', sql.Int, provider_id)
-                .query(`
-                    SELECT u.country, u.currency_code, bk.bank_name, ub.account_number 
-                    FROM users u
-                    LEFT JOIN UserBanks ub ON u.user_id = ub.user_id
-                    LEFT JOIN Banks bk ON ub.bank_id = bk.bank_id
-                    WHERE u.user_id = @pid
-                `);
-            
-            const provider = provCheck.recordset[0];
-
-            // 🛑 กฎข้อที่ 1: ผู้รับงานต้องผูกบัญชีธนาคารแล้ว
-            if (!provider.bank_name || !provider.account_number) {
-                throw new Error('คุณต้องผูกบัญชีธนาคารก่อน จึงจะสามารถรับงาน P2P ได้ครับ');
-            }
-
-            // 🛑 กฎข้อที่ 2: ประเทศและสกุลเงินต้องตรงกับผู้ส่งคำขอ
-            if (provider.country !== job.req_country || provider.currency_code !== job.req_currency) {
-                throw new Error(`ไม่สามารถรับงานได้! งานนี้สำหรับบัญชีประเทศ ${job.req_country} (${job.req_currency}) เท่านั้น`);
-            }
-
-            // 3. แยก Logics ตามประเภทงาน (DEPOSIT / WITHDRAW)
-            if (job.request_type === 'DEPOSIT') {
-                // ฝั่งรับฝากเงิน -> ต้องหักเงินค้ำประกัน (Escrow) จากคนรับงาน
-                const provWalletCheck = await transaction.request()
-                    .input('pid', sql.Int, provider_id)
-                    .query('SELECT balance FROM Wallets WHERE user_id = @pid');
-                
-                const provBalance = parseFloat(provWalletCheck.recordset[0].balance || 0);
-                if (provBalance < parseFloat(job.amount)) {
-                    throw new Error(`ยอดเงินค้ำประกันไม่พอ (คุณต้องมีอย่างน้อย ${job.amount} ${job.currency})`);
-                }
-
-                // 🛡️ หักเงินค้ำประกันคนรับงาน (ป้องกันการกดย้ำๆ จนเงินติดลบ)
-                const escrowUpdate = await transaction.request()
-                    .input('pid', sql.Int, provider_id)
-                    .input('amt', sql.Decimal(18, 4), job.amount)
-                    .query(`UPDATE Wallets SET balance = balance - @amt WHERE user_id = @pid AND balance >= @amt`);
-
-                if (escrowUpdate.rowsAffected[0] === 0) {
-                    throw new Error('ยอดเงินค้ำประกันไม่เพียงพอ หรือมีการทำรายการซ้อนทับกันครับ');
-                }
-
-                // เมื่อหักเงินสำเร็จ ค่อยบันทึก Transaction
-                await transaction.request()
-                    .input('pid', sql.Int, provider_id)
-                    .input('amt', sql.Decimal(18, 4), job.amount)
-                    .input('reqId', sql.Int, request_id)
-                    .query(`
-                        INSERT INTO Transactions (user_id, amount, transaction_type, title, status, created_at) 
-                        VALUES (@pid, -@amt, 'P2P_Escrow', N'หักเงินค้ำประกัน รอโอน P2P (Job ID: ' + CAST(@reqId AS NVARCHAR) + N')', 'Completed', GETDATE());
-                    `);
-            } 
-            else if (job.request_type === 'WITHDRAW') {
-                // ฝั่งรับถอนเงิน -> คนรับงานไม่ต้องวางเงินค้ำประกัน (เพราะลูกค้ายอมโดนหักเงินไปรอในระบบแล้ว)
-                // คนรับงานแค่มีหน้าที่ โอนเงินเข้าธนาคารลูกค้า แล้วอัปสลิป
-            }
-
-            // 4. เปลี่ยนสถานะงานเป็น ACCEPTED และอัปเดตเวลา
-            await transaction.request()
-                .input('rid', sql.Int, request_id)
-                .input('pid', sql.Int, provider_id)
-                .query(`
-                    UPDATE P2P_Requests 
-                    SET status = 'ACCEPTED', 
-                        provider_id = @pid, 
-                        accepted_at = DATEADD(hour, 7, GETUTCDATE()) 
-                    WHERE request_id = @rid
-                `);
-
-            await transaction.commit();
-            res.json({ success: true, message: '✅ รับงานสำเร็จ! กรุณาตรวจสอบและดำเนินการตามเวลาที่กำหนด' });
-
-        } catch (err) {
-            await transaction.rollback();
-            throw err;
-        }
-    } catch (err) {
-        console.error("Accept Job Error:", err);
-        res.status(500).json({ success: false, message: err.message });
-    }
-});
 
 // ==========================================
 // 🏦 [GET] ดึงข้อมูลเตรียมถอนเงิน (Wallet + Banks + Logo)
