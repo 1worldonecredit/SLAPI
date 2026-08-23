@@ -6,6 +6,11 @@ const cron = require('node-cron');
 
 
 const app = express();
+
+// ขยายขีดจำกัดให้รองรับรูปภาพสลิปที่แปลงเป็น Base64 (ตั้งไว้ที่ 50MB)
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ limit: '50mb', extended: true }));
+
 const port = process.env.PORT || 5000;
 // ==========================================
 // 🛡️ Middleware: สกัดกั้น IP ที่ถูกบล็อกไม่ให้ใช้ API ได้
@@ -55,9 +60,7 @@ app.use(cors({
   },
   credentials: true // อนุญาตให้ส่ง Cookie หรือ Header ยืนยันตัวตนได้ภ
 }));
-// ขยายขีดจำกัดให้รองรับรูปภาพสลิปที่แปลงเป็น Base64 (ตั้งไว้ที่ 50MB)
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ limit: '50mb', extended: true }));
+
 
 // ตั้งค่าการเชื่อมต่อฐานข้อมูล
 const dbConfig = {
