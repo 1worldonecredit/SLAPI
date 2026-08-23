@@ -511,11 +511,10 @@ app.get('/api/user-profile-banks/:uid', async (req, res) => {
         const result = await pool.request()
             .input('uid', sql.Int, uid)
             .query(`
-                SELECT ub.*, b.bank_name, b.bank_code 
-                FROM UserBanks ub
-                LEFT JOIN Banks b ON ub.bank_id = b.bank_id
-                WHERE ub.user_id = @uid AND ub.status != 'Deleted' /* 🌟 เพิ่ม AND status != 'Deleted' ตรงนี้ครับ */
-                ORDER BY ub.created_at DESC
+                SELECT ub.*, b.bank_name, b.logo_url, b.country 
+                FROM UserBanks ub 
+                LEFT JOIN Banks b ON ub.bank_id = b.bank_id 
+                WHERE ub.user_id = @uid
             `);
             
         res.json({ success: true, userBanks: result.recordset });
