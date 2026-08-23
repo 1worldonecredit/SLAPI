@@ -6571,9 +6571,8 @@ app.post('/api/p2p/cancel-job', async (req, res) => {
     }
 });
 
-
 // ==========================================
-// 🌟 3. ผู้รับงานตรวจสลิปและยืนยัน (VERIFY SLIP) - แก้บัคสกุลเงิน & ทศนิยม (ฉบับจัดเต็ม)
+// 🌟 3. ผู้รับงานตรวจสลิปและยืนยัน (VERIFY SLIP) - ฉบับสมบูรณ์ (แปลงสกุลเงินได้จริง!)
 // ==========================================
 app.post('/api/p2p/verify-slip', async (req, res) => {
     try {
@@ -6586,21 +6585,21 @@ app.post('/api/p2p/verify-slip', async (req, res) => {
             .query(`SELECT * FROM P2P_Requests WHERE request_id = @rid AND provider_id = @provider_id`);
         
         if (reqData.recordset.length === 0) {
-            return res.json({ success: false, message: '❌ ไม่พบข้อมูลงาน หรือคุณไม่ใช่ผู้รับงานนี้' });
+            return res.status(400).json({ success: false, message: '❌ ไม่พบข้อมูลงาน หรือคุณไม่ใช่ผู้รับงานนี้' });
         }
 
         const job = reqData.recordset[0];
-        const jobCurrency = job.currency; // 🌟 สกุลเงินของงาน (เช่น THB)
+        const jobCurrency = job.currency;
 
         if (job.status !== 'VERIFYING' && job.status !== 'ACCEPTED') {
-            return res.json({ success: false, message: '⚠️ งานนี้ถูกดำเนินการเสร็จสิ้น หรือถูกยกเลิกไปแล้วครับ' });
+            return res.status(400).json({ success: false, message: '⚠️ งานนี้ถูกดำเนินการเสร็จสิ้น หรือถูกยกเลิกไปแล้วครับ' });
         }
 
         const transaction = new sql.Transaction(pool);
         await transaction.begin();
 
         try {
-            // 🌟 1. ค้นหายอดค้ำประกัน "ของจริง" ที่ถูกหักไป (เช่น 1,550,000 LAK)
+            // 🌟 1. ค้นหายอดค้ำประกัน "ของจริง" ที่โดนหักไป
             const escrowCheck = await transaction.request()
                 .input('pid', sql.Int, provider_id)
                 .input('reqId', sql.Int, request_id)
@@ -6616,7 +6615,7 @@ app.post('/api/p2p/verify-slip', async (req, res) => {
             const actualEscrow = escrowCheck.recordset.length > 0 ? parseFloat(escrowCheck.recordset[0].deducted_amount) : parseFloat(job.amount);
 
             if (is_correct) {
-                // ✅ 1. เติมเงินให้คนฝาก (ยอดสุทธิ + โบนัส ตามสกุลเงินที่ขอฝาก)
+                // ✅ 1. เติมเงินให้คนฝาก 
                 await transaction.request()
                     .input('uid', sql.Int, job.requester_id)
                     .input('net', sql.Decimal(18, 4), job.net_amount)
@@ -6627,23 +6626,23 @@ app.post('/api/p2p/verify-slip', async (req, res) => {
                         VALUES (@uid, @net, 'Deposit', N'รับเงินฝากผ่านระบบ P2P (งาน ID: ' + CAST(@reqId AS NVARCHAR) + N')', 'Completed', GETDATE());
                     `);
 
-                // ✅ 2. คืนเงินค้ำประกัน + ค่าคอม ให้คนรับงาน (ต้องแปลงค่าคอม THB เป็น LAK ก่อน!)
-                let finalProviderReward = parseFloat(job.provider_reward); // ค่าคอมตั้งต้น (เช่น 375 THB)
+                // ✅ 2. คืนเงินค้ำประกัน + ค่าคอม ให้คนรับงาน (แปลงค่าคอมก่อน)
+                let finalProviderReward = parseFloat(job.provider_reward);
                 
                 // ดึงสกุลเงินของคนรับงาน
                 const provInfo = await transaction.request().input('pid', sql.Int, provider_id).query(`SELECT currency_code FROM users WHERE user_id = @pid`);
-                const provCurrency = provInfo.recordset[0].currency_code; // เช่น LAK
+                const provCurrency = provInfo.recordset[0].currency_code; 
 
-                // 🔄 แปลงสกุลเงินค่าคอมมิชชั่น
+                // 🔄 แปลงสกุลเงินค่าคอม (แก้ชื่อคอลัมน์เป็น currency_pair แล้ว!)
                 if (provCurrency !== jobCurrency) {
                     const rateCheck = await transaction.request()
                         .input('pair1', sql.VarChar, `${jobCurrency}_${provCurrency}`)
                         .input('pair2', sql.VarChar, `${provCurrency}_${jobCurrency}`)
-                        .query(`SELECT pair, rate FROM ExchangeRates WHERE pair = @pair1 OR pair = @pair2`);
+                        .query(`SELECT currency_pair, rate FROM ExchangeRates WHERE currency_pair = @pair1 OR currency_pair = @pair2`);
                     
                     if (rateCheck.recordset.length > 0) {
                         const exRate = rateCheck.recordset[0];
-                        if (exRate.pair === `${jobCurrency}_${provCurrency}`) {
+                        if (exRate.currency_pair === `${jobCurrency}_${provCurrency}`) {
                             finalProviderReward = finalProviderReward * parseFloat(exRate.rate);
                         } else {
                             finalProviderReward = finalProviderReward / parseFloat(exRate.rate);
@@ -6651,7 +6650,6 @@ app.post('/api/p2p/verify-slip', async (req, res) => {
                     }
                 }
 
-                // เอา "เงินค้ำประกันที่ถูกหักจริง (LAK)" + "ค่าคอมที่แปลงแล้ว (LAK)"
                 const refund_and_reward = actualEscrow + finalProviderReward;
                 
                 await transaction.request()
@@ -6664,7 +6662,7 @@ app.post('/api/p2p/verify-slip', async (req, res) => {
                         VALUES (@pid, @total, 'P2P_Reward', N'คืนมัดจำและรับค่าคอมมิชชั่น P2P (งาน ID: ' + CAST(@reqId AS NVARCHAR) + N')', 'Completed', GETDATE());
                     `);
 
-                // ✅ 3. แจกคอมมิชชั่นให้ "ผู้แนะนำ" (ต้องแปลงเงินให้ผู้แนะนำด้วย)
+                // ✅ 3. แจกคอมมิชชั่นให้ "ผู้แนะนำ" (แปลงสกุลเงินด้วย)
                 const setDb = await transaction.request().query('SELECT TOP 1 referrer_reward_percent FROM P2P_Settings');
                 const refPercent = setDb.recordset.length > 0 ? parseFloat(setDb.recordset[0].referrer_reward_percent) : 0;
 
@@ -6683,7 +6681,6 @@ app.post('/api/p2p/verify-slip', async (req, res) => {
                         const providerName = refCheck.recordset[0].provider_name; 
                         const refCurrency = refCheck.recordset[0].ref_curr; 
                         
-                        // 🌟 คำนวณเปอร์เซ็นต์จาก "ยอดฝากต้นทาง" (เช่น 2,500 THB) จะได้ไม่เพี้ยน
                         let finalRefReward = (parseFloat(job.amount) * refPercent) / 100; 
 
                         // 🔄 แปลงสกุลเงินค่าแนะนำ
@@ -6691,11 +6688,11 @@ app.post('/api/p2p/verify-slip', async (req, res) => {
                             const refRateCheck = await transaction.request()
                                 .input('pair1', sql.VarChar, `${jobCurrency}_${refCurrency}`)
                                 .input('pair2', sql.VarChar, `${refCurrency}_${jobCurrency}`)
-                                .query(`SELECT pair, rate FROM ExchangeRates WHERE pair = @pair1 OR pair = @pair2`);
+                                .query(`SELECT currency_pair, rate FROM ExchangeRates WHERE currency_pair = @pair1 OR currency_pair = @pair2`);
                             
                             if (refRateCheck.recordset.length > 0) {
                                 const exRate2 = refRateCheck.recordset[0];
-                                if (exRate2.pair === `${jobCurrency}_${refCurrency}`) {
+                                if (exRate2.currency_pair === `${jobCurrency}_${refCurrency}`) {
                                     finalRefReward = finalRefReward * parseFloat(exRate2.rate);
                                 } else {
                                     finalRefReward = finalRefReward / parseFloat(exRate2.rate);
@@ -6724,7 +6721,6 @@ app.post('/api/p2p/verify-slip', async (req, res) => {
             } else {
                 // ❌ กรณีเงินไม่เข้า / สลิปปลอม
                 
-                // 1. คืนเงินค้ำประกัน (ของจริง) ให้คนรับงาน
                 await transaction.request()
                     .input('pid', sql.Int, provider_id)
                     .input('amt', sql.Decimal(18, 4), actualEscrow)
@@ -6735,12 +6731,11 @@ app.post('/api/p2p/verify-slip', async (req, res) => {
                         VALUES (@pid, @amt, 'P2P_Refund', N'คืนเงินมัดจำ P2P เนื่องจากลูกค้าไม่โอนเงิน (งาน ID: ' + CAST(@reqId AS NVARCHAR) + N')', 'Completed', GETDATE());
                     `);
                 
-                // 2. ยกเลิกงาน
                 await transaction.request()
                     .input('rid', sql.Int, request_id)
                     .query(`UPDATE P2P_Requests SET status = 'CANCELLED', completed_at = GETDATE() WHERE request_id = @rid`);
 
-                // 3. ระบบแบนบัญชีลูกค้า
+                // 🌟 ระบบแบนบัญชีลูกค้า (แก้เป็น is_active = 0 แล้ว!)
                 const banCheck = await transaction.request()
                     .input('uid', sql.Int, job.requester_id)
                     .query(`
@@ -6755,7 +6750,7 @@ app.post('/api/p2p/verify-slip', async (req, res) => {
                 if (banCheck.recordset[0].p2p_cancel_count >= maxStrikes) {
                     await transaction.request()
                         .input('uid', sql.Int, job.requester_id)
-                        .query(`UPDATE users SET is_locked = 1 WHERE user_id = @uid`);
+                        .query(`UPDATE users SET is_active = 0 WHERE user_id = @uid`); 
                 }
             }
 
@@ -6768,7 +6763,7 @@ app.post('/api/p2p/verify-slip', async (req, res) => {
         }
     } catch (err) {
         console.error("Verify Slip Error:", err);
-        res.status(500).json({ success: false, message: 'Server Error: ' + err.message });
+        res.status(400).json({ success: false, message: 'Server Error: ' + err.message });
     }
 });
 // ==========================================
