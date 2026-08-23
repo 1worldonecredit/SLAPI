@@ -6391,6 +6391,9 @@ app.post('/api/admin/p2p-time-update', async (req, res) => {
 // ==========================================
 // 🚀 [PROVIDER] ผู้รับงานกด "รับงาน" (ACCEPT JOB) - อัปเกรดกันเงินติดลบ & แก้บั๊กประเทศ
 // ==========================================
+// ==========================================
+// 🚀 [PROVIDER] ผู้รับงานกด "รับงาน" (ACCEPT JOB) - อัปเกรดกันเงินติดลบ & แก้บั๊กประเทศ & แปลงสกุลเงินก่อนหัก
+// ==========================================
 app.post('/api/p2p/accept-job', async (req, res) => {
     try {
         const { provider_id, request_id } = req.body;
@@ -6418,56 +6421,81 @@ app.post('/api/p2p/accept-job', async (req, res) => {
                 throw new Error('ไม่สามารถรับงานของตัวเองได้ครับ');
             }
 
-            // 🌟 2. ดึงข้อมูล "บัญชีธนาคารของผู้รับงาน" (เช็คให้ตรงกับสกุลเงินของงาน)
+            // 2. ดึงข้อมูล "บัญชีธนาคารของผู้รับงาน" (เช็คให้ตรงกับสกุลเงินของงาน) และสกุลเงินของ Wallet
             const provBankCheck = await transaction.request()
                 .input('pid', sql.Int, provider_id)
                 .input('reqCurrency', sql.VarChar, job.req_currency) // สกุลเงินของงาน
                 .query(`
-                    SELECT TOP 1 ub.account_number, bk.bank_name 
+                    SELECT TOP 1 ub.account_number, bk.bank_name, u.currency_code AS provider_wallet_currency
                     FROM UserBanks ub
                     INNER JOIN Banks bk ON ub.bank_id = bk.bank_id
+                    INNER JOIN users u ON ub.user_id = u.user_id
                     WHERE ub.user_id = @pid 
-                    AND ub.currency_code = @reqCurrency  -- ✅ แก้เป็น currency_code ตามโครงสร้าง DB แล้ว
+                    AND ub.currency_code = @reqCurrency  
                     AND (ub.status = 'Approved' OR ub.status = 'APPROVED')
                 `);
             
-            // ถ้าหาบัญชีไม่เจอ
+            // ถ้าหาบัญชีธนาคารไม่เจอ
             if (provBankCheck.recordset.length === 0) {
                 throw new Error(`ไม่สามารถรับงานได้! งานนี้สำหรับบัญชีสกุลเงิน ${job.req_currency} เท่านั้น (คุณต้องผูกและรออนุมัติบัญชีก่อน)`);
             }
 
+            const providerWalletCurrency = provBankCheck.recordset[0].provider_wallet_currency;
+
             // 3. แยก Logics ตามประเภทงาน (DEPOSIT / WITHDRAW)
             if (job.request_type === 'DEPOSIT') {
-                // เช็คเงินค้ำประกัน
+                // 🌟 คำนวณยอดเงินที่ต้องหัก (โดยแปลงให้เป็นสกุลเงินของ Wallet ผู้รับงานก่อน)
+                let requireAmountInProviderCurrency = parseFloat(job.amount);
+
+                if (providerWalletCurrency !== job.currency) {
+                     const rateCheck = await transaction.request()
+                        .input('pair1', sql.VarChar, `${job.currency}_${providerWalletCurrency}`)
+                        .input('pair2', sql.VarChar, `${providerWalletCurrency}_${job.currency}`)
+                        .query(`SELECT currency_pair, rate FROM ExchangeRates WHERE currency_pair = @pair1 OR currency_pair = @pair2`);
+                    
+                    if (rateCheck.recordset.length > 0) {
+                        const exRate = rateCheck.recordset[0];
+                        if (exRate.currency_pair === `${job.currency}_${providerWalletCurrency}`) {
+                            requireAmountInProviderCurrency = requireAmountInProviderCurrency * parseFloat(exRate.rate);
+                        } else {
+                            requireAmountInProviderCurrency = requireAmountInProviderCurrency / parseFloat(exRate.rate);
+                        }
+                    } else {
+                         throw new Error(`ระบบไม่พบอัตราแลกเปลี่ยนระหว่าง ${job.currency} และ ${providerWalletCurrency} กรุณาติดต่อ Admin`);
+                    }
+                }
+
+                // เช็คเงินค้ำประกัน (เทียบกับยอดที่แปลงแล้ว)
                 const provWalletCheck = await transaction.request()
                     .input('pid', sql.Int, provider_id)
                     .query('SELECT balance FROM Wallets WHERE user_id = @pid');
                 
                 const provBalance = parseFloat(provWalletCheck.recordset[0].balance || 0);
-                const requireAmount = parseFloat(job.amount);
 
-                if (provBalance < requireAmount) {
-                    throw new Error(`ยอดเงินค้ำประกันไม่พอ (คุณมี ${provBalance.toLocaleString()} ${job.currency} แต่ต้องใช้อย่างน้อย ${requireAmount.toLocaleString()} ${job.currency})`);
+                if (provBalance < requireAmountInProviderCurrency) {
+                    throw new Error(`ยอดเงินค้ำประกันไม่พอ (คุณต้องมีอย่างน้อย ${requireAmountInProviderCurrency.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})} ${providerWalletCurrency})`);
                 }
 
-                // หักเงินค้ำประกัน (ป้องกันเงินติดลบ)
+                // หักเงินค้ำประกัน (หักเป็นยอดที่แปลงแล้ว)
                 const escrowUpdate = await transaction.request()
                     .input('pid', sql.Int, provider_id)
-                    .input('amt', sql.Decimal(18, 4), requireAmount)
+                    .input('amt', sql.Decimal(18, 4), requireAmountInProviderCurrency)
                     .query(`UPDATE Wallets SET balance = balance - @amt WHERE user_id = @pid AND balance >= @amt`);
 
                 if (escrowUpdate.rowsAffected[0] === 0) {
                     throw new Error('ยอดเงินค้ำประกันไม่เพียงพอ หรือมีการทำรายการซ้อนทับกันครับ');
                 }
 
-                // บันทึก Transaction
+                // บันทึก Transaction (โชว์ยอดที่หักเป็นสกุลเงินของ Wallet)
                 await transaction.request()
                     .input('pid', sql.Int, provider_id)
-                    .input('amt', sql.Decimal(18, 4), requireAmount)
+                    .input('amt', sql.Decimal(18, 4), requireAmountInProviderCurrency)
                     .input('reqId', sql.Int, request_id)
+                    .input('jobAmt', sql.Decimal(18,4), job.amount)
+                    .input('jobCurr', sql.VarChar, job.currency)
                     .query(`
                         INSERT INTO Transactions (user_id, amount, transaction_type, title, status, created_at) 
-                        VALUES (@pid, -@amt, 'P2P_Escrow', N'หักเงินค้ำประกัน รอโอน P2P (Job ID: ' + CAST(@reqId AS NVARCHAR) + N')', 'Completed', GETDATE());
+                        VALUES (@pid, -@amt, 'P2P_Escrow', N'หักเงินค้ำประกัน รอโอน P2P (Job ID: ' + CAST(@reqId AS NVARCHAR) + N') [' + CAST(FORMAT(@jobAmt, 'N2') AS NVARCHAR) + ' ' + @jobCurr + ']', 'Completed', GETDATE());
                     `);
             } 
 
@@ -6495,7 +6523,6 @@ app.post('/api/p2p/accept-job', async (req, res) => {
         res.status(400).json({ success: false, message: err.message });
     }
 });
-
 // ==========================================
 // 🚫 [API] ยกเลิกงาน P2P (คืนเงินค้ำประกัน + บันทึกประวัติ)
 // ==========================================
