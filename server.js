@@ -4816,27 +4816,31 @@ app.post('/api/hrm/branch', async (req, res) => {
 });
 
 // ==========================================
-// 🏢 API: จัดการข้อมูล แผนก (เพิ่ม/อัปเดต)
+// 🏢 API: จัดการข้อมูล แผนก (เพิ่ม/อัปเดต) + Auto Gen รหัส
 // ==========================================
 app.post('/api/hrm/department', async (req, res) => {
-    const { dept_code, dept_name } = req.body;
+    let { dept_code, dept_name } = req.body;
     try {
         const pool = await sql.connect(dbConfig);
-        // 🌟 แก้ชื่อตารางเป็น Emp_Departments ตามในรูป
-        const check = await pool.request().input('code', sql.VarChar, dept_code).query('SELECT dept_code FROM Emp_Departments WHERE dept_code = @code');
         
-        if (check.recordset.length > 0) {
-            await pool.request()
-                .input('code', sql.VarChar, dept_code)
-                .input('name', sql.NVarChar, dept_name)
-                .query(`UPDATE Emp_Departments SET dept_name = @name WHERE dept_code = @code`);
-        } else {
+        // 🌟 ถ้าไม่มี dept_code ส่งมา (แปลว่าสร้างใหม่) ให้ Auto-Gen
+        if (!dept_code) {
+            const countRes = await pool.request().query('SELECT COUNT(*) as cnt FROM Emp_Departments');
+            const nextNum = (countRes.recordset[0].cnt + 1).toString().padStart(2, '0');
+            dept_code = `D${nextNum}`; // ผลลัพธ์ เช่น D01, D02
+            
             await pool.request()
                 .input('code', sql.VarChar, dept_code)
                 .input('name', sql.NVarChar, dept_name)
                 .query(`INSERT INTO Emp_Departments (dept_code, dept_name) VALUES (@code, @name)`);
+        } else {
+            // 🌟 ถ้ามีรหัสมา แปลว่าอัปเดต
+            await pool.request()
+                .input('code', sql.VarChar, dept_code)
+                .input('name', sql.NVarChar, dept_name)
+                .query(`UPDATE Emp_Departments SET dept_name = @name WHERE dept_code = @code`);
         }
-        res.json({ success: true });
+        res.json({ success: true, new_code: dept_code });
     } catch (err) {
         console.error("Department API Error:", err);
         res.status(500).json({ success: false, message: 'SQL Error: ' + err.message });
@@ -4844,20 +4848,50 @@ app.post('/api/hrm/department', async (req, res) => {
 });
 
 // ==========================================
-// 🏢 API: จัดการข้อมูล ตำแหน่ง (เพิ่ม/อัปเดต)
+// 🏢 API: จัดการข้อมูล ตำแหน่ง (เพิ่ม/อัปเดต) + Auto Gen รหัส
 // ==========================================
 app.post('/api/hrm/position', async (req, res) => {
-    const { position_code, position_name, dept_code, base_salary } = req.body;
+    let { position_code, position_name, dept_code, base_salary } = req.body;
     try {
         const pool = await sql.connect(dbConfig);
-        // 🌟 แก้ชื่อตารางเป็น Emp_Positions ตามในรูป
-        const check = await pool.request().input('code', sql.VarChar, position_code).query('SELECT position_code FROM Emp_Positions WHERE position_code = @code');
-        
-        const hourlyRate = 0; 
-        const otMultiplier = 1.5; 
         const baseSal = parseFloat(base_salary) || 0;
 
-        if (check.recordset.length > 0) {
+        // 🌟 ถ้าไม่มี position_code ส่งมา (แปลว่าสร้างใหม่) ให้ Auto-Gen ตามแผนก
+        if (!position_code) {
+            // หารหัสตำแหน่งล่าสุดของแผนกนี้
+            const lastPos = await pool.request()
+                .input('dept', sql.VarChar, dept_code)
+                .query(`
+                    SELECT TOP 1 position_code 
+                    FROM Emp_Positions 
+                    WHERE dept_code = @dept 
+                    ORDER BY position_code DESC
+                `);
+            
+            let nextNum = 1;
+            if (lastPos.recordset.length > 0) {
+                // สมมติรหัสเดิมคือ D01-P01 เราจะดึง 01 ออกมาบวกเพิ่ม
+                const lastCode = lastPos.recordset[0].position_code;
+                const parts = lastCode.split('-P');
+                if(parts.length === 2) {
+                    nextNum = parseInt(parts[1], 10) + 1;
+                }
+            }
+            
+            // สร้างรหัสใหม่ เช่น D01-P01, D01-P02
+            position_code = `${dept_code}-P${nextNum.toString().padStart(2, '0')}`;
+            
+            await pool.request()
+                .input('code', sql.VarChar, position_code)
+                .input('name', sql.NVarChar, position_name)
+                .input('dept', sql.VarChar, dept_code)
+                .input('base', sql.Decimal(18,2), baseSal)
+                .query(`
+                    INSERT INTO Emp_Positions (position_code, position_name, dept_code, base_salary, hourly_rate, ot_multiplier) 
+                    VALUES (@code, @name, @dept, @base, 0, 1.5)
+                `);
+        } else {
+            // 🌟 ถ้ามีรหัสมา แปลว่าอัปเดต
             await pool.request()
                 .input('code', sql.VarChar, position_code)
                 .input('name', sql.NVarChar, position_name)
@@ -4868,26 +4902,13 @@ app.post('/api/hrm/position', async (req, res) => {
                     SET position_name = @name, dept_code = @dept, base_salary = @base 
                     WHERE position_code = @code
                 `);
-        } else {
-            await pool.request()
-                .input('code', sql.VarChar, position_code)
-                .input('name', sql.NVarChar, position_name)
-                .input('dept', sql.VarChar, dept_code)
-                .input('base', sql.Decimal(18,2), baseSal)
-                .input('hourly', sql.Decimal(18,2), hourlyRate)
-                .input('ot', sql.Decimal(4,2), otMultiplier)
-                .query(`
-                    INSERT INTO Emp_Positions (position_code, position_name, dept_code, base_salary, hourly_rate, ot_multiplier) 
-                    VALUES (@code, @name, @dept, @base, @hourly, @ot)
-                `);
         }
-        res.json({ success: true });
+        res.json({ success: true, new_code: position_code });
     } catch (err) {
         console.error("Position API Error:", err);
         res.status(500).json({ success: false, message: 'SQL Error: ' + err.message });
     }
 });
-
 
 // ==========================================
 // 🏢 API: ระบบจัดการข้อมูลองค์กร (HRM Master Data)  สิ้นสุด
