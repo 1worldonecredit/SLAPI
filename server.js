@@ -6793,6 +6793,155 @@ app.post('/api/p2p/verify-slip', async (req, res) => {
         res.status(400).json({ success: false, message: 'Server Error: ' + err.message });
     }
 });
+
+// ==========================================
+// 🌟 4. [REQUESTER] ลูกค้ายืนยันการได้รับเงินโอน (ฝั่งถอนเงิน) - ฉบับมีจ่ายค่าคอมฯ ผู้แนะนำ!
+// ==========================================
+app.post('/api/p2p/confirm-withdraw-receipt', async (req, res) => {
+    try {
+        const { requester_id, request_id, verify_status } = req.body;
+        const pool = await sql.connect(dbConfig);
+
+        // 1. ตรวจสอบข้อมูลงาน
+        const reqData = await pool.request()
+            .input('rid', sql.Int, request_id)
+            .input('uid', sql.Int, requester_id)
+            .query(`SELECT * FROM P2P_Requests WHERE request_id = @rid AND requester_id = @uid`);
+        
+        if (reqData.recordset.length === 0) {
+            return res.status(400).json({ success: false, message: '❌ ไม่พบข้อมูลงาน หรือคุณไม่ใช่เจ้าของคำขอนี้' });
+        }
+
+        const job = reqData.recordset[0];
+        const provider_id = job.provider_id;
+        const jobCurrency = job.currency; 
+
+        if (job.status !== 'VERIFYING') {
+            return res.status(400).json({ success: false, message: '⚠️ งานนี้ไม่ได้อยู่ในสถานะรอตรวจสอบสลิป' });
+        }
+
+        const transaction = new sql.Transaction(pool);
+        await transaction.begin();
+
+        try {
+            // 🌟 กรณีที่ 1: ถูกต้อง (ได้เงินครบ)
+            if (verify_status === 'correct' || !verify_status) {
+                
+                // 💰 1. จ่ายค่าแรงให้ผู้รับงาน (ยอดถอน + ค่าคอม)
+                let totalForProvider = parseFloat(job.amount) + parseFloat(job.provider_reward);
+
+                // --- แปลงสกุลเงินผู้รับงาน ---
+                const provInfo = await transaction.request().input('pid', sql.Int, provider_id).query(`SELECT currency_code FROM users WHERE user_id = @pid`);
+                const provCurrency = provInfo.recordset[0].currency_code;
+
+                if (provCurrency !== jobCurrency) {
+                    const rateCheck = await transaction.request()
+                        .input('pair1', sql.VarChar, `${jobCurrency}_${provCurrency}`)
+                        .input('pair2', sql.VarChar, `${provCurrency}_${jobCurrency}`)
+                        .query(`SELECT currency_pair, rate FROM ExchangeRates WHERE currency_pair = @pair1 OR currency_pair = @pair2`);
+                    
+                    if (rateCheck.recordset.length > 0) {
+                        const exRate = rateCheck.recordset[0];
+                        if (exRate.currency_pair === `${jobCurrency}_${provCurrency}`) {
+                            totalForProvider = totalForProvider * parseFloat(exRate.rate);
+                        } else {
+                            totalForProvider = totalForProvider / parseFloat(exRate.rate);
+                        }
+                    }
+                }
+
+                // 💳 โอนเงินเข้า Wallet ผู้รับงาน
+                await transaction.request()
+                    .input('pid', sql.Int, provider_id)
+                    .input('total', sql.Decimal(18, 4), totalForProvider)
+                    .input('reqId', sql.Int, request_id)
+                    .query(`
+                        UPDATE Wallets SET balance = balance + @total WHERE user_id = @pid;
+                        INSERT INTO Transactions (user_id, amount, transaction_type, title, status, created_at) 
+                        VALUES (@pid, @total, 'P2P_Income', N'รับเงินจากภารกิจถอน P2P (งาน ID: ' + CAST(@reqId AS NVARCHAR) + N')', 'Completed', GETDATE());
+                    `);
+
+                // 🎁 2. แจกคอมมิชชั่นให้ "ผู้แนะนำ" ของคนรับงาน (เพิ่มใหม่!)
+                const setDb = await transaction.request().query('SELECT TOP 1 referrer_reward_percent FROM P2P_Settings');
+                const refPercent = setDb.recordset.length > 0 ? parseFloat(setDb.recordset[0].referrer_reward_percent) : 0;
+
+                if (refPercent > 0) {
+                    const refCheck = await transaction.request()
+                        .input('pid', sql.Int, provider_id)
+                        .query(`
+                            SELECT ref.user_id AS referrer_id, ref.currency_code AS ref_curr, me.username AS provider_name 
+                            FROM users me 
+                            INNER JOIN users ref ON me.referrer_username = ref.username 
+                            WHERE me.user_id = @pid
+                        `);
+                    
+                    if (refCheck.recordset.length > 0 && refCheck.recordset[0].referrer_id) {
+                        const referrerId = refCheck.recordset[0].referrer_id;
+                        const providerName = refCheck.recordset[0].provider_name; 
+                        const refCurrency = refCheck.recordset[0].ref_curr; 
+                        
+                        let finalRefReward = (parseFloat(job.amount) * refPercent) / 100; 
+
+                        // 🔄 แปลงสกุลเงินค่าแนะนำให้ตรงกับกระเป๋าคนแนะนำ
+                        if (refCurrency !== jobCurrency) {
+                            const refRateCheck = await transaction.request()
+                                .input('pair1', sql.VarChar, `${jobCurrency}_${refCurrency}`)
+                                .input('pair2', sql.VarChar, `${refCurrency}_${jobCurrency}`)
+                                .query(`SELECT currency_pair, rate FROM ExchangeRates WHERE currency_pair = @pair1 OR currency_pair = @pair2`);
+                            
+                            if (refRateCheck.recordset.length > 0) {
+                                const exRate2 = refRateCheck.recordset[0];
+                                if (exRate2.currency_pair === `${jobCurrency}_${refCurrency}`) {
+                                    finalRefReward = finalRefReward * parseFloat(exRate2.rate);
+                                } else {
+                                    finalRefReward = finalRefReward / parseFloat(exRate2.rate);
+                                }
+                            }
+                        }
+
+                        // 💳 จ่ายค่าคอมให้คนแนะนำ
+                        await transaction.request()
+                            .input('refId', sql.Int, referrerId)
+                            .input('reward', sql.Decimal(18, 4), finalRefReward)
+                            .input('reqId', sql.Int, request_id)
+                            .input('pName', sql.NVarChar, providerName) 
+                            .query(`
+                                UPDATE Wallets SET balance = balance + @reward WHERE user_id = @refId;
+                                INSERT INTO Transactions (user_id, amount, transaction_type, title, status, created_at) 
+                                VALUES (@refId, @reward, 'Affiliate', N'ค่าคอมมิชชั่นแนะนำเพื่อนรับงาน P2P จากคุณ ' + @pName + N' (งาน ID: ' + CAST(@reqId AS NVARCHAR) + N')', 'Completed', GETDATE());
+                            `);
+                    }
+                }
+
+                // 🏁 3. ปิดงาน
+                await transaction.request()
+                    .input('rid', sql.Int, request_id)
+                    .query(`UPDATE P2P_Requests SET status = 'COMPLETED', completed_at = GETDATE() WHERE request_id = @rid`);
+
+                await transaction.commit();
+                return res.json({ success: true, message: '✅ ยืนยันรับเงินสำเร็จ! ระบบได้โอนเงินและจ่ายค่าแนะนำเรียบร้อยแล้ว' });
+
+            } 
+            // 🌟 กรณีที่ 2: มีปัญหา (เงินไม่เข้า / ยอดไม่ตรง)
+            else if (verify_status === 'no_money' || verify_status === 'wrong_amount') {
+                
+                await transaction.request()
+                    .input('rid', sql.Int, request_id)
+                    .query(`UPDATE P2P_Requests SET status = 'DISPUTED' WHERE request_id = @rid`);
+
+                await transaction.commit();
+                return res.json({ success: true, message: '⚠️ ส่งเรื่องแจ้งปัญหาสำเร็จ! ระบบได้อายัดคำขอนี้ไว้เพื่อให้ Admin ตรวจสอบแล้ว' });
+            }
+
+        } catch (err) {
+            await transaction.rollback();
+            throw err;
+        }
+    } catch (err) {
+        console.error("Confirm Withdraw Receipt Error:", err);
+        res.status(500).json({ success: false, message: 'Server Error: ' + err.message });
+    }
+});
 // ==========================================
 // 📤 [API] ลูกค้าอัปโหลดสลิปโอนเงิน
 // ==========================================
