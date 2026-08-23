@@ -6653,14 +6653,15 @@ app.post('/api/p2p/verify-slip', async (req, res) => {
                         VALUES (@uid, @net, 'Deposit', N'รับเงินฝากผ่านระบบ P2P (งาน ID: ' + CAST(@reqId AS NVARCHAR) + N')', 'Completed', GETDATE());
                     `);
 
-                // ✅ 2. คืนเงินค้ำประกัน + ค่าคอม ให้คนรับงาน (แปลงค่าคอมก่อน)
-                let finalProviderReward = parseFloat(job.provider_reward);
+                // ✅ 2. คืนเงินค้ำประกัน + ค่าคอม ให้คนรับงาน (แยก Transaction)
+                let rewardAmount = parseFloat(job.provider_reward); // ค่าคอมตั้งต้น
+                let principalAmount = actualEscrow; // เงินค้ำประกัน (เงินต้น) ที่โดนหักไปจริง
                 
                 // ดึงสกุลเงินของคนรับงาน
                 const provInfo = await transaction.request().input('pid', sql.Int, provider_id).query(`SELECT currency_code FROM users WHERE user_id = @pid`);
                 const provCurrency = provInfo.recordset[0].currency_code; 
 
-                // 🔄 แปลงสกุลเงินค่าคอม (แก้ชื่อคอลัมน์เป็น currency_pair แล้ว!)
+                // 🔄 แปลงสกุลเงินค่าคอม 
                 if (provCurrency !== jobCurrency) {
                     const rateCheck = await transaction.request()
                         .input('pair1', sql.VarChar, `${jobCurrency}_${provCurrency}`)
@@ -6670,23 +6671,36 @@ app.post('/api/p2p/verify-slip', async (req, res) => {
                     if (rateCheck.recordset.length > 0) {
                         const exRate = rateCheck.recordset[0];
                         if (exRate.currency_pair === `${jobCurrency}_${provCurrency}`) {
-                            finalProviderReward = finalProviderReward * parseFloat(exRate.rate);
+                            rewardAmount = rewardAmount * parseFloat(exRate.rate);
                         } else {
-                            finalProviderReward = finalProviderReward / parseFloat(exRate.rate);
+                            rewardAmount = rewardAmount / parseFloat(exRate.rate);
                         }
                     }
                 }
 
-                const refund_and_reward = actualEscrow + finalProviderReward;
+                // รวมยอดเพื่อโอนเข้ากระเป๋าครั้งเดียว
+                const refund_and_reward = principalAmount + rewardAmount;
                 
+                // 💳 โอนเงินเข้า Wallet ผู้รับงาน
                 await transaction.request()
                     .input('pid', sql.Int, provider_id)
                     .input('total', sql.Decimal(18, 4), refund_and_reward)
+                    .query(`UPDATE Wallets SET balance = balance + @total WHERE user_id = @pid`);
+
+                // 📝 แยกลงประวัติ Transaction เป็น 2 รายการ ให้ดูง่ายๆ
+                await transaction.request()
+                    .input('pid', sql.Int, provider_id)
+                    .input('principal', sql.Decimal(18, 4), principalAmount)
+                    .input('reward', sql.Decimal(18, 4), rewardAmount)
                     .input('reqId', sql.Int, request_id)
                     .query(`
-                        UPDATE Wallets SET balance = balance + @total WHERE user_id = @pid;
+                        -- รายการที่ 1: คืนเงินค้ำประกัน (เงินต้น)
                         INSERT INTO Transactions (user_id, amount, transaction_type, title, status, created_at) 
-                        VALUES (@pid, @total, 'P2P_Reward', N'คืนมัดจำและรับค่าคอมมิชชั่น P2P (งาน ID: ' + CAST(@reqId AS NVARCHAR) + N')', 'Completed', GETDATE());
+                        VALUES (@pid, @principal, 'P2P_Refund', N'คืนเงินค้ำประกัน P2P (งาน ID: ' + CAST(@reqId AS NVARCHAR) + N')', 'Completed', GETDATE());
+
+                        -- รายการที่ 2: รับค่าคอมมิชชั่น
+                        INSERT INTO Transactions (user_id, amount, transaction_type, title, status, created_at) 
+                        VALUES (@pid, @reward, 'P2P_Income', N'รับค่าคอมมิชชั่นภารกิจฝาก P2P (งาน ID: ' + CAST(@reqId AS NVARCHAR) + N')', 'Completed', GETDATE());
                     `);
 
                 // ✅ 3. แจกคอมมิชชั่นให้ "ผู้แนะนำ" (แปลงสกุลเงินด้วย)
@@ -6762,7 +6776,7 @@ app.post('/api/p2p/verify-slip', async (req, res) => {
                     .input('rid', sql.Int, request_id)
                     .query(`UPDATE P2P_Requests SET status = 'CANCELLED', completed_at = GETDATE() WHERE request_id = @rid`);
 
-                // 🌟 ระบบแบนบัญชีลูกค้า (แก้เป็น is_active = 0 แล้ว!)
+                // 🌟 ระบบแบนบัญชีลูกค้า 
                 const banCheck = await transaction.request()
                     .input('uid', sql.Int, job.requester_id)
                     .query(`
@@ -6793,7 +6807,6 @@ app.post('/api/p2p/verify-slip', async (req, res) => {
         res.status(400).json({ success: false, message: 'Server Error: ' + err.message });
     }
 });
-
 // ==========================================
 // 🌟 4. [REQUESTER] ลูกค้ายืนยันการได้รับเงินโอน (ฝั่งถอนเงิน) - ฉบับมีจ่ายค่าคอมฯ ผู้แนะนำ!
 // ==========================================
