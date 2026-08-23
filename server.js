@@ -6790,8 +6790,14 @@ app.post('/api/p2p/upload-slip', async (req, res) => {
 
         res.json({ success: true, message: 'ส่งสลิปให้ผู้รับงานตรวจสอบเรียบร้อยแล้ว' });
     } catch (err) {
-        console.error("Upload Slip Error:", err);
-        res.status(500).json({ success: false, message: 'Server Error: ' + err.message });
+        console.error("🔥 [CRITICAL] Upload Slip Error แบบละเอียด:", err); // เปลี่ยนตรงนี้ให้ชัดๆ
+        
+        // บังคับส่ง Error กลับไปให้หน้าเว็บแสดงผล
+        res.status(500).json({ 
+            success: false, 
+            message: 'Server Error: ' + err.message,
+            stack: err.stack // 👈 แอบส่ง stack trace ไปดูที่ Network
+        });
     }
 });
 
@@ -7657,7 +7663,7 @@ app.get('/api/p2p/my-requests/:userId', async (req, res) => {
 // ==========================================
 // 📤 [POST] อัปโหลดสลิปโอนเงิน (พร้อมระบบ Anti-Fraud และระบบตรวจสอบตัวแปรหาย)
 // ==========================================
-app.post('/api/p2p/upload-slip', async (req, res) => {
+app.post('/api/p2p/provider-upload-slip', async (req, res) => {
     try {
         const { provider_id, request_id, slip_image, transfer_amount, transfer_date, transfer_time } = req.body;
         
