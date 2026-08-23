@@ -7666,21 +7666,24 @@ app.post('/api/p2p/provider-upload-slip', async (req, res) => {
                 });
             }
         }
+// 🌟 3. ถ้ายอดเงินตรงกันเป๊ะ: บันทึกข้อมูลและเปลี่ยนสถานะเป็น VERIFYING
+        // เราจะไม่ใช้ input('t_time', sql.Time, ...) แล้ว เพื่อหลีกเลี่ยง Invalid time
+        // แต่จะบังคับให้ SQL แปลงจาก String ไปเป็น Time ด้วยคำสั่ง CAST() หรือ CONVERT() ในตัว Query เลย
 
-        // 🌟 3. ถ้ายอดเงินตรงกันเป๊ะ: บันทึกข้อมูลและเปลี่ยนสถานะเป็น VERIFYING
         await pool.request()
             .input('rid', sql.Int, request_id)
             .input('slip', sql.NVarChar(sql.MAX), slip_image) 
             .input('t_amount', sql.Decimal(18,4), inputAmount)
             .input('t_date', sql.Date, transfer_date)
-            .input('t_time', sql.Time, transfer_time)
+            .input('t_time_str', sql.VarChar, transfer_time) // 👈 รับเป็น VarChar แทน!
             .query(`
                 UPDATE P2P_Requests 
                 SET slip_url = @slip, 
                     transfer_amount = @t_amount,
                     transfer_date = @t_date,
-                    transfer_time = @t_time,
-                    slip_error_count = 0, -- รีเซ็ตค่าเพื่อความสะอาด
+                    -- ใช้ CAST แปลง String (ที่มีรูปแบบ HH:mm) เป็นประเภท TIME ของ SQL
+                    transfer_time = CAST(@t_time_str AS TIME), 
+                    slip_error_count = 0, 
                     status = 'VERIFYING' 
                 WHERE request_id = @rid
             `);
