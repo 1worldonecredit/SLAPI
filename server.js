@@ -6598,9 +6598,6 @@ app.post('/api/p2p/cancel-job', async (req, res) => {
     }
 });
 
-// ==========================================
-// 🌟 3. ผู้รับงานตรวจสลิปและยืนยัน (VERIFY SLIP) - ฉบับสมบูรณ์ (แปลงสกุลเงินได้จริง!)
-// ==========================================
 app.post('/api/p2p/verify-slip', async (req, res) => {
     try {
         const { provider_id, request_id, is_correct } = req.body;
@@ -6626,7 +6623,7 @@ app.post('/api/p2p/verify-slip', async (req, res) => {
         await transaction.begin();
 
         try {
-            // 🌟 1. ค้นหายอดค้ำประกัน "ของจริง" ที่โดนหักไป
+            // 🌟 1. ค้นหายอดค้ำประกัน "ของจริง" ที่โดนหักไป (เผื่อไว้ใช้ตอนสลิปปลอม จะได้คืนให้)
             const escrowCheck = await transaction.request()
                 .input('pid', sql.Int, provider_id)
                 .input('reqId', sql.Int, request_id)
@@ -6642,7 +6639,7 @@ app.post('/api/p2p/verify-slip', async (req, res) => {
             const actualEscrow = escrowCheck.recordset.length > 0 ? parseFloat(escrowCheck.recordset[0].deducted_amount) : parseFloat(job.amount);
 
             if (is_correct) {
-                // ✅ 1. เติมเงินให้คนฝาก 
+                // ✅ 1. เติมเงินให้คนฝาก (เอาเงินค้ำประกันไปให้คนฝาก)
                 await transaction.request()
                     .input('uid', sql.Int, job.requester_id)
                     .input('net', sql.Decimal(18, 4), job.net_amount)
@@ -6653,9 +6650,8 @@ app.post('/api/p2p/verify-slip', async (req, res) => {
                         VALUES (@uid, @net, 'Deposit', N'รับเงินฝากผ่านระบบ P2P (งาน ID: ' + CAST(@reqId AS NVARCHAR) + N')', 'Completed', GETDATE());
                     `);
 
-                // ✅ 2. คืนเงินค้ำประกัน + ค่าคอม ให้คนรับงาน (แยก Transaction)
+                // ✅ 2. จ่ายเฉพาะ "ค่าคอมมิชชั่น" ให้คนรับงาน (🚨 ไม่คืนเงินต้น เพราะรับเงินเข้าบัญชีธนาคารไปแล้ว)
                 let rewardAmount = parseFloat(job.provider_reward); // ค่าคอมตั้งต้น
-                let principalAmount = actualEscrow; // เงินค้ำประกัน (เงินต้น) ที่โดนหักไปจริง
                 
                 // ดึงสกุลเงินของคนรับงาน
                 const provInfo = await transaction.request().input('pid', sql.Int, provider_id).query(`SELECT currency_code FROM users WHERE user_id = @pid`);
@@ -6678,27 +6674,15 @@ app.post('/api/p2p/verify-slip', async (req, res) => {
                     }
                 }
 
-                // รวมยอดเพื่อโอนเข้ากระเป๋าครั้งเดียว
-                const refund_and_reward = principalAmount + rewardAmount;
-                
-                // 💳 โอนเงินเข้า Wallet ผู้รับงาน
+                // 💳 โอนเงินเข้า Wallet ผู้รับงาน (ใส่แค่ค่าคอม)
                 await transaction.request()
                     .input('pid', sql.Int, provider_id)
-                    .input('total', sql.Decimal(18, 4), refund_and_reward)
-                    .query(`UPDATE Wallets SET balance = balance + @total WHERE user_id = @pid`);
-
-                // 📝 แยกลงประวัติ Transaction เป็น 2 รายการ ให้ดูง่ายๆ
-                await transaction.request()
-                    .input('pid', sql.Int, provider_id)
-                    .input('principal', sql.Decimal(18, 4), principalAmount)
                     .input('reward', sql.Decimal(18, 4), rewardAmount)
                     .input('reqId', sql.Int, request_id)
                     .query(`
-                        -- รายการที่ 1: คืนเงินค้ำประกัน (เงินต้น)
-                        INSERT INTO Transactions (user_id, amount, transaction_type, title, status, created_at) 
-                        VALUES (@pid, @principal, 'P2P_Refund', N'คืนเงินค้ำประกัน P2P (งาน ID: ' + CAST(@reqId AS NVARCHAR) + N')', 'Completed', GETDATE());
-
-                        -- รายการที่ 2: รับค่าคอมมิชชั่น
+                        UPDATE Wallets SET balance = balance + @reward WHERE user_id = @pid;
+                        
+                        -- บันทึกแค่รายการค่าคอมมิชชั่นรายการเดียว
                         INSERT INTO Transactions (user_id, amount, transaction_type, title, status, created_at) 
                         VALUES (@pid, @reward, 'P2P_Income', N'รับค่าคอมมิชชั่นภารกิจฝาก P2P (งาน ID: ' + CAST(@reqId AS NVARCHAR) + N')', 'Completed', GETDATE());
                     `);
@@ -6762,6 +6746,7 @@ app.post('/api/p2p/verify-slip', async (req, res) => {
             } else {
                 // ❌ กรณีเงินไม่เข้า / สลิปปลอม
                 
+                // คืนเงินค้ำประกันเต็มจำนวน เพราะคนรับงานไม่ได้เงินเข้าธนาคาร
                 await transaction.request()
                     .input('pid', sql.Int, provider_id)
                     .input('amt', sql.Decimal(18, 4), actualEscrow)
