@@ -4914,9 +4914,58 @@ app.post('/api/hrm/apply-job', async (req, res) => {
 // ==========================================
 // 📢 API: ระบบป้ายประกาศรับสมัครงาน (หน้า PreLogin)
 // ==========================================
-
 // 1. ดึงข้อมูลโฆษณา (ให้หน้า PreLogin เรียกใช้)
 app.get('/api/hrm/job-ad', async (req, res) => {
+    try {
+        const pool = await sql.connect(dbConfig);
+        // 🌟 แก้ไข: เพิ่มเงื่อนไขให้ดึงข้อมูลเฉพาะช่วงเวลาที่ตั้งไว้
+        const result = await pool.request().query(`
+            SELECT * FROM Job_Ads_Settings 
+            WHERE id = 1 
+            AND is_active = 1
+            AND (start_time IS NULL OR start_time <= DATEADD(hour, 7, GETUTCDATE()))
+            AND (end_time IS NULL OR end_time >= DATEADD(hour, 7, GETUTCDATE()))
+        `);
+        if(result.recordset.length > 0) {
+            res.json({ success: true, ad: result.recordset[0] });
+        } else {
+            res.json({ success: false });
+        }
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ success: false });
+    }
+});
+
+// 2. อัปเดตโฆษณา (แอดมินกดบันทึกจากหลังบ้าน)
+app.post('/api/hrm/job-ad', async (req, res) => {
+    const { is_active, ad_title, ad_description, start_time, end_time } = req.body;
+    try {
+        const pool = await sql.connect(dbConfig);
+        await pool.request()
+            .input('is_active', sql.Bit, is_active ? 1 : 0)
+            .input('title', sql.NVarChar, ad_title)
+            .input('desc', sql.NVarChar, ad_description)
+            .input('start', sql.DateTime, start_time || null) // 🌟 รับค่า start_time เพิ่ม
+            .input('end', sql.DateTime, end_time || null)
+            .query(`
+                UPDATE Job_Ads_Settings 
+                SET is_active = @is_active, 
+                    ad_title = @title, 
+                    ad_description = @desc, 
+                    start_time = @start, -- 🌟 อัปเดต start_time
+                    end_time = @end
+                WHERE id = 1
+            `);
+        res.json({ success: true });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ success: false });
+    }
+});
+
+// 3. API ดึงข้อมูลทั้งหมดให้หน้า Admin (แบบไม่มีเงื่อนไขเวลา)
+app.get('/api/hrm/job-ad/admin', async (req, res) => {
     try {
         const pool = await sql.connect(dbConfig);
         const result = await pool.request().query('SELECT * FROM Job_Ads_Settings WHERE id = 1');
@@ -6200,68 +6249,6 @@ app.get('/api/admin/yeeki/history', async (req, res) => {
 // 🌟 เริ่ม API P2P
 // ==========================================
 
-// ==========================================
-// 💸 [CLIENT] สร้างคำขอฝากเงิน (ดึงเวลาและค่าคอมฯ จาก P2P_Settings)
-// ==========================================
-app.post('/api/p2p/request-deposit', async (req, res) => {
-    try {
-        const { requester_id, amount, currency, promo_id } = req.body;
-        if (!requester_id || !amount) return res.status(400).json({ success: false, message: 'ข้อมูลไม่ครบถ้วน' });
-
-        const pool = await sql.connect(dbConfig);
-        
-        let bonus_amount = 0;
-        let provider_reward = 0; 
-        let board_timeout = 15; // เผื่อหาไม่เจอ ให้ยึด 15 นาทีตามหน้าแอดมินเจ้านาย
-        
-        // 1. ดึงโปรโมชั่น (แจกโบนัสลูกค้า)
-        if (promo_id) {
-            const promo = await pool.request().input('pid', sql.Int, promo_id).query('SELECT bonus_percent FROM P2P_Promotions WHERE promo_id = @pid');
-            if (promo.recordset.length > 0) bonus_amount = (amount * parseFloat(promo.recordset[0].bonus_percent)) / 100;
-        }
-
-        // 🌟 2. ดึงการตั้งค่าทั้งหมดจากหน้าแอดมิน (P2P_Settings)
-        const settings = await pool.request().query('SELECT TOP 1 * FROM P2P_Settings');
-        if (settings.recordset.length > 0) {
-            const config = settings.recordset[0];
-            
-            // ดึงค่าคอมมิชชั่นคนรับงาน (provider_reward_percent) ที่เจ้านายตั้งไว้ 15% มาคูณ!
-            if (config.provider_reward_percent) {
-                provider_reward = (amount * parseFloat(config.provider_reward_percent)) / 100;
-            } else {
-                provider_reward = (amount * 15) / 100; // ค่าสำรองเผื่อตารางพัง
-            }
-            
-            // ดึงเวลาหมดอายุที่เจ้านายตั้งไว้
-            if (config.mission_timeout_minutes) {
-                board_timeout = config.mission_timeout_minutes;
-            }
-        } else {
-            provider_reward = (amount * 15) / 100; // ค่าสำรองถ้าไม่มีข้อมูลในตาราง
-        }
-
-        const net_amount = parseFloat(amount) + bonus_amount;
-
-        // 🌟 3. บันทึกลงตาราง บังคับใช้เวลาไทย และหยอดค่า 15% ลงไปให้คนรับงาน!
-        await pool.request()
-            .input('req_id', sql.Int, requester_id)
-            .input('type', sql.VarChar, 'DEPOSIT')
-            .input('curr', sql.VarChar, currency || 'THB')
-            .input('amt', sql.Decimal(18, 2), amount)
-            .input('bonus', sql.Decimal(18, 2), bonus_amount)
-            .input('net', sql.Decimal(18, 2), net_amount)
-            .input('reward', sql.Decimal(18, 2), provider_reward) // 💰 หยอดเงิน 15% (150 บาท) ลงไป
-            .input('timeout', sql.Int, board_timeout) // ⏱️ หยอดเวลาที่เจ้านายตั้งไว้
-            .query(`
-                INSERT INTO P2P_Requests (requester_id, request_type, currency, amount, bonus_or_fee, net_amount, provider_reward, status, created_at, expires_at) 
-                VALUES (@req_id, @type, @curr, @amt, @bonus, @net, @reward, 'PENDING', DATEADD(hour, 7, GETUTCDATE()), DATEADD(minute, @timeout, DATEADD(hour, 7, GETUTCDATE())))
-            `);
-
-        res.json({ success: true, message: 'สร้างคำขอฝากเงินสำเร็จ' });
-    } catch (err) {
-        res.status(500).json({ success: false, message: err.message });
-    }
-});
 
 // ==========================================
 // 💸 [CLIENT] สร้างคำขอฝากเงิน (อัปเกรด: ค้นหาโปรโมชั่น 20% ให้อัตโนมัติ!)
