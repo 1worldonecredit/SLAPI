@@ -6797,6 +6797,9 @@ app.post('/api/p2p/verify-slip', async (req, res) => {
 // ==========================================
 // 🌟 4. [REQUESTER] ลูกค้ายืนยันการได้รับเงินโอน (ฝั่งถอนเงิน) - ฉบับมีจ่ายค่าคอมฯ ผู้แนะนำ!
 // ==========================================
+// ==========================================
+// 🌟 4. [REQUESTER] ลูกค้ายืนยันการได้รับเงินโอน (ฝั่งถอนเงิน) - ฉบับสมบูรณ์ (แยก Transaction ยอดเงินต้น/ค่าคอม)
+// ==========================================
 app.post('/api/p2p/confirm-withdraw-receipt', async (req, res) => {
     try {
         const { requester_id, request_id, verify_status } = req.body;
@@ -6827,12 +6830,15 @@ app.post('/api/p2p/confirm-withdraw-receipt', async (req, res) => {
             // 🌟 กรณีที่ 1: ถูกต้อง (ได้เงินครบ)
             if (verify_status === 'correct' || !verify_status) {
                 
-                // 💰 1. จ่ายค่าแรงให้ผู้รับงาน (ยอดถอน + ค่าคอม)
-                let totalForProvider = parseFloat(job.amount) + parseFloat(job.provider_reward);
+                // 💰 1. แยกคำนวณ "เงินต้น" และ "ค่าคอมมิชชั่น"
+                let principalAmount = parseFloat(job.amount); 
+                let rewardAmount = parseFloat(job.provider_reward); 
 
                 // --- แปลงสกุลเงินผู้รับงาน ---
                 const provInfo = await transaction.request().input('pid', sql.Int, provider_id).query(`SELECT currency_code FROM users WHERE user_id = @pid`);
                 const provCurrency = provInfo.recordset[0].currency_code;
+                
+                let exchangeRate = 1;
 
                 if (provCurrency !== jobCurrency) {
                     const rateCheck = await transaction.request()
@@ -6843,25 +6849,39 @@ app.post('/api/p2p/confirm-withdraw-receipt', async (req, res) => {
                     if (rateCheck.recordset.length > 0) {
                         const exRate = rateCheck.recordset[0];
                         if (exRate.currency_pair === `${jobCurrency}_${provCurrency}`) {
-                            totalForProvider = totalForProvider * parseFloat(exRate.rate);
+                            exchangeRate = parseFloat(exRate.rate);
                         } else {
-                            totalForProvider = totalForProvider / parseFloat(exRate.rate);
+                            exchangeRate = 1 / parseFloat(exRate.rate);
                         }
                     }
                 }
 
-                // 💳 โอนเงินเข้า Wallet ผู้รับงาน
+                // นำเรทมาคูณเพื่อแยกยอด
+                let finalPrincipal = principalAmount * exchangeRate;
+                let finalReward = rewardAmount * exchangeRate;
+                let totalForProvider = finalPrincipal + finalReward;
+
+                // 💳 โอนเงินเข้า Wallet ผู้รับงาน (เติมรวมยอด)
                 await transaction.request()
                     .input('pid', sql.Int, provider_id)
                     .input('total', sql.Decimal(18, 4), totalForProvider)
+                    .query(`UPDATE Wallets SET balance = balance + @total WHERE user_id = @pid`);
+
+                // 📝 แยกลงประวัติ Transaction เป็น 2 รายการ
+                await transaction.request()
+                    .input('pid', sql.Int, provider_id)
+                    .input('principal', sql.Decimal(18, 4), finalPrincipal)
+                    .input('reward', sql.Decimal(18, 4), finalReward)
                     .input('reqId', sql.Int, request_id)
                     .query(`
-                        UPDATE Wallets SET balance = balance + @total WHERE user_id = @pid;
                         INSERT INTO Transactions (user_id, amount, transaction_type, title, status, created_at) 
-                        VALUES (@pid, @total, 'P2P_Income', N'รับเงินจากภารกิจถอน P2P (งาน ID: ' + CAST(@reqId AS NVARCHAR) + N')', 'Completed', GETDATE());
+                        VALUES (@pid, @principal, 'P2P_Refund', N'รับเงินคืนจากภารกิจถอน P2P (เงินต้น งาน ID: ' + CAST(@reqId AS NVARCHAR) + N')', 'Completed', GETDATE());
+
+                        INSERT INTO Transactions (user_id, amount, transaction_type, title, status, created_at) 
+                        VALUES (@pid, @reward, 'P2P_Income', N'รับค่าคอมมิชชั่นภารกิจถอน P2P (งาน ID: ' + CAST(@reqId AS NVARCHAR) + N')', 'Completed', GETDATE());
                     `);
 
-                // 🎁 2. แจกคอมมิชชั่นให้ "ผู้แนะนำ" ของคนรับงาน (เพิ่มใหม่!)
+                // 🎁 2. แจกคอมมิชชั่นให้ "ผู้แนะนำ" ของคนรับงาน 
                 const setDb = await transaction.request().query('SELECT TOP 1 referrer_reward_percent FROM P2P_Settings');
                 const refPercent = setDb.recordset.length > 0 ? parseFloat(setDb.recordset[0].referrer_reward_percent) : 0;
 
@@ -6882,7 +6902,6 @@ app.post('/api/p2p/confirm-withdraw-receipt', async (req, res) => {
                         
                         let finalRefReward = (parseFloat(job.amount) * refPercent) / 100; 
 
-                        // 🔄 แปลงสกุลเงินค่าแนะนำให้ตรงกับกระเป๋าคนแนะนำ
                         if (refCurrency !== jobCurrency) {
                             const refRateCheck = await transaction.request()
                                 .input('pair1', sql.VarChar, `${jobCurrency}_${refCurrency}`)
@@ -6899,7 +6918,6 @@ app.post('/api/p2p/confirm-withdraw-receipt', async (req, res) => {
                             }
                         }
 
-                        // 💳 จ่ายค่าคอมให้คนแนะนำ
                         await transaction.request()
                             .input('refId', sql.Int, referrerId)
                             .input('reward', sql.Decimal(18, 4), finalRefReward)
