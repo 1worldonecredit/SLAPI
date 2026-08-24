@@ -4974,7 +4974,7 @@ app.get('/api/hrm/applicants', async (req, res) => {
             FROM Employees e
             LEFT JOIN Emp_Positions p ON e.position_code = p.position_code
             LEFT JOIN Emp_Departments d ON e.branch_code = d.dept_code -- สมมติว่าเก็บ branch_code เป็น dept_code ชั่วคราว (หรือ join ให้ถูกตามโครงสร้าง)
-            WHERE e.status = 'Pending'
+            WHERE e.status IN ('Pending', 'Approved', 'Rejected')
             ORDER BY e.created_at DESC
         `);
 
