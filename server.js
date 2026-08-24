@@ -5120,41 +5120,66 @@ app.post('/api/hrm/job-ad', async (req, res) => {
         res.status(500).json({ success: false });
     }
 });
-// 3. API ดึงข้อมูลทั้งหมดให้หน้า Admin (แบบไม่มีเงื่อนไขเวลา)
+// ==========================================
+// 📣 API: ดึงข้อมูลโฆษณาทั้งหมด (สำหรับหน้า Admin)
+// ==========================================
 app.get('/api/hrm/job-ad/admin', async (req, res) => {
     try {
         const pool = await sql.connect(dbConfig);
-        const result = await pool.request().query('SELECT * FROM Job_Ads_Settings WHERE id = 1');
-        if(result.recordset.length > 0) {
-            res.json({ success: true, ad: result.recordset[0] });
-        } else {
-            res.json({ success: false });
-        }
+        // ดึงมาทั้งหมด เรียงจากใหม่ไปเก่า
+        const result = await pool.request().query(`
+            SELECT * FROM Job_Ads_Settings ORDER BY id DESC
+        `);
+        res.json({ success: true, ads: result.recordset });
     } catch (err) {
         console.error(err);
         res.status(500).json({ success: false });
     }
 });
 
-// 2. อัปเดตโฆษณา (แอดมินกดบันทึกจากหลังบ้าน)
+// ==========================================
+// 📣 API: เพิ่ม / แก้ไข โฆษณา
+// ==========================================
 app.post('/api/hrm/job-ad', async (req, res) => {
-    const { is_active, ad_title, ad_description, end_time } = req.body;
+    const { id, is_active, ad_title, ad_description, start_time, end_time, allowed_positions } = req.body;
     try {
         const pool = await sql.connect(dbConfig);
-        await pool.request()
-            .input('is_active', sql.Bit, is_active ? 1 : 0)
-            .input('title', sql.NVarChar, ad_title)
-            .input('desc', sql.NVarChar, ad_description)
-            .input('end', sql.DateTime, end_time)
-            .query(`
-                UPDATE Job_Ads_Settings 
-                SET is_active = @is_active, ad_title = @title, ad_description = @desc, end_time = @end
-                WHERE id = 1
-            `);
+        const posString = Array.isArray(allowed_positions) ? allowed_positions.join(',') : '';
+
+        if (id) {
+            // 🌟 ถ้าส่ง ID มาแปลว่า "แก้ไขของเดิม"
+            await pool.request()
+                .input('id', sql.Int, id)
+                .input('is_active', sql.Bit, is_active ? 1 : 0)
+                .input('title', sql.NVarChar, ad_title)
+                .input('desc', sql.NVarChar, ad_description)
+                .input('start', sql.DateTime, start_time || null)
+                .input('end', sql.DateTime, end_time || null)
+                .input('pos', sql.NVarChar, posString)
+                .query(`
+                    UPDATE Job_Ads_Settings 
+                    SET is_active = @is_active, ad_title = @title, ad_description = @desc, 
+                        start_time = @start, end_time = @end, allowed_positions = @pos
+                    WHERE id = @id
+                `);
+        } else {
+            // 🌟 ถ้าไม่มี ID แปลว่า "สร้างโพสต์ใหม่"
+            await pool.request()
+                .input('is_active', sql.Bit, is_active ? 1 : 0)
+                .input('title', sql.NVarChar, ad_title)
+                .input('desc', sql.NVarChar, ad_description)
+                .input('start', sql.DateTime, start_time || null)
+                .input('end', sql.DateTime, end_time || null)
+                .input('pos', sql.NVarChar, posString)
+                .query(`
+                    INSERT INTO Job_Ads_Settings (is_active, ad_title, ad_description, start_time, end_time, allowed_positions) 
+                    VALUES (@is_active, @title, @desc, @start, @end, @pos)
+                `);
+        }
         res.json({ success: true });
     } catch (err) {
         console.error(err);
-        res.status(500).json({ success: false });
+        res.status(500).json({ success: false, message: err.message });
     }
 });
 // ==========================================
