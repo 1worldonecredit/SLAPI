@@ -61,7 +61,10 @@ app.use(cors({
   credentials: true // อนุญาตให้ส่ง Cookie หรือ Header ยืนยันตัวตนได้ภ
 }));
 
-
+// ตั้งค่าการเชื่อมต่อ โดยให้ดึงค่าจาก Railway Variables
+const pgPool = new Pool({
+  connectionString: process.env.DATABASE_URL, 
+});
 
 // ตั้งค่าการเชื่อมต่อฐานข้อมูล
 const dbConfig = {
