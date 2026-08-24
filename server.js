@@ -8213,6 +8213,34 @@ app.post('/api/video-promotions', async (req, res) => {
         res.status(500).json({ success: false, message: 'บันทึกลงฐานข้อมูลไม่สำเร็จ' });
     }
 });
+
+// ==========================================
+// 📺 API สำหรับดึงข้อมูลวิดีโอโปรโมชั่นทั้งหมดไปแสดงหน้าเว็บ
+// ==========================================
+app.get('/api/video-promotions', async (req, res) => {
+    try {
+        // สั่งดึงข้อมูลทั้งหมด เรียงจากใหม่ไปเก่า
+        const query = 'SELECT * FROM video_promotions ORDER BY created_at DESC;';
+        const result = await pgPool.query(query);
+
+        // แปลง Video ID จาก Cloudflare ให้เป็นลิงก์วิดีโอที่เล่นได้จริง
+        const formattedVideos = result.rows.map(video => {
+            return {
+                ad_id: video.id,
+                title: video.title,
+                description: video.description,
+                media_type: 'video', // กำหนดให้เป็น video เสมอ
+                // 🌟 ใช้ Customer Subdomain ของเจ้านายตรงนี้ครับ
+                media_url: `https://customer-a6fkepv8oxw1um16.cloudflarestream.com/${video.cf_video_id}/manifest/video.m3u8` 
+            };
+        });
+
+        res.json({ success: true, ads: formattedVideos });
+    } catch (error) {
+        console.error("❌ Get Video Promotions Error:", error);
+        res.status(500).json({ success: false, message: 'ดึงข้อมูลวิดีโอไม่สำเร็จ' });
+    }
+});
 app.listen(port, () => {
     console.log(`🚀 Server เปิดทำงานแล้วที่พอร์ต ${port}`);
 });
