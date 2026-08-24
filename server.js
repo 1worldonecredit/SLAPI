@@ -4786,35 +4786,38 @@ app.get('/api/hrm/master-data', async (req, res) => {
 });
 
 // ==========================================
-// 🏢 API: จัดการข้อมูล สาขา (เพิ่ม/อัปเดต)
+// 🏢 API: จัดการข้อมูล สาขา (เพิ่ม/อัปเดต) + Auto Gen รหัส
 // ==========================================
 app.post('/api/hrm/branch', async (req, res) => {
-    const { branch_code, branch_name, country_code } = req.body;
+    let { branch_code, branch_name, country_code } = req.body;
     try {
         const pool = await sql.connect(dbConfig);
-        // สมมติว่าตารางสาขาชื่อ Emp_Branches นะครับ (ถ้าไม่ใช่ เจ้านายแก้ตรงนี้ได้เลย)
-        const check = await pool.request().input('code', sql.VarChar, branch_code).query('SELECT branch_code FROM Emp_Branches WHERE branch_code = @code');
         
-        if (check.recordset.length > 0) {
-            await pool.request()
-                .input('code', sql.VarChar, branch_code)
-                .input('name', sql.NVarChar, branch_name)
-                .input('country', sql.VarChar, country_code)
-                .query(`UPDATE Emp_Branches SET branch_name = @name, country_code = @country WHERE branch_code = @code`);
-        } else {
+        // 🌟 ถ้าไม่มี branch_code ส่งมา (แปลว่าสร้างสาขาใหม่) ให้ Auto-Gen รหัส
+        if (!branch_code) {
+            const countRes = await pool.request().query('SELECT COUNT(*) as cnt FROM Emp_Branches');
+            const nextNum = (countRes.recordset[0].cnt + 1).toString().padStart(2, '0');
+            branch_code = `B${nextNum}`; // ผลลัพธ์ เช่น B01, B02
+            
             await pool.request()
                 .input('code', sql.VarChar, branch_code)
                 .input('name', sql.NVarChar, branch_name)
                 .input('country', sql.VarChar, country_code)
                 .query(`INSERT INTO Emp_Branches (branch_code, branch_name, country_code) VALUES (@code, @name, @country)`);
+        } else {
+            // 🌟 ถ้ามีรหัสมา แปลว่าอัปเดตข้อมูลสาขาเดิม
+            await pool.request()
+                .input('code', sql.VarChar, branch_code)
+                .input('name', sql.NVarChar, branch_name)
+                .input('country', sql.VarChar, country_code)
+                .query(`UPDATE Emp_Branches SET branch_name = @name, country_code = @country WHERE branch_code = @code`);
         }
-        res.json({ success: true });
+        res.json({ success: true, new_code: branch_code });
     } catch (err) {
         console.error("Branch API Error:", err);
         res.status(500).json({ success: false, message: 'SQL Error: ' + err.message });
     }
 });
-
 // ==========================================
 // 🏢 API: จัดการข้อมูล แผนก (เพิ่ม/อัปเดต) + Auto Gen รหัส
 // ==========================================
