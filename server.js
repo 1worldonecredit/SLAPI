@@ -8119,6 +8119,46 @@ app.post('/api/notifications/delete', async (req, res) => {
     }
 });
 
+
+// ==========================================
+// 🎥 API สำหรับ Cloudflare Stream
+// ==========================================
+// 🚨 เอาค่าที่ก๊อปปี้มาใส่ตรงนี้นะครับ (ในระบบจริง แนะนำให้เอาไปซ่อนในไฟล์ .env)
+const CF_ACCOUNT_ID = 'ใส่ Account ID ตรงนี้'; 
+const CF_API_TOKEN = 'ใส่ API Token ตรงนี้';
+
+app.post('/api/get-upload-url', async (req, res) => {
+    try {
+        const fetch = (await import('node-fetch')).default; // สำหรับ Node.js เวอร์ชั่นเก่า ถ้าใช้เวอร์ชั่นใหม่ไม่ต้องใส่บรรทัดนี้ครับ
+        
+        const response = await fetch(`https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/stream/direct_upload`, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${CF_API_TOKEN}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                maxDurationSeconds: 300, // จำกัดความยาวคลิปไม่เกิน 5 นาที (แก้ได้ครับ)
+                requireSignedURLs: false
+            })
+        });
+
+        const data = await response.json();
+
+        if (data.success) {
+            // ส่ง URL สำหรับอัปโหลดกลับไปให้ React หน้าบ้าน
+            res.json({ success: true, uploadUrl: data.result.uploadURL, uid: data.result.uid });
+        } else {
+            console.error("Cloudflare Error:", data.errors);
+            res.status(400).json({ success: false, message: 'Cloudflare API Error' });
+        }
+    } catch (error) {
+        console.error("Upload URL Error:", error);
+        res.status(500).json({ success: false, message: 'Server Error' });
+    }
+});
+
+
 app.listen(port, () => {
     console.log(`🚀 Server เปิดทำงานแล้วที่พอร์ต ${port}`);
 });
