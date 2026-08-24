@@ -4848,37 +4848,24 @@ app.post('/api/hrm/department', async (req, res) => {
 });
 
 // ==========================================
-// 🏢 API: จัดการข้อมูล ตำแหน่ง (เพิ่ม/อัปเดต) + Auto Gen รหัส
+// 🏢 API: จัดการข้อมูล ตำแหน่ง (เพิ่ม/อัปเดต) + Auto Gen รหัส + Job Responsibilities
 // ==========================================
 app.post('/api/hrm/position', async (req, res) => {
-    let { position_code, position_name, dept_code, base_salary } = req.body;
+    let { position_code, position_name, dept_code, base_salary, job_responsibilities } = req.body;
     try {
         const pool = await sql.connect(dbConfig);
         const baseSal = parseFloat(base_salary) || 0;
+        const jobResp = job_responsibilities || ''; // 🌟 รับค่าความรับผิดชอบมาด้วย
 
-        // 🌟 ถ้าไม่มี position_code ส่งมา (แปลว่าสร้างใหม่) ให้ Auto-Gen ตามแผนก
         if (!position_code) {
-            // หารหัสตำแหน่งล่าสุดของแผนกนี้
-            const lastPos = await pool.request()
-                .input('dept', sql.VarChar, dept_code)
-                .query(`
-                    SELECT TOP 1 position_code 
-                    FROM Emp_Positions 
-                    WHERE dept_code = @dept 
-                    ORDER BY position_code DESC
-                `);
-            
+            // สร้างใหม่
+            const lastPos = await pool.request().input('dept', sql.VarChar, dept_code).query(`SELECT TOP 1 position_code FROM Emp_Positions WHERE dept_code = @dept ORDER BY position_code DESC`);
             let nextNum = 1;
             if (lastPos.recordset.length > 0) {
-                // สมมติรหัสเดิมคือ D01-P01 เราจะดึง 01 ออกมาบวกเพิ่ม
                 const lastCode = lastPos.recordset[0].position_code;
                 const parts = lastCode.split('-P');
-                if(parts.length === 2) {
-                    nextNum = parseInt(parts[1], 10) + 1;
-                }
+                if(parts.length === 2) nextNum = parseInt(parts[1], 10) + 1;
             }
-            
-            // สร้างรหัสใหม่ เช่น D01-P01, D01-P02
             position_code = `${dept_code}-P${nextNum.toString().padStart(2, '0')}`;
             
             await pool.request()
@@ -4886,22 +4873,17 @@ app.post('/api/hrm/position', async (req, res) => {
                 .input('name', sql.NVarChar, position_name)
                 .input('dept', sql.VarChar, dept_code)
                 .input('base', sql.Decimal(18,2), baseSal)
-                .query(`
-                    INSERT INTO Emp_Positions (position_code, position_name, dept_code, base_salary, hourly_rate, ot_multiplier) 
-                    VALUES (@code, @name, @dept, @base, 0, 1.5)
-                `);
+                .input('resp', sql.NVarChar, jobResp) // 🌟 บันทึกความรับผิดชอบ
+                .query(`INSERT INTO Emp_Positions (position_code, position_name, dept_code, base_salary, job_responsibilities) VALUES (@code, @name, @dept, @base, @resp)`);
         } else {
-            // 🌟 ถ้ามีรหัสมา แปลว่าอัปเดต
+            // อัปเดต
             await pool.request()
                 .input('code', sql.VarChar, position_code)
                 .input('name', sql.NVarChar, position_name)
                 .input('dept', sql.VarChar, dept_code)
                 .input('base', sql.Decimal(18,2), baseSal)
-                .query(`
-                    UPDATE Emp_Positions 
-                    SET position_name = @name, dept_code = @dept, base_salary = @base 
-                    WHERE position_code = @code
-                `);
+                .input('resp', sql.NVarChar, jobResp) // 🌟 บันทึกความรับผิดชอบ
+                .query(`UPDATE Emp_Positions SET position_name = @name, dept_code = @dept, base_salary = @base, job_responsibilities = @resp WHERE position_code = @code`);
         }
         res.json({ success: true, new_code: position_code });
     } catch (err) {
@@ -4910,16 +4892,17 @@ app.post('/api/hrm/position', async (req, res) => {
     }
 });
 
-// ==========================================
-// 🏢 API: ระบบจัดการข้อมูลองค์กร (HRM Master Data)  สิ้นสุด
-// ==========================================
-
 
 // ==========================================
-// 🧑‍💼 API: สำหรับลูกค้ายื่นใบสมัครงาน (Job Application)
+// 🧑‍💼 API: สำหรับลูกค้ายื่นใบสมัครงาน (ฟอร์มชุดใหญ่จัดเต็ม!)
 // ==========================================
 app.post('/api/hrm/apply-job', async (req, res) => {
-    const { username, firstname, lastname, branch_code, position_code, employment_type } = req.body;
+    // 🌟 รับค่าที่เจ้านายรีเควสมาทั้งหมด
+    const { 
+        username, firstname, lastname, branch_code, position_code, employment_type,
+        expected_salary, special_skills, why_hire_you, 
+        education_doc_url, profile_pic_url // 2 ตัวนี้จะรับเป็น Base64 String
+    } = req.body;
     
     if(!username || !firstname || !branch_code || !position_code) {
         return res.status(400).json({ success: false, message: 'กรุณากรอกข้อมูลที่จำเป็นให้ครบถ้วน' });
@@ -4928,22 +4911,17 @@ app.post('/api/hrm/apply-job', async (req, res) => {
     try {
         const pool = await sql.connect(dbConfig);
         
-        // 1. เช็คว่าลูกค้ารายนี้เคยยื่นสมัครตำแหน่งนี้ไปแล้วหรือยัง (กันส่งซ้ำ)
-        const checkExist = await pool.request()
-            .input('username', sql.VarChar, username)
-            .query(`SELECT emp_code FROM Employees WHERE username = @username AND status = 'Pending'`);
-            
-        if(checkExist.recordset.length > 0) {
-            return res.status(400).json({ success: false, message: 'คุณได้ยื่นใบสมัครไปแล้ว กรุณารอการติดต่อกลับจากทีมงานครับ' });
-        }
+        // 1. เช็คว่าเคยยื่นสมัครไปยัง?
+        const checkExist = await pool.request().input('username', sql.VarChar, username).query(`SELECT emp_code FROM Employees WHERE username = @username AND status = 'Pending'`);
+        if(checkExist.recordset.length > 0) return res.status(400).json({ success: false, message: 'คุณได้ยื่นใบสมัครไปแล้ว กรุณารอการติดต่อกลับครับ' });
 
-        // 2. สร้างรหัสใบสมัครชั่วคราว (เช่น APP-20260803-0001)
+        // 2. สร้างรหัสใบสมัคร
         const dateStr = new Date().toISOString().slice(0,10).replace(/-/g,'');
         const countRes = await pool.request().query(`SELECT COUNT(emp_code) as cnt FROM Employees`);
         const nextId = (countRes.recordset[0].cnt + 1).toString().padStart(4, '0');
         const emp_code = `APP-${dateStr}-${nextId}`;
 
-        // 3. บันทึกลงตาราง Employees โดยให้สถานะเป็น 'Pending' (รออนุมัติ)
+        // 3. บันทึกลงตาราง (รวมฟิลด์ใหม่ๆ ทั้งหมด)
         await pool.request()
             .input('emp_code', sql.VarChar, emp_code)
             .input('username', sql.VarChar, username)
@@ -4952,16 +4930,115 @@ app.post('/api/hrm/apply-job', async (req, res) => {
             .input('branch', sql.VarChar, branch_code)
             .input('position', sql.VarChar, position_code)
             .input('emp_type', sql.VarChar, employment_type)
-            // รหัสผ่านใส่ Dummy ไว้ก่อน เพราะเวลา Login จริง เราเช็คจากตาราง Users ตามที่คุณพี่บอกครับ
+            .input('expected', sql.Decimal(18,2), parseFloat(expected_salary) || 0)
+            .input('skills', sql.NVarChar, special_skills || '')
+            .input('why', sql.NVarChar, why_hire_you || '')
+            .input('edu_pic', sql.NVarChar, education_doc_url || '') // เก็บรูปวุฒิ
+            .input('prof_pic', sql.NVarChar, profile_pic_url || '') // เก็บรูปถ่าย
             .query(`
-                INSERT INTO Employees (emp_code, username, password_hash, firstname, lastname, branch_code, position_code, employment_type, status, created_at)
-                VALUES (@emp_code, @username, 'USE_MAIN_LOGIN', @firstname, @lastname, @branch, @position, @emp_type, 'Pending', GETDATE())
+                INSERT INTO Employees (
+                    emp_code, username, password_hash, firstname, lastname, branch_code, position_code, employment_type, status, created_at,
+                    expected_salary, special_skills, why_hire_you, education_doc_url, profile_pic_url
+                )
+                VALUES (
+                    @emp_code, @username, 'USE_MAIN_LOGIN', @firstname, @lastname, @branch, @position, @emp_type, 'Pending', GETDATE(),
+                    @expected, @skills, @why, @edu_pic, @prof_pic
+                )
             `);
             
-        res.json({ success: true, message: 'ส่งใบสมัครเรียบร้อยแล้ว! ทีมงานจะติดต่อกลับไปทางช่องทางติดต่อของคุณครับ' });
+        res.json({ success: true, message: 'ส่งใบสมัครเรียบร้อยแล้ว!' });
     } catch (err) {
         console.error("Apply Job Error:", err);
-        res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการส่งใบสมัคร' });
+        res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาด: ' + err.message });
+    }
+});
+
+// ==========================================
+// 🧑‍💼 API: Admin ดึงรายชื่อผู้สมัครงานทั้งหมด (ดึงเฉพาะคนที่สถานะยังเป็น Pending)
+// ==========================================
+app.get('/api/hrm/applicants', async (req, res) => {
+    try {
+        const pool = await sql.connect(dbConfig);
+        
+        // ดึงข้อมูลผู้สมัคร พร้อมดึงชื่อตำแหน่งและชื่อแผนกมาโชว์ด้วย
+        const result = await pool.request().query(`
+            SELECT 
+                e.emp_code, e.username, e.firstname, e.lastname, e.employment_type, 
+                e.status, e.created_at, e.expected_salary, e.special_skills, e.why_hire_you,
+                e.education_doc_url, e.profile_pic_url,
+                p.position_code, p.position_name,
+                d.dept_code, d.dept_name
+            FROM Employees e
+            LEFT JOIN Emp_Positions p ON e.position_code = p.position_code
+            LEFT JOIN Emp_Departments d ON e.branch_code = d.dept_code -- สมมติว่าเก็บ branch_code เป็น dept_code ชั่วคราว (หรือ join ให้ถูกตามโครงสร้าง)
+            WHERE e.status = 'Pending'
+            ORDER BY e.created_at DESC
+        `);
+
+        // จัดกลุ่มข้อมูลตาม "รหัสตำแหน่ง" (position_code) ให้ง่ายต่อการทำ Tabs หน้าเว็บ
+        const groupedByPosition = result.recordset.reduce((acc, applicant) => {
+            const posCode = applicant.position_code || 'Unknown';
+            if (!acc[posCode]) {
+                acc[posCode] = {
+                    position_name: applicant.position_name || 'ไม่ระบุตำแหน่ง',
+                    dept_name: applicant.dept_name || 'ไม่ระบุแผนก',
+                    applicants: []
+                };
+            }
+            acc[posCode].applicants.push(applicant);
+            return acc;
+        }, {});
+
+        res.json({ success: true, groupedApplicants: groupedByPosition });
+    } catch (err) {
+        console.error("Fetch Applicants Error:", err);
+        res.status(500).json({ success: false, message: 'SQL Error: ' + err.message });
+    }
+});
+
+// ==========================================
+// 🧑‍💼 API: Admin อัปเดตสถานะใบสมัคร (ผ่าน/ไม่ผ่าน)
+// ==========================================
+app.post('/api/hrm/applicants/update-status', async (req, res) => {
+    const { emp_code, status, reply_message } = req.body;
+    try {
+        const pool = await sql.connect(dbConfig);
+        
+        // 1. อัปเดตสถานะในตาราง Employees ('Approved' หรือ 'Rejected')
+        await pool.request()
+            .input('status', sql.VarChar, status)
+            .input('code', sql.VarChar, emp_code)
+            .query(`UPDATE Employees SET status = @status WHERE emp_code = @code`);
+            
+        // 2. บันทึกข้อความตอบกลับลงระบบ Notification ให้ลูกค้าเห็น (สมมติว่าใช้ตาราง Notifications เดิม)
+        // ต้องหา user_id จาก username ก่อน
+        const userRes = await pool.request()
+            .input('emp_code', sql.VarChar, emp_code)
+            .query(`
+                SELECT u.id as user_id 
+                FROM Employees e 
+                JOIN users u ON e.username = u.username 
+                WHERE e.emp_code = @emp_code
+            `);
+
+        if (userRes.recordset.length > 0) {
+            const userId = userRes.recordset[0].user_id;
+            const notifTitle = status === 'Approved' ? '🎉 ยินดีด้วย! ใบสมัครผ่านการคัดเลือก' : 'แจ้งผลการสมัครงาน';
+            
+            await pool.request()
+                .input('user_id', sql.Int, userId)
+                .input('title', sql.NVarChar, notifTitle)
+                .input('message', sql.NVarChar, reply_message)
+                .query(`
+                    INSERT INTO Notifications (user_id, title, message, is_read, created_at) 
+                    VALUES (@user_id, @title, @message, 0, GETDATE())
+                `);
+        }
+
+        res.json({ success: true });
+    } catch (err) {
+        console.error("Update Applicant Status Error:", err);
+        res.status(500).json({ success: false, message: 'SQL Error: ' + err.message });
     }
 });
 
@@ -5056,7 +5133,9 @@ app.post('/api/hrm/job-ad', async (req, res) => {
         res.status(500).json({ success: false });
     }
 });
-
+// ==========================================
+// 🌟 สิ้นสุด  HRM 
+// ==========================================
 // ==========================================
 // 🌟 2. ดึงข้อมูล 24 รอบของวันนี้ (ทั้งหน้าบ้านและหลังบ้านใช้ร่วมกัน)
 // ==========================================
