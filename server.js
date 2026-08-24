@@ -5042,24 +5042,43 @@ app.post('/api/hrm/applicants/update-status', async (req, res) => {
     }
 });
 
-
 // ==========================================
-// 📢 API: ระบบป้ายประกาศรับสมัครงาน (หน้า PreLogin)
+// 📣 API: ดึงข้อมูลโฆษณา (ให้หน้า PreLogin หรือ JobApplication เรียกใช้)
 // ==========================================
-// 1. ดึงข้อมูลโฆษณา (ให้หน้า PreLogin เรียกใช้)
 app.get('/api/hrm/job-ad', async (req, res) => {
     try {
         const pool = await sql.connect(dbConfig);
-        // 🌟 แก้ไข: เพิ่มเงื่อนไขให้ดึงข้อมูลเฉพาะช่วงเวลาที่ตั้งไว้
         const result = await pool.request().query(`
             SELECT * FROM Job_Ads_Settings 
-            WHERE id = 1 
-            AND is_active = 1
+            WHERE id = 1 AND is_active = 1
             AND (start_time IS NULL OR start_time <= DATEADD(hour, 7, GETUTCDATE()))
             AND (end_time IS NULL OR end_time >= DATEADD(hour, 7, GETUTCDATE()))
         `);
+        
         if(result.recordset.length > 0) {
-            res.json({ success: true, ad: result.recordset[0] });
+            const ad = result.recordset[0];
+            
+            // 🌟 1. ดึงตำแหน่งที่อนุญาตให้สมัคร
+            let allowedPos = [];
+            if(ad.allowed_positions) {
+                allowedPos = ad.allowed_positions.split(',').map(p => p.trim());
+            }
+
+            // 🌟 2. ดึงรายละเอียดของตำแหน่งเหล่านั้นส่งไปด้วย
+            let activePositions = [];
+            if (allowedPos.length > 0) {
+                // สร้าง IN clause เช่น 'D01-P01','D02-P02'
+                const inClause = allowedPos.map(p => `'${p}'`).join(',');
+                const posRes = await pool.request().query(`
+                    SELECT p.position_code, p.position_name, p.dept_code, p.base_salary, p.job_responsibilities, d.dept_name
+                    FROM Emp_Positions p
+                    LEFT JOIN Emp_Departments d ON p.dept_code = d.dept_code
+                    WHERE p.position_code IN (${inClause})
+                `);
+                activePositions = posRes.recordset;
+            }
+
+            res.json({ success: true, ad: ad, activePositions: activePositions });
         } else {
             res.json({ success: false });
         }
@@ -5069,24 +5088,27 @@ app.get('/api/hrm/job-ad', async (req, res) => {
     }
 });
 
-// 2. อัปเดตโฆษณา (แอดมินกดบันทึกจากหลังบ้าน)
+// ==========================================
+// 📣 API: อัปเดตโฆษณา (แอดมินกดบันทึกจากหลังบ้าน)
+// ==========================================
 app.post('/api/hrm/job-ad', async (req, res) => {
-    const { is_active, ad_title, ad_description, start_time, end_time } = req.body;
+    const { is_active, ad_title, ad_description, start_time, end_time, allowed_positions } = req.body;
     try {
         const pool = await sql.connect(dbConfig);
+        // แปลง Array เป็น String คั่นด้วยจุลภาค เช่น "D01-P01,D02-P01"
+        const posString = Array.isArray(allowed_positions) ? allowed_positions.join(',') : '';
+
         await pool.request()
             .input('is_active', sql.Bit, is_active ? 1 : 0)
             .input('title', sql.NVarChar, ad_title)
             .input('desc', sql.NVarChar, ad_description)
-            .input('start', sql.DateTime, start_time || null) // 🌟 รับค่า start_time เพิ่ม
+            .input('start', sql.DateTime, start_time || null)
             .input('end', sql.DateTime, end_time || null)
+            .input('pos', sql.NVarChar, posString) // 🌟 บันทึกตำแหน่งที่อนุญาต
             .query(`
                 UPDATE Job_Ads_Settings 
-                SET is_active = @is_active, 
-                    ad_title = @title, 
-                    ad_description = @desc, 
-                    start_time = @start, -- 🌟 อัปเดต start_time
-                    end_time = @end
+                SET is_active = @is_active, ad_title = @title, ad_description = @desc, 
+                    start_time = @start, end_time = @end, allowed_positions = @pos
                 WHERE id = 1
             `);
         res.json({ success: true });
@@ -5095,7 +5117,6 @@ app.post('/api/hrm/job-ad', async (req, res) => {
         res.status(500).json({ success: false });
     }
 });
-
 // 3. API ดึงข้อมูลทั้งหมดให้หน้า Admin (แบบไม่มีเงื่อนไขเวลา)
 app.get('/api/hrm/job-ad/admin', async (req, res) => {
     try {
