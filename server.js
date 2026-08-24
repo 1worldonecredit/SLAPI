@@ -7599,55 +7599,41 @@ app.post('/api/admin/ads', async (req, res) => {
         res.status(500).json({ success: false, message: err.message }); 
     }
 });
-
-app.delete('/api/admin/ads/:id', async (req, res) => {
-    try {
-        const pool = await sql.connect(dbConfig);
-        await pool.request().input('id', sql.Int, req.params.id).query('DELETE FROM P2P_Ads WHERE ad_id = @id');
-        res.json({ success: true, message: 'ลบสำเร็จ' });
-    } catch (err) { res.status(500).json({ success: false, message: err.message }); }
-});
-
-// 🌟 API สำหรับแก้ไขรายละเอียดโฆษณา/วิดีโอ (Title & Description)
+// ==========================================
+// ✏️ API สำหรับแก้ไขข้อมูลโฆษณา (อัปเดต Title, Description)
+// ==========================================
 app.put('/api/admin/ads/:id', async (req, res) => {
+    const { id } = req.params;
+    const { title, description } = req.body;
+    
     try {
-        const ad_id = req.params.id;
-        const { title, description } = req.body;
-
-        // 1. เช็คว่ามีส่ง ID มาหรือไม่
-        if (!ad_id) {
-            return res.status(400).json({ success: false, message: 'ไม่พบรหัสโฆษณา (ad_id)' });
-        }
-
-        // 2. สั่งอัปเดตข้อมูลลง Database
-        // ⚠️ หมายเหตุ: เจ้านายเช็คชื่อตาราง 'Ads' อีกทีนะครับว่าตรงกับใน Database หรือไม่ (บางทีอาจจะชื่อ SystemAds หรือ P2P_Ads)
-        const result = await pool.request()
-            .input('ad_id', sql.Int, ad_id)
-            .input('title', sql.NVarChar, title || '')
-            .input('description', sql.NVarChar, description || '')
-            .query(`
-                UPDATE Ads 
-                SET title = @title, 
-                    description = @description
-                    -- หากเจ้านายมีคอลัมน์ updated_at สามารถเอาคอมเมนต์บรรทัดล่างออกได้ครับ
-                    -- , updated_at = GETDATE()
-                WHERE ad_id = @ad_id
-            `);
-
-        // 3. เช็คว่าอัปเดตสำเร็จไหม (หา ID นั้นเจอหรือเปล่า)
-        if (result.rowsAffected[0] === 0) {
-            return res.status(404).json({ success: false, message: 'ไม่พบข้อมูลโฆษณานี้ในระบบ' });
-        }
-
-        // 4. ส่งสถานะกลับไปให้หน้าบ้าน (Frontend จะได้รับ success: true แล้วเด้ง Alert สำเร็จ)
-        res.json({ success: true, message: 'อัปเดตข้อมูลโฆษณาสำเร็จ' });
-
+        // อัปเดตข้อมูลลง Vercel Postgres
+        await pgPool.query(
+            'UPDATE video_promotions SET title = $1, description = $2 WHERE id = $3',
+            [title, description, id]
+        );
+        res.json({ success: true, message: 'อัปเดตข้อมูลสำเร็จ' });
     } catch (error) {
-        console.error('Error updating ad:', error);
-        res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดฝั่งเซิร์ฟเวอร์: ' + error.message });
+        console.error("Update Ad Error:", error);
+        res.status(500).json({ success: false, message: 'อัปเดตข้อมูลไม่สำเร็จ' });
     }
 });
 
+// ==========================================
+// 🗑️ API สำหรับลบโฆษณา
+// ==========================================
+app.delete('/api/admin/ads/:id', async (req, res) => {
+    const { id } = req.params;
+    
+    try {
+        // ลบออกจากฐานข้อมูล Vercel Postgres (ข้อมูล Like, Comment, Share จะโดนลบตามอัตโนมัติเพราะเราตั้ง ON DELETE CASCADE ไว้ตอนสร้างตารางครับ)
+        await pgPool.query('DELETE FROM video_promotions WHERE id = $1', [id]);
+        res.json({ success: true, message: 'ลบข้อมูลสำเร็จ' });
+    } catch (error) {
+        console.error("Delete Ad Error:", error);
+        res.status(500).json({ success: false, message: 'ลบข้อมูลไม่สำเร็จ' });
+    }
+});
 
 // ==========================================
 // 🌟 [ADMIN] ADS และ โปรโมชั่น  สิ้นสุด
