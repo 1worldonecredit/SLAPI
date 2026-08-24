@@ -5000,34 +5000,48 @@ app.get('/api/hrm/applicants', async (req, res) => {
 });
 
 // ==========================================
-// 🧑‍💼 API: Admin อัปเดตสถานะใบสมัคร (ผ่าน/ไม่ผ่าน)
+// 🧑‍💼 API: Admin อัปเดตสถานะใบสมัคร (ผ่าน/ไม่ผ่าน) + ส่งแจ้งเตือนแก้ใหม่
 // ==========================================
 app.post('/api/hrm/applicants/update-status', async (req, res) => {
     const { emp_code, status, reply_message } = req.body;
     try {
         const pool = await sql.connect(dbConfig);
         
-        // 1. อัปเดตสถานะในตาราง Employees ('Approved' หรือ 'Rejected')
+        // 1. ดึง username ของผู้สมัครคนนี้ออกมาก่อน
+        const empRes = await pool.request()
+            .input('code', sql.VarChar, emp_code)
+            .query(`SELECT username FROM Employees WHERE emp_code = @code`);
+            
+        if (empRes.recordset.length === 0) {
+             return res.status(404).json({ success: false, message: 'ไม่พบข้อมูลผู้สมัคร' });
+        }
+        
+        const applicantUsername = empRes.recordset[0].username;
+
+        // 2. อัปเดตสถานะในตาราง Employees
         await pool.request()
             .input('status', sql.VarChar, status)
             .input('code', sql.VarChar, emp_code)
             .query(`UPDATE Employees SET status = @status WHERE emp_code = @code`);
             
-        // 2. บันทึกข้อความตอบกลับลงระบบ Notification 
-        // 🌟 แก้ไขตรงนี้ครับ: เปลี่ยนจาก u.id เป็น u.user_id
+        // 3. บันทึกข้อความตอบกลับลงระบบ Notification
+        // 🌟 ต้องเช็คโครงสร้างตาราง Notifications ของเจ้านายตรงนี้ครับ
+        // กรณีที่ 1: ถ้าตาราง Notifications ใช้คอลัมน์ 'username'
+        // กรณีที่ 2: ถ้าตาราง Notifications ใช้คอลัมน์ 'user_id' (ต้องไป SELECT ดึงค่ามา)
+        
+        // ** ผมเขียนโค้ดแบบ "ดึง user_id จากตาราง users" มาให้แบบชัวร์ๆ ครับ **
         const userRes = await pool.request()
-            .input('emp_code', sql.VarChar, emp_code)
-            .query(`
-                SELECT u.user_id 
-                FROM Employees e 
-                JOIN users u ON e.username = u.username 
-                WHERE e.emp_code = @emp_code
-            `);
+            .input('uname', sql.VarChar, applicantUsername)
+            // 🚨 สมมติว่าตารางชื่อ users และคอลัมน์เก็บชื่อผู้ใช้ชื่อ username นะครับ 🚨
+            // ถ้าตารางเจ้านายชื่ออื่น เช่น Users (ตัวใหญ่) หรือคอลัมน์ชื่อ User_Name ต้องแก้ตรงนี้ครับ
+            .query(`SELECT id FROM users WHERE username = @uname`); 
 
         if (userRes.recordset.length > 0) {
-            const userId = userRes.recordset[0].user_id;
+            // สมมติคอลัมน์ ID ของตาราง users ชื่อ 'id' (ถ้าชื่อ user_id เจ้านายแก้ตรงนี้เป็น .user_id นะครับ)
+            const userId = userRes.recordset[0].id; 
             const notifTitle = status === 'Approved' ? '🎉 ยินดีด้วย! ใบสมัครผ่านการคัดเลือก' : 'แจ้งผลการสมัครงาน';
             
+            // 🚨 สมมติคอลัมน์ในตาราง Notifications ชื่อ user_id 🚨
             await pool.request()
                 .input('user_id', sql.Int, userId)
                 .input('title', sql.NVarChar, notifTitle)
@@ -5036,6 +5050,10 @@ app.post('/api/hrm/applicants/update-status', async (req, res) => {
                     INSERT INTO Notifications (user_id, title, message, is_read, created_at) 
                     VALUES (@user_id, @title, @message, 0, GETDATE())
                 `);
+        } else {
+             console.log("⚠️ หา User ID ไม่เจอสำหรับ Username:", applicantUsername);
+             // แจ้งบอกเจ้านายในหน้า Admin ว่าสถานะอัปเดตผ่าน แต่ส่งแจ้งเตือนไม่สำเร็จเพราะหา User ไม่เจอ
+             return res.json({ success: true, warning: 'อัปเดตสถานะสำเร็จ แต่ไม่สามารถส่งแจ้งเตือนได้ (ไม่พบ User ในระบบหลัก)' });
         }
 
         res.json({ success: true });
@@ -5044,7 +5062,6 @@ app.post('/api/hrm/applicants/update-status', async (req, res) => {
         res.status(500).json({ success: false, message: 'SQL Error: ' + err.message });
     }
 });
-
 // ==========================================
 // 📣 API: ดึงข้อมูลโฆษณา (ให้หน้า PreLogin หรือ JobApplication เรียกใช้)
 // ==========================================
