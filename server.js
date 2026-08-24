@@ -5013,12 +5013,12 @@ app.post('/api/hrm/applicants/update-status', async (req, res) => {
             .input('code', sql.VarChar, emp_code)
             .query(`UPDATE Employees SET status = @status WHERE emp_code = @code`);
             
-        // 2. บันทึกข้อความตอบกลับลงระบบ Notification ให้ลูกค้าเห็น (สมมติว่าใช้ตาราง Notifications เดิม)
-        // ต้องหา user_id จาก username ก่อน
+        // 2. บันทึกข้อความตอบกลับลงระบบ Notification 
+        // 🌟 แก้ไขตรงนี้ครับ: เปลี่ยนจาก u.id เป็น u.user_id
         const userRes = await pool.request()
             .input('emp_code', sql.VarChar, emp_code)
             .query(`
-                SELECT u.id as user_id 
+                SELECT u.user_id 
                 FROM Employees e 
                 JOIN users u ON e.username = u.username 
                 WHERE e.emp_code = @emp_code
