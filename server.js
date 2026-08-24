@@ -5000,7 +5000,7 @@ app.get('/api/hrm/applicants', async (req, res) => {
 });
 
 // ==========================================
-// 🧑‍💼 API: Admin อัปเดตสถานะใบสมัคร (ผ่าน/ไม่ผ่าน) + ส่งแจ้งเตือนแก้ใหม่
+// 🧑‍💼 API: Admin อัปเดตสถานะใบสมัคร (ผ่าน/ไม่ผ่าน) + ส่งแจ้งเตือน (แก้บั๊ก id)
 // ==========================================
 app.post('/api/hrm/applicants/update-status', async (req, res) => {
     const { emp_code, status, reply_message } = req.body;
@@ -5025,23 +5025,16 @@ app.post('/api/hrm/applicants/update-status', async (req, res) => {
             .query(`UPDATE Employees SET status = @status WHERE emp_code = @code`);
             
         // 3. บันทึกข้อความตอบกลับลงระบบ Notification
-        // 🌟 ต้องเช็คโครงสร้างตาราง Notifications ของเจ้านายตรงนี้ครับ
-        // กรณีที่ 1: ถ้าตาราง Notifications ใช้คอลัมน์ 'username'
-        // กรณีที่ 2: ถ้าตาราง Notifications ใช้คอลัมน์ 'user_id' (ต้องไป SELECT ดึงค่ามา)
-        
-        // ** ผมเขียนโค้ดแบบ "ดึง user_id จากตาราง users" มาให้แบบชัวร์ๆ ครับ **
+        // 🌟 แก้ไขเป็น SELECT * เพื่อป้องกัน Error Invalid Column Name 'id'
         const userRes = await pool.request()
             .input('uname', sql.VarChar, applicantUsername)
-            // 🚨 สมมติว่าตารางชื่อ users และคอลัมน์เก็บชื่อผู้ใช้ชื่อ username นะครับ 🚨
-            // ถ้าตารางเจ้านายชื่ออื่น เช่น Users (ตัวใหญ่) หรือคอลัมน์ชื่อ User_Name ต้องแก้ตรงนี้ครับ
-            .query(`SELECT id FROM users WHERE username = @uname`); 
+            .query(`SELECT * FROM users WHERE username = @uname`); 
 
         if (userRes.recordset.length > 0) {
-            // สมมติคอลัมน์ ID ของตาราง users ชื่อ 'id' (ถ้าชื่อ user_id เจ้านายแก้ตรงนี้เป็น .user_id นะครับ)
-            const userId = userRes.recordset[0].id; 
+            // 🌟 ดึงค่า user_id จาก recordset
+            const userId = userRes.recordset[0].user_id; 
             const notifTitle = status === 'Approved' ? '🎉 ยินดีด้วย! ใบสมัครผ่านการคัดเลือก' : 'แจ้งผลการสมัครงาน';
             
-            // 🚨 สมมติคอลัมน์ในตาราง Notifications ชื่อ user_id 🚨
             await pool.request()
                 .input('user_id', sql.Int, userId)
                 .input('title', sql.NVarChar, notifTitle)
@@ -5051,9 +5044,7 @@ app.post('/api/hrm/applicants/update-status', async (req, res) => {
                     VALUES (@user_id, @title, @message, 0, GETDATE())
                 `);
         } else {
-             console.log("⚠️ หา User ID ไม่เจอสำหรับ Username:", applicantUsername);
-             // แจ้งบอกเจ้านายในหน้า Admin ว่าสถานะอัปเดตผ่าน แต่ส่งแจ้งเตือนไม่สำเร็จเพราะหา User ไม่เจอ
-             return res.json({ success: true, warning: 'อัปเดตสถานะสำเร็จ แต่ไม่สามารถส่งแจ้งเตือนได้ (ไม่พบ User ในระบบหลัก)' });
+             console.log("⚠️ หา User ไม่เจอสำหรับ Username:", applicantUsername);
         }
 
         res.json({ success: true });
