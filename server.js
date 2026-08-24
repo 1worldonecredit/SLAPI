@@ -8124,8 +8124,8 @@ app.post('/api/notifications/delete', async (req, res) => {
 // 🎥 API สำหรับ Cloudflare Stream
 // ==========================================
 // 🚨 เอาค่าที่ก๊อปปี้มาใส่ตรงนี้นะครับ (ในระบบจริง แนะนำให้เอาไปซ่อนในไฟล์ .env)
-const CF_ACCOUNT_ID = 'ใส่ Account ID ตรงนี้'; 
-const CF_API_TOKEN = 'ใส่ API Token ตรงนี้';
+const CF_ACCOUNT_ID = process.env.CF_ACCOUNT_ID; 
+const CF_API_TOKEN = process.env.CF_API_TOKEN;
 
 app.post('/api/get-upload-url', async (req, res) => {
     try {
