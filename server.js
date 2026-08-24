@@ -61,6 +61,31 @@ app.use(cors({
   credentials: true // อนุญาตให้ส่ง Cookie หรือ Header ยืนยันตัวตนได้ภ
 }));
 
+// ==========================================
+// 🗄️ การเชื่อมต่อ PostgreSQL (Vercel Aurora) สำหรับตาราง Video
+// ==========================================
+const { Pool } = require('pg'); // ดึงไลบรารีที่เพิ่งลงมาใช้
+
+// ตั้งค่าการเชื่อมต่อ โดยให้ดึงค่าจาก Railway Variables
+const pgPool = new Pool({
+  host: process.env.PGHOST,
+  database: process.env.PGDATABASE,
+  user: process.env.PGUSER,
+  password: process.env.PGPASSWORD,
+  port: process.env.PGPORT || 5432,
+  ssl: {
+    rejectUnauthorized: false // จำเป็นต้องใส่สำหรับ Vercel/AWS เพื่อให้เชื่อมต่อผ่าน HTTPS ได้
+  }
+});
+
+// ตรวจสอบว่าต่อติดไหมตอนสตาร์ทเซิร์ฟเวอร์
+pgPool.connect((err, client, release) => {
+  if (err) {
+    return console.error('❌ พลาดแล้วเจ้านาย! เชื่อมต่อ Vercel Postgres ไม่สำเร็จ:', err.stack);
+  }
+  console.log('✅ สุดยอด! เชื่อมต่อ Vercel Postgres สำเร็จพร้อมลุยตารางวิดีโอแล้วครับ!');
+  release();
+});
 
 // ตั้งค่าการเชื่อมต่อฐานข้อมูล
 const dbConfig = {
