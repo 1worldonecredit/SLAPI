@@ -8215,32 +8215,120 @@ app.post('/api/video-promotions', async (req, res) => {
 });
 
 // ==========================================
-// 📺 API สำหรับดึงข้อมูลวิดีโอโปรโมชั่นทั้งหมดไปแสดงหน้าเว็บ
+// 📺 API สำหรับดึงข้อมูลวิดีโอโปรโมชั่น (เวอร์ชันใหม่ มี Like, View)
 // ==========================================
 app.get('/api/video-promotions', async (req, res) => {
     try {
-        // สั่งดึงข้อมูลทั้งหมด เรียงจากใหม่ไปเก่า
-        const query = 'SELECT * FROM video_promotions ORDER BY created_at DESC;';
-        const result = await pgPool.query(query);
+        const { username } = req.query; // รับ username มาเช็คว่าเคย like หรือยัง
+        
+        // ดึงข้อมูลวิดีโอ พร้อมเช็คสถานะ Like ของ User คนนี้
+        let query;
+        let params = [];
+        
+        if (username) {
+             query = `
+                SELECT v.*, 
+                EXISTS(SELECT 1 FROM video_likes WHERE video_id = v.id AND username = $1) as is_liked
+                FROM video_promotions v 
+                ORDER BY created_at DESC;
+            `;
+            params = [username];
+        } else {
+             query = `SELECT *, false as is_liked FROM video_promotions ORDER BY created_at DESC;`;
+        }
 
-        // แปลง Video ID จาก Cloudflare ให้เป็นลิงก์วิดีโอที่เล่นได้จริง
+        const result = await pgPool.query(query, params);
+
         const formattedVideos = result.rows.map(video => {
             return {
                 ad_id: video.id,
                 title: video.title,
                 description: video.description,
-                media_type: 'video', // กำหนดให้เป็น video เสมอ
-                // 🌟 ใช้ Customer Subdomain ของเจ้านายตรงนี้ครับ
-                media_url: `https://customer-a6fkepv8oxw1um16.cloudflarestream.com/${video.cf_video_id}/manifest/video.m3u8` 
+                media_type: 'video', 
+                media_url: `https://customer-a6fkepv8oxw1um16.cloudflarestream.com/${video.cf_video_id}/manifest/video.m3u8`,
+                // 🌟 ข้อมูล Social
+                likes_count: video.likes_count,
+                views_count: video.views_count,
+                shares_count: video.shares_count,
+                comments_count: video.comments_count,
+                is_liked: video.is_liked // แจ้งหน้าบ้านว่าคนนี้เคยกดหรือยัง
             };
         });
 
         res.json({ success: true, ads: formattedVideos });
     } catch (error) {
-        console.error("❌ Get Video Promotions Error:", error);
+        console.error("❌ Get Video Error:", error);
         res.status(500).json({ success: false, message: 'ดึงข้อมูลวิดีโอไม่สำเร็จ' });
     }
 });
+
+
+// ==========================================
+// ❤️ API กด Like / Unlike วิดีโอ
+// ==========================================
+app.post('/api/video/like', async (req, res) => {
+    const { video_id, username } = req.body;
+    if (!video_id || !username) return res.status(400).json({ success: false });
+
+    try {
+        // เช็คก่อนว่าเคย Like หรือยัง
+        const checkRes = await pgPool.query('SELECT 1 FROM video_likes WHERE video_id = $1 AND username = $2', [video_id, username]);
+        
+        if (checkRes.rows.length > 0) {
+            // ถ้าเคย Like แล้ว = สั่ง Un-like (ลบออก)
+            await pgPool.query('DELETE FROM video_likes WHERE video_id = $1 AND username = $2', [video_id, username]);
+            await pgPool.query('UPDATE video_promotions SET likes_count = GREATEST(likes_count - 1, 0) WHERE id = $1', [video_id]);
+            res.json({ success: true, action: 'unliked' });
+        } else {
+            // ถ้ายังไม่เคย Like = สั่ง Like (เพิ่มเข้าไป)
+            await pgPool.query('INSERT INTO video_likes (video_id, username) VALUES ($1, $2)', [video_id, username]);
+            await pgPool.query('UPDATE video_promotions SET likes_count = likes_count + 1 WHERE id = $1', [video_id]);
+            res.json({ success: true, action: 'liked' });
+        }
+    } catch (error) {
+        console.error("Like Error:", error);
+        res.status(500).json({ success: false });
+    }
+});
+
+// ==========================================
+// 👁️ API นับยอด View
+// ==========================================
+app.post('/api/video/view', async (req, res) => {
+    const { video_id } = req.body;
+    if (!video_id) return res.status(400).json({ success: false });
+    try {
+        await pgPool.query('UPDATE video_promotions SET views_count = views_count + 1 WHERE id = $1', [video_id]);
+        res.json({ success: true });
+    } catch (error) {
+        res.status(500).json({ success: false });
+    }
+});
+
+
+// ==========================================
+// 🔄 API นับยอด Share และเก็บประวัติผู้ใช้
+// ==========================================
+app.post('/api/video/share', async (req, res) => {
+    const { video_id, username } = req.body;
+    if (!video_id) return res.status(400).json({ success: false });
+    
+    try {
+        // 1. บวกยอดแชร์รวม
+        await pgPool.query('UPDATE video_promotions SET shares_count = shares_count + 1 WHERE id = $1', [video_id]);
+        
+        // 2. ถ้ามีการล็อกอิน (มี username) ให้เก็บลงตารางประวัติ
+        if (username) {
+            await pgPool.query('INSERT INTO video_shares (video_id, username) VALUES ($1, $2)', [video_id, username]);
+        }
+        
+        res.json({ success: true });
+    } catch (error) {
+        console.error("Share Error:", error);
+        res.status(500).json({ success: false });
+    }
+});
+
 app.listen(port, () => {
     console.log(`🚀 Server เปิดทำงานแล้วที่พอร์ต ${port}`);
 });
