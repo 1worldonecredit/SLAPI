@@ -8183,7 +8183,42 @@ app.post('/api/get-upload-url', async (req, res) => {
     }
 });
 
+// ==========================================
+// 💾 API สำหรับบันทึกข้อมูลโปรโมชั่นวิดีโอลง Vercel Postgres
+// ==========================================
+app.post('/api/video-promotions', async (req, res) => {
+    // รับค่าที่หน้าบ้าน (React) ส่งมาให้
+    const { title, description, cf_video_id } = req.body;
 
+    // เช็คว่าส่งข้อมูลสำคัญมาครบไหม
+    if (!title || !cf_video_id) {
+        return res.status(400).json({ success: false, message: 'กรุณากรอกหัวข้อและอัปโหลดวิดีโอด้วยครับ' });
+    }
+
+    try {
+        // คำสั่ง SQL สำหรับเพิ่มข้อมูล (ใช้ $1, $2, $3 แทนค่าตัวแปรเพื่อความปลอดภัย)
+        const query = `
+            INSERT INTO video_promotions (title, description, cf_video_id)
+            VALUES ($1, $2, $3)
+            RETURNING *;
+        `;
+        const values = [title, description, cf_video_id];
+        
+        // สั่งรันลง Vercel Postgres
+        const result = await pgPool.query(query, values);
+        
+        // ส่งผลลัพธ์กลับไปบอกหน้าบ้านว่าสำเร็จ!
+        res.json({ 
+            success: true, 
+            message: 'บันทึกโปรโมชั่นสำเร็จ!', 
+            data: result.rows[0] 
+        });
+        
+    } catch (error) {
+        console.error("Database Insert Error:", error);
+        res.status(500).json({ success: false, message: 'บันทึกลงฐานข้อมูลไม่สำเร็จ' });
+    }
+});
 app.listen(port, () => {
     console.log(`🚀 Server เปิดทำงานแล้วที่พอร์ต ${port}`);
 });
