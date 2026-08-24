@@ -61,9 +61,22 @@ app.use(cors({
   credentials: true // อนุญาตให้ส่ง Cookie หรือ Header ยืนยันตัวตนได้ภ
 }));
 
-// ตั้งค่าการเชื่อมต่อ โดยให้ดึงค่าจาก Railway Variables
+// ==========================================
+// 🗄️ การเชื่อมต่อ PostgreSQL (Vercel Neon) สำหรับตาราง Video
+// ==========================================
+const { Pool } = require('pg'); // 🌟 บรรทัดนี้แหละครับที่หายไป! ต้องเรียกใช้ก่อน
+
 const pgPool = new Pool({
   connectionString: process.env.DATABASE_URL, 
+});
+
+// ตรวจสอบว่าต่อติดไหม
+pgPool.connect((err, client, release) => {
+  if (err) {
+    return console.error('❌ เชื่อมต่อ Vercel Postgres ไม่สำเร็จ:', err.stack);
+  }
+  console.log('✅ เชื่อมต่อ Vercel Postgres สำเร็จพร้อมลุยตารางวิดีโอแล้วครับ!');
+  if(release) release();
 });
 
 // ตั้งค่าการเชื่อมต่อฐานข้อมูล
