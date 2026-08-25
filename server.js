@@ -8164,30 +8164,27 @@ app.post('/api/get-upload-url', async (req, res) => {
 });
 
 // ==========================================
-// 💾 API สำหรับบันทึกข้อมูลโปรโมชั่นวิดีโอลง Vercel Postgres
+// 💾 API สำหรับบันทึกข้อมูลโปรโมชั่นวิดีโอลง Vercel Postgres (อัปเดตเพิ่มรูปปก)
 // ==========================================
 app.post('/api/video-promotions', async (req, res) => {
-    // รับค่าที่หน้าบ้าน (React) ส่งมาให้
-    const { title, description, cf_video_id } = req.body;
+    // 🌟 รับค่า thumbnail_url ที่หน้าบ้านส่งมาเพิ่ม
+    const { title, description, cf_video_id, thumbnail_url } = req.body;
 
-    // เช็คว่าส่งข้อมูลสำคัญมาครบไหม
     if (!title || !cf_video_id) {
         return res.status(400).json({ success: false, message: 'กรุณากรอกหัวข้อและอัปโหลดวิดีโอด้วยครับ' });
     }
 
     try {
-        // คำสั่ง SQL สำหรับเพิ่มข้อมูล (ใช้ $1, $2, $3 แทนค่าตัวแปรเพื่อความปลอดภัย)
+        // 🌟 แก้ไขคำสั่ง SQL ให้เพิ่มช่อง thumbnail_url (เป็น $4)
         const query = `
-            INSERT INTO video_promotions (title, description, cf_video_id)
-            VALUES ($1, $2, $3)
+            INSERT INTO video_promotions (title, description, cf_video_id, thumbnail_url)
+            VALUES ($1, $2, $3, $4)
             RETURNING *;
         `;
-        const values = [title, description, cf_video_id];
+        const values = [title, description, cf_video_id, thumbnail_url];
         
-        // สั่งรันลง Vercel Postgres
         const result = await pgPool.query(query, values);
         
-        // ส่งผลลัพธ์กลับไปบอกหน้าบ้านว่าสำเร็จ!
         res.json({ 
             success: true, 
             message: 'บันทึกโปรโมชั่นสำเร็จ!', 
@@ -8200,14 +8197,14 @@ app.post('/api/video-promotions', async (req, res) => {
     }
 });
 
+
 // ==========================================
-// 📺 API สำหรับดึงข้อมูลวิดีโอโปรโมชั่น (เวอร์ชันใหม่ มี Like, View)
+// 📺 API สำหรับดึงข้อมูลวิดีโอโปรโมชั่น (อัปเดตเพิ่มดึงรูปปก)
 // ==========================================
 app.get('/api/video-promotions', async (req, res) => {
     try {
-        const { username } = req.query; // รับ username มาเช็คว่าเคย like หรือยัง
+        const { username } = req.query; 
         
-        // ดึงข้อมูลวิดีโอ พร้อมเช็คสถานะ Like ของ User คนนี้
         let query;
         let params = [];
         
@@ -8232,12 +8229,14 @@ app.get('/api/video-promotions', async (req, res) => {
                 description: video.description,
                 media_type: 'video', 
                 media_url: `https://customer-a6fkepv8oxw1um16.cloudflarestream.com/${video.cf_video_id}/manifest/video.m3u8`,
-                // 🌟 ข้อมูล Social
+                // 🌟 ดึงข้อมูล thumbnail_url ส่งกลับไปให้หน้าบ้านด้วย
+                thumbnail_url: video.thumbnail_url,
+                
                 likes_count: video.likes_count,
                 views_count: video.views_count,
                 shares_count: video.shares_count,
                 comments_count: video.comments_count,
-                is_liked: video.is_liked // แจ้งหน้าบ้านว่าคนนี้เคยกดหรือยัง
+                is_liked: video.is_liked 
             };
         });
 
