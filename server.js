@@ -7600,17 +7600,18 @@ app.post('/api/admin/ads', async (req, res) => {
     }
 });
 // ==========================================
-// ✏️ API สำหรับแก้ไขข้อมูลโฆษณา (อัปเดต Title, Description)
+// ✏️ API สำหรับแก้ไขโฆษณา (อัปเดตข้อความ + รูปปก)
 // ==========================================
 app.put('/api/admin/ads/:id', async (req, res) => {
     const { id } = req.params;
-    const { title, description } = req.body;
+    // 🌟 รับค่าที่แก้ไขมาจากหน้าบ้าน
+    const { title, description, thumbnail_url } = req.body; 
     
     try {
-        // อัปเดตข้อมูลลง Vercel Postgres
         await pgPool.query(
-            'UPDATE video_promotions SET title = $1, description = $2 WHERE id = $3',
-            [title, description, id]
+            // 🌟 สั่งอัปเดต 3 ฟิลด์
+            'UPDATE video_promotions SET title = $1, description = $2, thumbnail_url = $3 WHERE id = $4',
+            [title, description, thumbnail_url, id]
         );
         res.json({ success: true, message: 'อัปเดตข้อมูลสำเร็จ' });
     } catch (error) {
