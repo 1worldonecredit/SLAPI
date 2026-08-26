@@ -1148,7 +1148,7 @@ app.put('/api/user-banks/:id', async (req, res) => {
 });
 // ==========================================
 // 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
-// 🌟 1. API: ดึงข้อมูลสัตว์และตัวเลขทั้งหมด (GET)
+// 🌟 1. API: ดึงข้อมูลสัตว์และตัวเลขทั้งหมด (GET) - เพิ่มตัวแปลง Boolean ให้หน้าเว็บโชว์รูปได้
 // ==========================================
 app.get('/api/admin/animal-numbers', async (req, res) => {
     try {
@@ -1157,8 +1157,14 @@ app.get('/api/admin/animal-numbers', async (req, res) => {
             ORDER BY created_at DESC
         `);
         
+        // 🌟 แปลงชนิดตัวแปรให้เหมือน MSSQL เป๊ะๆ ก่อนส่งให้ React หน้าเว็บจะได้โชว์รูปได้
+        const formattedData = result.rows.map(row => ({
+            ...row,
+            is_active: row.is_active === '1' || row.is_active === true || row.is_active === 1
+        }));
+        
         // ส่งข้อมูล Array กลับไปให้หน้าเว็บ
-        res.status(200).json(result.rows);
+        res.status(200).json(formattedData);
 
     } catch (error) {
         console.error('Error fetching animal numbers:', error);
@@ -1213,7 +1219,7 @@ app.post('/api/admin/animal-numbers', async (req, res) => {
 
         res.status(201).json({ success: true, message: 'บันทึกข้อมูลสัตว์และตัวเลขสำเร็จ' });
     } catch (error) {
-        console.error('SQL Server Error Details:', error);
+        console.error('PostgreSQL Error Details:', error);
         res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการ INSERT Database', error: error.message });
     }
 });
@@ -1270,11 +1276,10 @@ app.put('/api/admin/animal-numbers/:id', async (req, res) => {
 
         res.status(200).json({ success: true, message: 'แก้ไขข้อมูลสำเร็จ' });
     } catch (error) {
-        console.error('SQL Server Error Details:', error);
+        console.error('PostgreSQL Error Details:', error);
         res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการ UPDATE Database', error: error.message });
     }
 });
-
 // ==========================================
 // 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🌟 API: สำหรับการซื้อหวย (ตัดเงิน/คำนวณวัน/จ่ายค่าคอม/แสตมป์ชื่อลูกทีม)
