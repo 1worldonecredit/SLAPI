@@ -1291,8 +1291,8 @@ app.post('/api/lottery/buy', async (req, res) => {
     // ==========================================
     // 🌟 0. แทรกระบบเช็คสถานะการขาย
     // ==========================================
-    const statusRes = await pgPool.query("SELECT is_sales_open FROM System_Settings WHERE id = 1");
-    if (!statusRes.rows[0].is_sales_open || statusRes.rows[0].is_sales_open === '0') {
+    const statusRes = await pgPool.query("SELECT is_sales_open FROM System_Settings LIMIT 1");
+    if (!statusRes.rows[0].is_sales_open || statusRes.rows[0].is_sales_open === '0' || statusRes.rows[0].is_sales_open === false) {
         return res.status(400).json({ success: false, message: 'ระบบปิดรับซื้อแล้วในขณะนี้ กรุณารอรอบถัดไป' });
     }
 
@@ -1324,20 +1324,18 @@ app.post('/api/lottery/buy', async (req, res) => {
             throw new Error('ยอดเงินในกระเป๋าไม่เพียงพอ');
         }
 
-        await client.query(`
-            UPDATE Users SET wallet_balance = COALESCE(wallet_balance, 0) - $1 WHERE user_id = $2;
-            UPDATE Wallets SET balance = balance - $1 WHERE user_id = $2;
-        `, [deductAmount, user_id]);
+        // 🌟 แก้ไข: หั่นคำสั่ง UPDATE ออกเป็น 2 บรรทัด (Postgres ไม่อนุญาตให้ยิงคำสั่งซ้อนกันใน Query ที่มี Parameter)
+        await client.query(`UPDATE Users SET wallet_balance = COALESCE(wallet_balance, 0) - $1 WHERE user_id = $2`, [deductAmount, user_id]);
+        await client.query(`UPDATE Wallets SET balance = balance - $1 WHERE user_id = $2`, [deductAmount, user_id]);
 
         // 5. บันทึกประวัติ
         await client.query(`
             INSERT INTO Transactions (user_id, transaction_type, title, amount, status, created_at)
-            VALUES ($1, 'Buy Lottery', 'ซื้อหวยเวียดนาม', $2, 'Completed', CURRENT_TIMESTAMP)
+            VALUES ($1, 'Buy Lottery', 'ซื้อหวยเวียดนาม', $2, 'Completed', CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Bangkok')
         `, [user_id, -deductAmount]);
 
         // ==========================================
         // 🌟 แทรกระบบคำนวณ งวดวันที่ (draw_date) เข้าไปในบิล
-        // (ประยุกต์ใช้เวลาของ Postgres แทน DECLARE แบบเดิม)
         // ==========================================
         const orderRes = await client.query(`
             INSERT INTO Lottery_Orders (user_id, total_amount, currency_code, status, draw_date, created_at, order_note)
@@ -1381,7 +1379,7 @@ app.post('/api/lottery/buy', async (req, res) => {
             const buyerCurrency = referrerRes.rows[0].buyer_currency;
             const referrerCurrency = referrerRes.rows[0].referrer_currency;
             
-            const settingRes = await client.query("SELECT purchase_percent FROM Commission_Settings WHERE id = 1");
+            const settingRes = await client.query("SELECT purchase_percent FROM Commission_Settings LIMIT 1");
             const purchasePercent = settingRes.rows.length > 0 ? settingRes.rows[0].purchase_percent : 2.00; 
             
             // คำนวณค่าคอมตั้งต้น (ตามสกุลเงินที่ใช้ซื้อ)
@@ -1408,12 +1406,13 @@ app.post('/api/lottery/buy', async (req, res) => {
 
             const transTitle = `รายได้ ${purchasePercent}% จากทีมงาน (${buyerUsername})`;
             
+            // 🌟 แก้ไข: หั่นคำสั่งออกทีละบรรทัดเช่นกัน
+            await client.query(`UPDATE Wallets SET balance = balance + $1 WHERE user_id = $2`, [finalCommission, referrerId]);
+            await client.query(`UPDATE Users SET total_purchase_comm = COALESCE(total_purchase_comm, 0) + $1 WHERE user_id = $2`, [finalCommission, referrerId]);
             await client.query(`
-                UPDATE Wallets SET balance = balance + $1 WHERE user_id = $2;
-                UPDATE Users SET total_purchase_comm = COALESCE(total_purchase_comm, 0) + $1 WHERE user_id = $2;
                 INSERT INTO Transactions (user_id, transaction_type, title, amount, status, created_at)
-                VALUES ($2, 'Affiliate Purchase', $3, $1, 'Completed', CURRENT_TIMESTAMP);
-            `, [finalCommission, referrerId, transTitle]);
+                VALUES ($1, 'Affiliate Purchase', $2, $3, 'Completed', CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Bangkok')
+            `, [referrerId, transTitle, finalCommission]);
         }
 
         await client.query('COMMIT');
@@ -1426,7 +1425,6 @@ app.post('/api/lottery/buy', async (req, res) => {
         client.release();
     }
 });
-
 
 // ==========================================
 // 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว (ลบตัวซ้ำออกแล้ว)
