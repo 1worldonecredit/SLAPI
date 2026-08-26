@@ -3521,7 +3521,7 @@ app.post('/api/admin/suggest-draw', async (req, res) => {
 
 // 🌟 นำตัวแปรนี้ไปวางไว้บนสุดของไฟล์ server.js (หรือวางไว้เหนือ setInterval) 
 // เพื่อให้หุ่นยนต์จำว่าวันนี้ออกผลไปแล้วหรือยัง
-let lastAutoDrawDate = '';
+lastAutoDrawDate = '';
 
 // ==========================================
 // 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
