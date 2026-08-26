@@ -1484,14 +1484,24 @@ app.get('/api/lottery/history/:userId', async (req, res) => {
 // ==========================================
 app.get('/api/transactions/:userId', async (req, res) => {
     try {
+        // 🌟 ท่าไม้ตาย: สั่งให้ PostgreSQL จัด Format เวลา และกำกับโซนเวลา +07:00 มาให้เลย
         const result = await pgPool.query(`
-                SELECT * FROM Transactions 
+                SELECT 
+                    *,
+                    TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24:MI:SS+07:00') AS exact_bangkok_time
+                FROM Transactions 
                 WHERE user_id = $1 
                 ORDER BY created_at DESC
             `, [req.params.userId]
         );
+        
+        // 🌟 นำเวลาที่จัด Format แล้วไปทับของเดิม เพื่อบังคับให้ React โชว์เวลาตรงเป๊ะ!
+        const formattedData = result.rows.map(row => ({
+            ...row,
+            created_at: row.exact_bangkok_time
+        }));
             
-        res.status(200).json({ success: true, data: result.rows });
+        res.status(200).json({ success: true, data: formattedData });
     } catch (error) {
         console.error('Error fetching transactions history:', error);
         res.status(500).json({ success: false, message: 'ไม่สามารถดึงข้อมูลประวัติการเงินได้' });
