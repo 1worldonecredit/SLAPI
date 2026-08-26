@@ -1,18 +1,29 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
-const sql = require('mssql');
+// 🌟 เปลี่ยนจาก mssql เป็น pg
+const { Pool } = require('pg'); 
 const cron = require('node-cron');
 
-
 const app = express();
+
+// 🌟 สร้าง Connection Pool สำหรับ PostgreSQL
+// (ดึง URL จากไฟล์ .env เช่น DATABASE_URL=postgres://user:pass@host:port/dbname)
+const pgPool = new Pool({
+    connectionString: process.env.DATABASE_URL,
+    ssl: {
+        rejectUnauthorized: false // 🌟 จำเป็นสำหรับ Vercel หรือ Railway Postgres
+    }
+});
 
 // ขยายขีดจำกัดให้รองรับรูปภาพสลิปที่แปลงเป็น Base64 (ตั้งไว้ที่ 50MB)
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 const port = process.env.PORT || 5000;
+
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🛡️ Middleware: สกัดกั้น IP ที่ถูกบล็อกไม่ให้ใช้ API ได้
 // ==========================================
 app.use(async (req, res, next) => {
@@ -20,12 +31,12 @@ app.use(async (req, res, next) => {
     const clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
     
     try {
-        const pool = await sql.connect(dbConfig);
-        const blockCheck = await pool.request()
-            .input('ip', sql.VarChar, clientIp)
-            .query(`SELECT is_blocked FROM Blocked_IPs WHERE ip_address = @ip AND is_blocked = 1`);
+        // 🌟 เปลี่ยนการใช้ mssql pool เป็น pgPool.query
+        const blockCheck = await pgPool.query(`
+            SELECT is_blocked FROM Blocked_IPs WHERE ip_address = $1 AND is_blocked = '1'
+        `, [clientIp]);
             
-        if (blockCheck.recordset.length > 0) {
+        if (blockCheck.rows.length > 0) {
             return res.status(403).json({ 
                 success: false, 
                 message: 'Access Denied: Your IP address has been blocked due to suspicious activity.' 
@@ -36,6 +47,7 @@ app.use(async (req, res, next) => {
         next();
     }
 });
+
 // อนุญาตให้หน้าเว็บจากโดเมนของคุณเรียกใช้ API ได้
 // กำหนด URL ที่อนุญาตให้เข้าถึง API ได้ (ลบช่องว่างส่วนเกินออก และปรับเป็นตัวเล็กเพื่อความชัวร์)
 const allowedOrigins = [
@@ -58,9 +70,8 @@ app.use(cors({
     }
     return callback(null, true);
   },
-  credentials: true // อนุญาตให้ส่ง Cookie หรือ Header ยืนยันตัวตนได้ภ
+  credentials: true // อนุญาตให้ส่ง Cookie หรือ Header ยืนยันตัวตนได้
 }));
-
 // ==========================================
 // 🗄️ การเชื่อมต่อ PostgreSQL (Vercel Neon) สำหรับตาราง Video
 // ==========================================
@@ -79,21 +90,24 @@ pgPool.connect((err, client, release) => {
   if(release) release();
 });
 
-// ตั้งค่าการเชื่อมต่อฐานข้อมูล
-const dbConfig = {
-    user: process.env.DB_USER,
-    password: process.env.DB_PASSWORD,
-    server: process.env.DB_SERVER, 
-    database: process.env.DB_DATABASE,
-    options: {
-        encrypt: false, // somee.com มักจะไม่บังคับใช้ encrypt
-        trustServerCertificate: true 
-    }
-};
+// // ตั้งค่าการเชื่อมต่อฐานข้อมูล
+// const dbConfig = {
+//     user: process.env.DB_USER,
+//     password: process.env.DB_PASSWORD,
+//     server: process.env.DB_SERVER, 
+//     database: process.env.DB_DATABASE,
+//     options: {
+//         encrypt: false, // somee.com มักจะไม่บังคับใช้ encrypt
+//         trustServerCertificate: true 
+//     }
+// };
+// ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
+// ==========================================
 
 // ทดสอบเชื่อมต่อฐานข้อมูล
-sql.connect(dbConfig).then(() => {
-    console.log("✅ เชื่อมต่อฐานข้อมูลสำเร็จ!");
+pgPool.query('SELECT NOW()').then(() => {
+    console.log("✅ เชื่อมต่อฐานข้อมูล Vercel Postgres สำเร็จ!");
 }).catch(err => {
     console.log("❌ ไม่สามารถเชื่อมต่อฐานข้อมูลได้:", err);
 });
@@ -112,29 +126,27 @@ app.get('/api/status', (req, res) => {
 // ==========================================
 cron.schedule('* * * * *', async () => {
     try {
-        const pool = await sql.connect(dbConfig);
-        
-        const res = await pool.request().query(`
+        const res = await pgPool.query(`
             SELECT 
-                CONVERT(varchar(5), close_time, 108) as close_time,
-                CONVERT(varchar(5), open_time, 108) as open_time,
-                CONVERT(varchar(5), draw_time, 108) as draw_time,
+                to_char(close_time, 'HH24:MI') as close_time,
+                to_char(open_time, 'HH24:MI') as open_time,
+                to_char(draw_time, 'HH24:MI') as draw_time,
                 is_auto_draw, auto_draw_percent
             FROM System_Settings WHERE id = 1
         `);
         
-        if (res.recordset.length > 0) {
-            const { close_time, open_time, draw_time, is_auto_draw, auto_draw_percent } = res.recordset[0];
+        if (res.rows.length > 0) {
+            const { close_time, open_time, draw_time, is_auto_draw, auto_draw_percent } = res.rows[0];
             
             const currentTime = new Date().toLocaleTimeString('en-US', { 
                 timeZone: 'Asia/Bangkok', hour12: false, hour: '2-digit', minute: '2-digit' 
             });
 
             if (currentTime === close_time) {
-                await pool.request().query("UPDATE System_Settings SET is_sales_open = 0 WHERE id = 1");
+                await pgPool.query("UPDATE System_Settings SET is_sales_open = 0 WHERE id = 1");
             }
             if (currentTime === open_time) {
-                await pool.request().query("UPDATE System_Settings SET is_sales_open = 1 WHERE id = 1");
+                await pgPool.query("UPDATE System_Settings SET is_sales_open = 1 WHERE id = 1");
             }
 
             // 🌟 เช็คเวลาออกรางวัล
@@ -144,31 +156,31 @@ cron.schedule('* * * * *', async () => {
                 const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Bangkok' });
                 
                 // เช็คว่าวันนี้หวยเวียดนามออกผลไปหรือยัง ป้องกันออโต้ทำงานซ้ำ
-                const checkDraw = await pool.request().query(`SELECT 1 FROM Draw_Results WHERE draw_date = '${today}'`);
-                if (checkDraw.recordset.length > 0) return; 
+                const checkDraw = await pgPool.query(`SELECT 1 FROM Draw_Results WHERE draw_date = $1`, [today]);
+                if (checkDraw.rows.length > 0) return; 
 
                 console.log(`🎰 [AUTO-VIETNAM] เริ่มสุ่มเลขเป้าหมายที่ ${auto_draw_percent}%...`);
 
-                const rateRes = await pool.request().query("SELECT rate FROM ExchangeRates WHERE currency_pair = 'THB_LAK'");
-                const exchangeRate = rateRes.recordset.length > 0 ? rateRes.recordset[0].rate : 620.0;
+                const rateRes = await pgPool.query("SELECT rate FROM ExchangeRates WHERE currency_pair = 'THB_LAK'");
+                const exchangeRate = rateRes.rows.length > 0 ? rateRes.rows[0].rate : 620.0;
                 
-                const salesRes = await pool.request().query(`SELECT ISNULL(SUM(CASE WHEN currency_code = 'LAK' THEN total_amount / ${exchangeRate} ELSE total_amount END), 0) as totalSalesTHB FROM Lottery_Orders WHERE status = N'รอผลตรวจ'`);
-                const maxPayoutTHB = (salesRes.recordset[0].totalSalesTHB || 0) * (auto_draw_percent / 100);
+                const salesRes = await pgPool.query(`SELECT COALESCE(SUM(CASE WHEN currency_code = 'LAK' THEN total_amount / $1 ELSE total_amount END), 0) as totalSalesTHB FROM Lottery_Orders WHERE status = 'รอผลตรวจ'`, [exchangeRate]);
+                const maxPayoutTHB = (salesRes.rows[0].totalsalesthb || 0) * (auto_draw_percent / 100);
 
-                const itemsRes = await pool.request().query(`
+                const itemsRes = await pgPool.query(`
                     SELECT CAST(i.lottery_type AS VARCHAR) as lottery_type, i.selected_number, 
-                    CASE WHEN o.currency_code = 'LAK' THEN i.price / ${exchangeRate} ELSE i.price END as price_thb, r.multiplier
+                    CASE WHEN o.currency_code = 'LAK' THEN i.price / $1 ELSE i.price END as price_thb, r.multiplier
                     FROM Lottery_Order_Items i JOIN Lottery_Orders o ON i.order_id = o.order_id
-                    LEFT JOIN Lottery_Prize_Rates r ON CAST(i.lottery_type AS INT) = CAST(r.lottery_type AS INT)
-                    WHERE o.status = N'รอผลตรวจ' AND i.status = N'รอผลตรวจ' 
-                `);
+                    LEFT JOIN Lottery_Prize_Rates r ON CAST(i.lottery_type AS VARCHAR) = CAST(r.lottery_type AS VARCHAR)
+                    WHERE o.status = 'รอผลตรวจ' AND i.status = 'รอผลตรวจ' 
+                `, [exchangeRate]);
                 
                 let bestNumber6 = null, bestPayout = -1;
                 for (let i = 0; i < 500; i++) {
                     const random6 = Math.floor(100000 + Math.random() * 900000).toString();
                     const n4 = random6.slice(-4), n3 = random6.slice(-3), n2 = random6.slice(-2);
                     let currentPayout = 0;
-                    for (const item of itemsRes.recordset) {
+                    for (const item of itemsRes.rows) {
                         let isWin = false;
                         if (item.lottery_type === '6' && item.selected_number === random6) isWin = true;
                         else if (item.lottery_type === '4' && item.selected_number === n4) isWin = true;
@@ -189,92 +201,96 @@ cron.schedule('* * * * *', async () => {
                 const num6 = bestNumber6;
                 const num4 = num6.slice(-4), num3 = num6.slice(-3), num2 = num6.slice(-2);
 
-                const transaction = new sql.Transaction(pool);
-                await transaction.begin();
+                // 🌟 เริ่มระบบ Transaction ของ PostgreSQL (pg)
+                const client = await pgPool.connect();
                 try {
+                    await client.query('BEGIN'); // เริ่ม Transaction
+
                     // 1. บันทึกตารางผลเวียดนาม
-                    await transaction.request()
-                        .input('dDate', sql.Date, today).input('p8', sql.VarChar, num8)
-                        .input('p6', sql.VarChar, num6).input('p4', sql.VarChar, num4)
-                        .input('p3', sql.VarChar, num3).input('p2', sql.VarChar, num2)
-                        .query(`
-                            INSERT INTO Draw_Results (draw_date, prize_8, prize_6, prize_4, prize_3, prize_2) 
-                            VALUES (@dDate, @p8, @p6, @p4, @p3, @p2);
-                        `);
+                    await client.query(`
+                        INSERT INTO Draw_Results (draw_date, prize_8, prize_6, prize_4, prize_3, prize_2) 
+                        VALUES ($1, $2, $3, $4, $5, $6);
+                    `, [today, num8, num6, num4, num3, num2]);
 
-                    const commReq = await transaction.request().query("SELECT TOP 1 win_percent FROM Commission_Settings");
-                    const commPercent = commReq.recordset.length > 0 ? commReq.recordset[0].win_percent : 0;
+                    const commReq = await client.query("SELECT win_percent FROM Commission_Settings LIMIT 1");
+                    const commPercent = commReq.rows.length > 0 ? commReq.rows[0].win_percent : 0;
 
-                    // 2. ตัดบิล
-                    await transaction.request().query(`
-                        UPDATE i SET 
+                    // 2. ตัดบิล (แก้ไขรูปแบบ UPDATE JOIN เป็นของ Postgres)
+                    await client.query(`
+                        UPDATE Lottery_Order_Items i SET 
                             status = CASE 
-                                WHEN (i.lottery_type = N'2 ล่าง' AND i.selected_number = '${num2}') OR
-                                     (i.lottery_type = '2' AND i.selected_number = '${num2}') OR
-                                     (i.lottery_type = '3' AND i.selected_number = '${num3}') OR
-                                     (i.lottery_type = '4' AND i.selected_number = '${num4}') OR
-                                     (i.lottery_type = '6' AND i.selected_number = '${num6}') OR
-                                     (i.lottery_type = '8' AND i.selected_number = '${num8}') THEN N'ถูกรางวัล'
-                                ELSE N'ไม่ถูกรางวัล'
+                                WHEN (i.lottery_type = '2 ล่าง' AND i.selected_number = $1) OR
+                                     (i.lottery_type = '2' AND i.selected_number = $1) OR
+                                     (i.lottery_type = '3' AND i.selected_number = $2) OR
+                                     (i.lottery_type = '4' AND i.selected_number = $3) OR
+                                     (i.lottery_type = '6' AND i.selected_number = $4) OR
+                                     (i.lottery_type = '8' AND i.selected_number = $5) THEN 'ถูกรางวัล'
+                                ELSE 'ไม่ถูกรางวัล'
                             END,
                             prize_amount = CASE
-                                WHEN (i.lottery_type = N'2 ล่าง' AND i.selected_number = '${num2}') OR
-                                     (i.lottery_type = '2' AND i.selected_number = '${num2}') OR
-                                     (i.lottery_type = '3' AND i.selected_number = '${num3}') OR
-                                     (i.lottery_type = '4' AND i.selected_number = '${num4}') OR
-                                     (i.lottery_type = '6' AND i.selected_number = '${num6}') OR
-                                     (i.lottery_type = '8' AND i.selected_number = '${num8}') 
-                                THEN i.price * ISNULL((SELECT TOP 1 multiplier FROM Lottery_Prize_Rates WHERE lottery_type = i.lottery_type), 0)
+                                WHEN (i.lottery_type = '2 ล่าง' AND i.selected_number = $1) OR
+                                     (i.lottery_type = '2' AND i.selected_number = $1) OR
+                                     (i.lottery_type = '3' AND i.selected_number = $2) OR
+                                     (i.lottery_type = '4' AND i.selected_number = $3) OR
+                                     (i.lottery_type = '6' AND i.selected_number = $4) OR
+                                     (i.lottery_type = '8' AND i.selected_number = $5) 
+                                THEN i.price * COALESCE((SELECT multiplier FROM Lottery_Prize_Rates WHERE CAST(lottery_type AS VARCHAR) = CAST(i.lottery_type AS VARCHAR) LIMIT 1), 0)
                                 ELSE 0
                             END
-                        FROM Lottery_Order_Items i JOIN Lottery_Orders o ON i.order_id = o.order_id
-                        WHERE o.status = N'รอผลตรวจ' AND i.status = N'รอผลตรวจ';
-                    `);
+                        FROM Lottery_Orders o
+                        WHERE i.order_id = o.order_id AND o.status = 'รอผลตรวจ' AND i.status = 'รอผลตรวจ';
+                    `, [num2, num3, num4, num6, num8]);
 
-                    // 3. จ่ายรางวัล
-                    await transaction.request().query(`
-                        UPDATE w SET balance = ISNULL(w.balance, 0) + t.TotalPrize
-                        FROM Wallets w JOIN (
+                    // 3. จ่ายรางวัล (แก้ไขรูปแบบ UPDATE JOIN)
+                    await client.query(`
+                        UPDATE Wallets w SET balance = COALESCE(w.balance, 0) + t.TotalPrize
+                        FROM (
                             SELECT o.user_id, SUM(i.prize_amount) as TotalPrize
                             FROM Lottery_Order_Items i JOIN Lottery_Orders o ON i.order_id = o.order_id 
-                            WHERE i.status = N'ถูกรางวัล' AND o.status = N'รอผลตรวจ' GROUP BY o.user_id
-                        ) t ON w.user_id = t.user_id;
+                            WHERE i.status = 'ถูกรางวัล' AND o.status = 'รอผลตรวจ' GROUP BY o.user_id
+                        ) t WHERE w.user_id = t.user_id;
+                    `);
 
+                    await client.query(`
                         INSERT INTO Transactions (user_id, transaction_type, title, amount, status, created_at)
-                        SELECT o.user_id, 'Reward', N'ถูกรางวัลหวยเวียดนาม', SUM(i.prize_amount), 'Completed', GETDATE()
+                        SELECT o.user_id, 'Reward', 'ถูกรางวัลหวยเวียดนาม', SUM(i.prize_amount), 'Completed', CURRENT_TIMESTAMP
                         FROM Lottery_Order_Items i JOIN Lottery_Orders o ON i.order_id = o.order_id 
-                        WHERE i.status = N'ถูกรางวัล' AND o.status = N'รอผลตรวจ' GROUP BY o.user_id;
+                        WHERE i.status = 'ถูกรางวัล' AND o.status = 'รอผลตรวจ' GROUP BY o.user_id;
                     `);
 
                     // 4. จ่ายค่าคอม
                     if (commPercent > 0) {
-                        await transaction.request().query(`
-                            UPDATE w SET w.balance = ISNULL(w.balance, 0) + t.CommAmount
-                            FROM Wallets w JOIN (
-                                SELECT d.referrer_username, SUM(i.prize_amount) * (${commPercent} / 100.0) as CommAmount
+                        await client.query(`
+                            UPDATE Wallets w SET balance = COALESCE(w.balance, 0) + t.CommAmount
+                            FROM (
+                                SELECT d.referrer_username, SUM(i.prize_amount) * ($1 / 100.0) as CommAmount
                                 FROM Lottery_Order_Items i JOIN Lottery_Orders o ON i.order_id = o.order_id 
                                 JOIN Users d ON o.user_id = d.user_id
-                                WHERE i.status = N'ถูกรางวัล' AND o.status = N'รอผลตรวจ' AND d.referrer_username IS NOT NULL
+                                WHERE i.status = 'ถูกรางวัล' AND o.status = 'รอผลตรวจ' AND d.referrer_username IS NOT NULL
                                 GROUP BY d.referrer_username HAVING SUM(i.prize_amount) > 0
-                            ) t ON w.user_id = (SELECT user_id FROM Users WHERE username = t.referrer_username);
+                            ) t WHERE w.user_id = (SELECT user_id FROM Users WHERE username = t.referrer_username LIMIT 1);
+                        `, [commPercent]);
                             
+                        await client.query(`
                             INSERT INTO Transactions (user_id, transaction_type, title, amount, status, created_at)
-                            SELECT (SELECT user_id FROM Users WHERE username = d.referrer_username), 'Commission', N'ค่าคอมฯ ลูกทีมถูกรางวัล (' + d.username + ')', SUM(i.prize_amount) * (${commPercent} / 100.0), 'Completed', GETDATE()
+                            SELECT (SELECT user_id FROM Users WHERE username = d.referrer_username LIMIT 1), 'Commission', 'ค่าคอมฯ ลูกทีมถูกรางวัล (' || d.username || ')', SUM(i.prize_amount) * ($1 / 100.0), 'Completed', CURRENT_TIMESTAMP
                             FROM Lottery_Order_Items i JOIN Lottery_Orders o ON i.order_id = o.order_id 
                             JOIN Users d ON o.user_id = d.user_id
-                            WHERE i.status = N'ถูกรางวัล' AND o.status = N'รอผลตรวจ' AND d.referrer_username IS NOT NULL
+                            WHERE i.status = 'ถูกรางวัล' AND o.status = 'รอผลตรวจ' AND d.referrer_username IS NOT NULL
                             GROUP BY d.referrer_username, d.username HAVING SUM(i.prize_amount) > 0;
-                        `);
+                        `, [commPercent]);
                     }
 
                     // 5. ปิดบิลแม่
-                    await transaction.request().query(`UPDATE Lottery_Orders SET status = N'ตรวจผลแล้ว', draw_date = GETDATE() WHERE status = N'รอผลตรวจ';`);
+                    await client.query(`UPDATE Lottery_Orders SET status = 'ตรวจผลแล้ว', draw_date = CURRENT_TIMESTAMP WHERE status = 'รอผลตรวจ';`);
                     
-                    await transaction.commit();
+                    await client.query('COMMIT'); // สั่งยืนยัน Transaction
                     console.log(`✅ [AUTO-VIETNAM] ออกรางวัล บันทึกตาราง และจ่ายเงินสำเร็จเรียบร้อย!`);
                 } catch (innerErr) {
-                    await transaction.rollback();
+                    await client.query('ROLLBACK'); // ยกเลิก Transaction ถ้าพัง
                     console.error('❌ [AUTO-VIETNAM] DB Transaction Error:', innerErr);
+                } finally {
+                    client.release(); // คืน Connection ให้ Pool เสมอ!
                 }
             }
         }
@@ -284,27 +300,26 @@ cron.schedule('* * * * *', async () => {
 });
 
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🌟 API สำหรับระบบเมนูอัจฉริยะ (Dynamic Menu)
 // ==========================================
 // 1. ดึงข้อมูลเมนูทั้งหมด (GET) - ส่งไปให้ React วาดเมนูซ้ายมือ
 app.get('/api/menus', async (req, res) => {
     try {
-        // 🌟 แก้ไขเป็น dbConfig ให้ตรงกับหน้า Login
-        const pool = await sql.connect(dbConfig); 
-        const result = await pool.request().query(`
+        const result = await pgPool.query(`
             SELECT 
                 menu_id AS id, 
                 title, 
                 path, 
                 icon, 
                 component, 
-                parent_id AS parentId, 
-                show_notification AS showNotification
+                parent_id AS "parentId", 
+                show_notification AS "showNotification"
             FROM System_Menus
             ORDER BY parent_id, sort_order, menu_id
         `);
         
-        res.json(result.recordset);
+        res.json(result.rows);
     } catch (err) {
         console.error('Error fetching menus:', err);
         res.status(500).send('Server error');
@@ -316,24 +331,24 @@ app.post('/api/menus', async (req, res) => {
     const { title, path, icon, component, parentId, showNotification } = req.body;
     
     try {
-        // 🌟 แก้ไขเป็น dbConfig
-        const pool = await sql.connect(dbConfig); 
-        const result = await pool.request()
-            .input('title', sql.NVarChar, title)
-            .input('path', sql.VarChar, path || null)
-            .input('icon', sql.VarChar, icon || null)
-            .input('component', sql.VarChar, component || null)
-            .input('parent_id', sql.Int, parentId || null)
-            .input('show_notification', sql.Bit, showNotification === false ? 0 : 1)
-            .query(`
+        const result = await pgPool.query(`
                 INSERT INTO System_Menus (title, path, icon, component, parent_id, show_notification)
-                OUTPUT INSERTED.menu_id AS id
-                VALUES (@title, @path, @icon, @component, @parent_id, @show_notification)
-            `);
+                VALUES ($1, $2, $3, $4, $5, $6)
+                RETURNING menu_id AS id
+            `, 
+            [
+                title, 
+                path || null, 
+                icon || null, 
+                component || null, 
+                parentId || null, 
+                showNotification === false ? 0 : 1
+            ]
+        );
             
         res.status(201).json({ 
             message: 'บันทึกเมนูสำเร็จ', 
-            id: result.recordset[0].id 
+            id: result.rows[0].id 
         });
     } catch (err) {
         console.error('Error saving menu:', err);
@@ -347,22 +362,22 @@ app.put('/api/menus/:id', async (req, res) => {
     const { title, path, icon, component, parentId, showNotification } = req.body;
     
     try {
-        // 🌟 แก้ไขเป็น dbConfig
-        const pool = await sql.connect(dbConfig); 
-        await pool.request()
-            .input('id', sql.Int, id)
-            .input('title', sql.NVarChar, title)
-            .input('path', sql.VarChar, path || null)
-            .input('icon', sql.VarChar, icon || null)
-            .input('component', sql.VarChar, component || null)
-            .input('parent_id', sql.Int, parentId || null)
-            .input('show_notification', sql.Bit, showNotification === false ? 0 : 1)
-            .query(`
+        await pgPool.query(`
                 UPDATE System_Menus 
-                SET title = @title, path = @path, icon = @icon, component = @component, 
-                    parent_id = @parent_id, show_notification = @show_notification
-                WHERE menu_id = @id
-            `);
+                SET title = $1, path = $2, icon = $3, component = $4, 
+                    parent_id = $5, show_notification = $6
+                WHERE menu_id = $7
+            `, 
+            [
+                title, 
+                path || null, 
+                icon || null, 
+                component || null, 
+                parentId || null, 
+                showNotification === false ? 0 : 1,
+                id
+            ]
+        );
             
         res.json({ message: 'อัปเดตเมนูสำเร็จ' });
     } catch (err) {
@@ -374,20 +389,25 @@ app.put('/api/menus/:id', async (req, res) => {
 // 4. ลบเมนู (DELETE)
 app.delete('/api/menus/:id', async (req, res) => {
     const { id } = req.params;
+    
+    // 🌟 ใช้ Transaction สำหรับการลบข้อมูลที่เกี่ยวข้องกัน 2 ตาราง
+    const client = await pgPool.connect();
     try {
-        // 🌟 แก้ไขเป็น dbConfig
-        const pool = await sql.connect(dbConfig); 
-        await pool.request()
-            .input('id', sql.Int, id)
-            .query(`
-                DELETE FROM System_Menus WHERE parent_id = @id;
-                DELETE FROM System_Menus WHERE menu_id = @id;
-            `);
-            
+        await client.query('BEGIN');
+        
+        // ลบเมนูลูกก่อน
+        await client.query(`DELETE FROM System_Menus WHERE parent_id = $1`, [id]);
+        // ลบเมนูแม่
+        await client.query(`DELETE FROM System_Menus WHERE menu_id = $1`, [id]);
+        
+        await client.query('COMMIT');
         res.json({ message: 'ลบเมนูสำเร็จ' });
     } catch (err) {
+        await client.query('ROLLBACK');
         console.error('Error deleting menu:', err);
         res.status(500).send('Server error');
+    } finally {
+        client.release();
     }
 });
 
@@ -398,18 +418,15 @@ app.get('/api/check-referrer/:username', async (req, res) => {
   const username = req.params.username;
 
   try {
-    const pool = await sql.connect(dbConfig);
-    const result = await pool.request()
-      .input('username', sql.VarChar, username)
-      .query(`
+    const result = await pgPool.query(`
         SELECT u.username, un.firstname, un.lastname
         FROM Users u
         LEFT JOIN UserName_Lastname un ON u.user_id = un.user_id
-        WHERE u.username = @username
-      `);
+        WHERE u.username = $1
+      `, [username]);
 
-    if (result.recordset.length > 0) {
-      const user = result.recordset[0];
+    if (result.rows.length > 0) {
+      const user = result.rows[0];
       const fullName = `${user.firstname || ''} ${user.lastname || ''}`.trim() || 'ผู้ใช้ทั่วไป';
       res.json({ exists: true, fullName: fullName });
     } else {
@@ -428,12 +445,9 @@ app.get('/api/check-username/:username', async (req, res) => {
   const username = req.params.username;
   
   try {
-    const pool = await sql.connect(dbConfig);
-    const result = await pool.request()
-      .input('username', sql.VarChar, username)
-      .query('SELECT username FROM Users WHERE username = @username');
+    const result = await pgPool.query('SELECT username FROM Users WHERE username = $1', [username]);
 
-    if (result.recordset.length > 0) {
+    if (result.rows.length > 0) {
       res.json({ available: false }); // มีคนใช้แล้ว
     } else {
       res.json({ available: true });  // ว่าง ใช้ได้
@@ -451,14 +465,10 @@ app.post('/api/register', async (req, res) => {
   const { username, password, referrer, country } = req.body;
   
   try {
-    const pool = await sql.connect(dbConfig);
-    
     // 1. เช็กซ้ำอีกรอบเพื่อความชัวร์ว่าชื่อยังไม่มีคนใช้
-    const checkUser = await pool.request()
-      .input('username', sql.NVarChar, username) // 🌟 เปลี่ยนเป็น NVarChar
-      .query('SELECT username FROM Users WHERE username = @username');
+    const checkUser = await pgPool.query('SELECT username FROM Users WHERE username = $1', [username]);
       
-    if (checkUser.recordset.length > 0) {
+    if (checkUser.rows.length > 0) {
       return res.status(400).json({ success: false, message: 'ชื่อผู้ใช้นี้มีคนใช้แล้ว' });
     }
 
@@ -468,31 +478,20 @@ app.post('/api/register', async (req, res) => {
     const level_id = 1; // 1 คือลูกค้าระดับเริ่มต้น (ลูกค้าใหม่)
     
     // 3. บันทึกข้อมูลลงตาราง Users 
-    const insertResult = await pool.request()
-      .input('username', sql.NVarChar, username) // 🌟 เปลี่ยนเป็น NVarChar
-      .input('password', sql.NVarChar, password) 
-      .input('referrer', sql.NVarChar, referrer || null)
-      .input('country', sql.NVarChar, country)
-      .input('currency_code', sql.VarChar, currency_code)
-      .input('role_id', sql.Int, role_id)
-      .input('level_id', sql.Int, level_id)
-      .query(`
+    const insertResult = await pgPool.query(`
         INSERT INTO Users (username, password_hash, referrer_username, country, currency_code, role_id, level_id, is_active, created_at, wallet_balance, total_orders)
-        OUTPUT INSERTED.user_id
-        VALUES (@username, @password, @referrer, @country, @currency_code, @role_id, @level_id, 1, GETDATE(), 0, 0)
-      `);
+        VALUES ($1, $2, $3, $4, $5, $6, $7, 1, CURRENT_TIMESTAMP, 0, 0)
+        RETURNING user_id
+      `, [username, password, referrer || null, country, currency_code, role_id, level_id]
+    );
       
     // ดึง user_id ที่เพิ่งถูกสร้างขึ้นมา
-    const newUserId = insertResult.recordset[0].user_id;
+    const newUserId = insertResult.rows[0].user_id;
 
     // 4. สร้างกระเป๋าเงิน (Wallets) และข้อมูลชื่อพื้นฐานให้ User ใหม่ด้วย
-    await pool.request()
-      .input('user_id', sql.Int, newUserId)
-      .query(`
-        -- 🌟 ใส่ N นำหน้าคำภาษาไทยเพื่อให้ SQL บันทึกเป็น Unicode
-        INSERT INTO UserName_Lastname (user_id, firstname, lastname) VALUES (@user_id, N'ผู้ใช้', N'ใหม่');
-        INSERT INTO Wallets (user_id, balance, points) VALUES (@user_id, 0, 0);
-      `);
+    // แยกเป็น 2 คำสั่งเพื่อให้ทำงานกับ pgPool ได้อย่างสมบูรณ์แบบและไม่มี Error
+    await pgPool.query(`INSERT INTO UserName_Lastname (user_id, firstname, lastname) VALUES ($1, 'ผู้ใช้', 'ใหม่')`, [newUserId]);
+    await pgPool.query(`INSERT INTO Wallets (user_id, balance, points) VALUES ($1, 0, 0)`, [newUserId]);
 
     res.json({ success: true, message: 'สมัครสมาชิกสำเร็จ' });
 
@@ -502,82 +501,88 @@ app.post('/api/register', async (req, res) => {
   }
 });
 
+// ==========================================
+//  การเชื่อมต่อ PostgreSQL (Vercel Neon)  ด้าน บนแก้แล้ว
+// ==========================================
 
 
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // API 1: ดึงรายชื่อธนาคารทั้งหมด (จากตาราง Banks)
 // ==========================================
 app.get('/api/banks', async (req, res) => {
   try {
-    const pool = await sql.connect(dbConfig);
-    const result = await pool.request().query('SELECT * FROM Banks WHERE is_active = 1');
-    res.json({ success: true, banks: result.recordset });
+    const result = await pgPool.query("SELECT * FROM Banks WHERE is_active = '1'");
+    res.json({ success: true, banks: result.rows });
   } catch (err) {
+    console.error('Error fetching banks:', err);
     res.status(500).json({ success: false, message: 'ไม่สามารถดึงข้อมูลธนาคารได้' });
   }
 });
 
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🏦 API ดึงบัญชีธนาคารของลูกค้า (หน้าแอป)
 // ==========================================
 app.get('/api/user-profile-banks/:uid', async (req, res) => {
     try {
         const uid = req.params.uid;
-        const pool = await sql.connect(dbConfig);
         
-        const result = await pool.request()
-            .input('uid', sql.Int, uid)
-            .query(`
-                SELECT ub.*, b.bank_name, b.logo_url, b.country 
-                FROM UserBanks ub 
-                LEFT JOIN Banks b ON ub.bank_id = b.bank_id 
-                WHERE ub.user_id = @uid
-            `);
+        const result = await pgPool.query(`
+            SELECT ub.*, b.bank_name, b.logo_url, b.country 
+            FROM UserBanks ub 
+            LEFT JOIN Banks b ON ub.bank_id = b.bank_id 
+            WHERE ub.user_id = $1
+        `, [uid]);
             
-        res.json({ success: true, userBanks: result.recordset });
+        res.json({ success: true, userBanks: result.rows });
     } catch (error) {
+        console.error('Error fetching user banks:', error);
         res.status(500).json({ success: false, message: error.message });
     }
 });
 
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // API 3: เพิ่มบัญชีธนาคาร พร้อมอัปเดตชื่อ-นามสกุล
 // ==========================================
 app.post('/api/add-user-bank', async (req, res) => {
   const { userId, firstname, lastname, bankId, accountName, accountNumber, currencyCode, passbookBase64 } = req.body;
+  
+  // 🌟 ใช้ Transaction สำหรับการบันทึกข้อมูลหลายตาราง
+  const client = await pgPool.connect();
+  
   try {
-    const pool = await sql.connect(dbConfig);
+    await client.query('BEGIN'); // เริ่ม Transaction
     
     // 1. อัปเดตชื่อ-นามสกุลในระบบให้ตรงกับบัญชีธนาคาร
-    await pool.request()
-      .input('userId', sql.Int, userId)
-      .input('fname', sql.NVarChar, firstname)
-      .input('lname', sql.NVarChar, lastname)
-      .query('UPDATE UserName_Lastname SET firstname = @fname, lastname = @lname WHERE user_id = @userId');
+    await client.query(`
+        UPDATE UserName_Lastname 
+        SET firstname = $1, lastname = $2 
+        WHERE user_id = $3
+    `, [firstname, lastname, userId]);
 
     // 2. บันทึกบัญชีธนาคาร พร้อมรูปสมุดบัญชี และตั้งสถานะเป็น Pending (รอตรวจสอบ)
-    await pool.request()
-      .input('userId', sql.Int, userId)
-      .input('bankId', sql.Int, bankId)
-      .input('accountName', sql.NVarChar, accountName)
-      .input('accountNumber', sql.VarChar, accountNumber)
-      .input('currency', sql.VarChar, currencyCode)
-      .input('passbook', sql.VarChar(sql.MAX), passbookBase64)
-      .query(`
+    await client.query(`
         INSERT INTO UserBanks 
         (user_id, bank_id, account_name, account_number, currency_code, is_primary, passbook_image, status, created_at)
         VALUES 
-        (@userId, @bankId, @accountName, @accountNumber, @currency, 1, @passbook, 'Pending', GETDATE())
-      `);
+        ($1, $2, $3, $4, $5, '1', $6, 'Pending', CURRENT_TIMESTAMP)
+    `, [userId, bankId, accountName, accountNumber, currencyCode, passbookBase64]);
 
+    await client.query('COMMIT'); // ยืนยัน Transaction เมื่อทุกอย่างสำเร็จ
     res.json({ success: true, message: 'เพิ่มบัญชีธนาคารสำเร็จ กรุณารอแอดมินตรวจสอบ' });
+    
   } catch (err) {
-    console.error(err);
+    await client.query('ROLLBACK'); // ยกเลิกการบันทึกทั้งหมดถ้ามีจุดใดจุดหนึ่งล้มเหลว
+    console.error('Error adding user bank:', err);
     res.status(500).json({ success: false, message: 'ไม่สามารถเพิ่มบัญชีได้' });
+  } finally {
+    client.release(); // คืน Connection ให้ Pool เสมอ
   }
 });
-
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // API 4: แจ้งฝากเงิน (จำลองการรับสลิปเป็น Base64 ไปก่อน)
 // ==========================================
 app.post('/api/deposit', async (req, res) => {
@@ -592,7 +597,9 @@ app.post('/api/deposit', async (req, res) => {
     res.status(500).json({ success: false, message: 'ทำรายการไม่สำเร็จ' });
   }
 });
+
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 1. API สำหรับ Login (อัปเดตดึงข้อมูลครบถ้วน + 🛡️ ระบบเฝ้าระวัง IP)
 // ==========================================
 app.post('/api/login', async (req, res) => {
@@ -603,52 +610,54 @@ app.post('/api/login', async (req, res) => {
   if (clientIp.includes(',')) clientIp = clientIp.split(',')[0].trim(); // ป้องกันกรณีดึงได้หลาย IP ซ้อนกัน
 
   try {
-    const pool = await sql.connect(dbConfig);
-    
     // 🛡️ [เพิ่มใหม่ระบบ IP]: 1. เช็คก่อนเลยว่า IP นี้ติดแบล็คลิสต์ (บล็อก) อยู่หรือไม่
-    const blockCheck = await pool.request()
-        .input('ip', sql.VarChar, clientIp)
-        .query(`SELECT is_blocked FROM Blocked_IPs WHERE ip_address = @ip AND is_blocked = 1`);
+    // หมายเหตุ: Postgres คอลัมน์ Bit ใช้ค่า '1' เป็น String
+    const blockCheck = await pgPool.query(`SELECT is_blocked FROM Blocked_IPs WHERE ip_address = $1 AND is_blocked = '1'`, [clientIp]);
         
-    if (blockCheck.recordset.length > 0) {
+    if (blockCheck.rows.length > 0) {
         return res.status(403).json({ success: false, message: 'IP ของคุณถูกบล็อก เนื่องจากพยายามเข้าระบบผิดพลาดหลายครั้ง' });
     }
 
     // 🛡️ [เพิ่มใหม่ระบบ IP]: ฟังก์ชันย่อยสำหรับนับจำนวนครั้งที่เข้าสู่ระบบผิดพลาด
     const handleFailedLogin = async () => {
         // บันทึกประวัติว่า IP นี้ใส่รหัสผิด
-        await pool.request()
-            .input('ip', sql.VarChar, clientIp)
-            .query(`INSERT INTO Login_Failed_Attempts (ip_address) VALUES (@ip)`);
+        await pgPool.query(`INSERT INTO Login_Failed_Attempts (ip_address, attempt_time) VALUES ($1, CURRENT_TIMESTAMP)`, [clientIp]);
 
         // นับดูว่าใน 1 นาทีที่ผ่านมา IP นี้ผิดไปกี่ครั้งแล้ว
-        const failCheck = await pool.request()
-            .input('ip', sql.VarChar, clientIp)
-            .query(`
-                SELECT COUNT(id) as fail_count 
-                FROM Login_Failed_Attempts 
-                WHERE ip_address = @ip AND attempt_time >= DATEADD(MINUTE, -1, GETDATE())
-            `);
+        const failCheck = await pgPool.query(`
+            SELECT COUNT(id) as fail_count 
+            FROM Login_Failed_Attempts 
+            WHERE ip_address = $1 AND attempt_time >= CURRENT_TIMESTAMP - INTERVAL '1 minute'
+        `, [clientIp]);
+
+        const failCount = parseInt(failCheck.rows[0].fail_count, 10);
 
         // ถ้าผิดตั้งแต่ 10 ครั้งขึ้นไป ให้จับบล็อกทันที
-        if (failCheck.recordset[0].fail_count >= 10) {
-            await pool.request()
-                .input('ip', sql.VarChar, clientIp)
-                .query(`
-                    IF NOT EXISTS (SELECT 1 FROM Blocked_IPs WHERE ip_address = @ip)
-                        INSERT INTO Blocked_IPs (ip_address, reason, is_blocked) VALUES (@ip, 'Brute Force Login Attempt (>10 fails/min)', 1);
-                    ELSE
-                        UPDATE Blocked_IPs SET is_blocked = 1, reason = 'Brute Force Login Attempt (>10 fails/min)', updated_at = GETDATE() WHERE ip_address = @ip;
-                `);
+        if (failCount >= 10) {
+            // เช็คว่ามี IP นี้อยู่ใน Blocked_IPs หรือยัง
+            const existCheck = await pgPool.query(`SELECT 1 FROM Blocked_IPs WHERE ip_address = $1`, [clientIp]);
+            
+            if (existCheck.rows.length === 0) {
+                // ถ้ายังไม่มีให้ Insert
+                await pgPool.query(`
+                    INSERT INTO Blocked_IPs (ip_address, reason, is_blocked, updated_at) 
+                    VALUES ($1, 'Brute Force Login Attempt (>10 fails/min)', '1', CURRENT_TIMESTAMP)
+                `, [clientIp]);
+            } else {
+                // ถ้ามีแล้วให้ Update
+                await pgPool.query(`
+                    UPDATE Blocked_IPs 
+                    SET is_blocked = '1', reason = 'Brute Force Login Attempt (>10 fails/min)', updated_at = CURRENT_TIMESTAMP 
+                    WHERE ip_address = $1
+                `, [clientIp]);
+            }
             return true; // แจ้งว่าโดนบล็อกแล้ว
         }
         return false; // ยังไม่โดนบล็อก
     };
     
-    // 🌟 ดึงข้อมูล User พร้อมกับ Role, Level, ชื่อ-นามสกุล, ประเทศ และ สกุลเงิน (โค้ดเดิม)
-    const userResult = await pool.request()
-      .input('username', sql.VarChar, username)
-      .query(`
+    // 🌟 ดึงข้อมูล User พร้อมกับ Role, Level, ชื่อ-นามสกุล, ประเทศ และ สกุลเงิน
+    const userResult = await pgPool.query(`
         SELECT 
           u.user_id, u.username, u.password_hash, u.wallet_balance, u.total_orders, u.is_active,
           u.country, u.currency_code,  -- 🌟 เพิ่ม 2 คอลัมน์นี้
@@ -659,11 +668,11 @@ app.post('/api/login', async (req, res) => {
         LEFT JOIN UserName_Lastname un ON u.user_id = un.user_id
         LEFT JOIN Roles r ON u.role_id = r.role_id
         LEFT JOIN CustomerLevels cl ON u.level_id = cl.level_id
-        WHERE u.username = @username
-      `);
+        WHERE u.username = $1
+    `, [username]);
 
     // ถ้าไม่เจอ Username ในระบบ
-    if (userResult.recordset.length === 0) {
+    if (userResult.rows.length === 0) {
       // 🛡️ [เพิ่มใหม่ระบบ IP]: บันทึกว่าใส่ข้อมูลผิด
       const isBlockedNow = await handleFailedLogin();
       if (isBlockedNow) {
@@ -672,10 +681,11 @@ app.post('/api/login', async (req, res) => {
       return res.status(401).json({ message: 'ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง' });
     }
 
-    const user = userResult.recordset[0];
+    const user = userResult.rows[0];
 
-    // เช็คว่า User ถูกระงับการใช้งานหรือไม่ (is_active = 0)
-    if (!user.is_active) {
+    // เช็คว่า User ถูกระงับการใช้งานหรือไม่ 
+    // (รองรับทั้งแบบ Boolean, Number และ String '0' จาก Postgres)
+    if (user.is_active === false || user.is_active === 0 || user.is_active === '0') {
       return res.status(403).json({ message: 'บัญชีนี้ถูกระงับการใช้งาน' });
     }
 
@@ -699,11 +709,9 @@ app.post('/api/login', async (req, res) => {
     }
 
     // 🛡️ [เพิ่มใหม่ระบบ IP]: 🌟 ล้างประวัติการใส่รหัสผิดทั้งหมด ถ้า Login สำเร็จ
-    await pool.request()
-        .input('ip', sql.VarChar, clientIp)
-        .query(`DELETE FROM Login_Failed_Attempts WHERE ip_address = @ip`);
+    await pgPool.query(`DELETE FROM Login_Failed_Attempts WHERE ip_address = $1`, [clientIp]);
 
-    // 🌟 ส่งข้อมูลกลับไปให้ Frontend แบบจัดเต็ม (โค้ดเดิม ไม่มีการเปลี่ยนแปลงข้อมูลส่วนนี้)
+    // 🌟 ส่งข้อมูลกลับไปให้ Frontend แบบจัดเต็ม
     res.json({
       success: true, 
       message: 'เข้าสู่ระบบสำเร็จ',
@@ -730,23 +738,20 @@ app.post('/api/login', async (req, res) => {
   }
 });
 
-
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // API: ดึงอัตราแลกเปลี่ยน (Exchange Rates)
 // ==========================================
 app.get('/api/exchange-rates', async (req, res) => {
   try {
-    const pool = await sql.connect(dbConfig);
-    
     // ดึงข้อมูลทั้งหมดจากตาราง ExchangeRates
-    const result = await pool.request()
-      .query('SELECT currency_pair, rate, last_updated FROM ExchangeRates');
+    const result = await pgPool.query('SELECT currency_pair, rate, last_updated FROM ExchangeRates');
 
     // จัด Format ให้อ่านง่าย เช่น { "THB_LAK": 620.00, "USD_THB": 36.00 }
     const rates = {};
     let lastUpdated = null;
     
-    result.recordset.forEach(row => {
+    result.rows.forEach(row => {
       rates[row.currency_pair] = row.rate;
       if (!lastUpdated) lastUpdated = row.last_updated; // ดึงเวลาอัปเดตล่าสุดมาด้วย
     });
@@ -765,6 +770,7 @@ app.get('/api/exchange-rates', async (req, res) => {
 
 
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // API สำหรับ Register (อัปเดตรองรับประเทศและสกุลเงิน)
 // ==========================================
 app.post('/api/register', async (req, res) => {
@@ -772,8 +778,6 @@ app.post('/api/register', async (req, res) => {
   const { username, password, referrer, country } = req.body;
 
   try {
-    const pool = await sql.connect(dbConfig);
-    
     // ตรวจสอบว่า Username ซ้ำไหม (โค้ดเดิมของคุณ)
     // ... 
 
@@ -786,17 +790,13 @@ app.post('/api/register', async (req, res) => {
     }
 
     // 🌟 บันทึกลงฐานข้อมูล (เพิ่ม country และ currency_code เข้าไปในคำสั่ง INSERT)
-    await pool.request()
-      .input('username', sql.VarChar, username)
-      .input('password_hash', sql.VarChar, password) // (แนะนำ: อนาคตควรแฮชรหัสผ่าน)
-      .input('referrer_username', sql.VarChar, referrer || null)
-      .input('country', sql.NVarChar, selectedCountry)
-      .input('currency_code', sql.NVarChar, currencyCode)
-      .query(`
+    await pgPool.query(`
         INSERT INTO Users (username, password_hash, referrer_username, role_id, level_id, is_active, country, currency_code)
-        VALUES (@username, @password_hash, @referrer_username, 4, 1, 1, @country, @currency_code)
-      `);
-      // หมายเหตุ: role_id 4 = User ทั่วไป, level_id 1 = ระดับเริ่มต้น
+        VALUES ($1, $2, $3, 4, 1, '1', $4, $5)
+      `, 
+      [username, password, referrer || null, selectedCountry, currencyCode]
+    );
+    // หมายเหตุ: role_id 4 = User ทั่วไป, level_id 1 = ระดับเริ่มต้น, is_active '1' = เปิดใช้งาน
 
     res.status(201).json({ message: 'สมัครสมาชิกสำเร็จ' });
 
@@ -807,37 +807,33 @@ app.post('/api/register', async (req, res) => {
 });
 
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // API: ดึงข้อมูลหน้า Dashboard (Wallet & Transactions)
 // ==========================================
 app.get('/api/dashboard/:userId', async (req, res) => {
   const userId = req.params.userId;
   
   try {
-    const pool = await sql.connect(dbConfig);
-    
     // 1. ดึงข้อมูลกระเป๋าเงิน
-    const walletResult = await pool.request()
-      .input('user_id', sql.Int, userId)
-      .query('SELECT balance, points FROM Wallets WHERE user_id = @user_id');
+    const walletResult = await pgPool.query('SELECT balance, points FROM Wallets WHERE user_id = $1', [userId]);
       
-    let wallet = walletResult.recordset[0];
+    let wallet = walletResult.rows[0];
     
     // ถ้าเพิ่งสมัครและยังไม่มีกระเป๋าเงิน ให้ส่งค่า 0 กลับไป
     if (!wallet) {
       wallet = { balance: 0.00, points: 0 };
     }
 
-    // 2. ดึงรายการธุรกรรมล่าสุด 5 รายการ
-    const txResult = await pool.request()
-      .input('user_id', sql.Int, userId)
-      .query(`
-        SELECT TOP 5 transaction_id, transaction_type, title, amount, status, created_at 
+    // 2. ดึงรายการธุรกรรมล่าสุด 5 รายการ (🌟 เปลี่ยน TOP 5 เป็น LIMIT 5)
+    const txResult = await pgPool.query(`
+        SELECT transaction_id, transaction_type, title, amount, status, created_at 
         FROM Transactions 
-        WHERE user_id = @user_id 
+        WHERE user_id = $1 
         ORDER BY created_at DESC
-      `);
+        LIMIT 5
+      `, [userId]);
       
-    const transactions = txResult.recordset;
+    const transactions = txResult.rows;
 
     res.json({
       wallet: wallet,
@@ -852,6 +848,7 @@ app.get('/api/dashboard/:userId', async (req, res) => {
 
 
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // API: แจ้งฝากเงิน (Deposit)
 // ==========================================
 app.post('/api/deposit', async (req, res) => {
@@ -863,36 +860,26 @@ app.post('/api/deposit', async (req, res) => {
   }
 
   try {
-    const pool = await poolPromise; // หรือใช้ตัวแปรการเชื่อมต่อ DB ที่คุณใช้อยู่
-
     // 1. ดึงชื่อธนาคารระบบ เพื่อเอามาตั้งชื่อรายการให้สวยงาม (เช่น "แจ้งฝากเงินเข้า KBANK")
-    const bankReq = await pool.request()
-      .input('bank_id', sql.Int, systemBankId)
-      .query('SELECT bank_name, bank_code FROM Banks WHERE bank_id = @bank_id');
+    const bankReq = await pgPool.query('SELECT bank_name, bank_code FROM Banks WHERE bank_id = $1', [systemBankId]);
       
     let bankInfo = 'บัญชีระบบ';
-    if (bankReq.recordset.length > 0) {
-      bankInfo = bankReq.recordset[0].bank_code;
+    if (bankReq.rows.length > 0) {
+      bankInfo = bankReq.rows[0].bank_code;
     }
 
     const title = `แจ้งฝากเงินเข้า ${bankInfo}`;
 
     // 2. บันทึกข้อมูลลงตาราง Transactions พร้อมตั้งสถานะเป็น 'Pending' (รอตรวจสอบ)
-    // 💡 สังเกต: title และ slip_image ใช้ sql.NVarChar เพื่อรองรับภาษาไทยและข้อมูล Base64 ที่ยาวมาก
-    await pool.request()
-      .input('user_id', sql.Int, userId)
-      .input('title', sql.NVarChar, title)
-      .input('amount', sql.Decimal(18,2), amount)
-      .input('transaction_type', sql.VarChar, 'Deposit') // กำหนดประเภทเป็น Deposit
-      .input('status', sql.VarChar, 'Pending')           // 🌟 ตั้งสถานะเริ่มต้นเป็น Pending
-      .input('system_bank_id', sql.Int, systemBankId)
-      .input('slip_image', sql.NVarChar, slipBase64) 
-      .query(`
+    // 🌟 เปลี่ยน GETDATE() เป็น CURRENT_TIMESTAMP
+    await pgPool.query(`
         INSERT INTO Transactions 
         (user_id, title, amount, transaction_type, status, system_bank_id, slip_image, created_at)
         VALUES 
-        (@user_id, @title, @amount, @transaction_type, @status, @system_bank_id, @slip_image, GETDATE())
-      `);
+        ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP)
+      `, 
+      [userId, title, amount, 'Deposit', 'Pending', systemBankId, slipBase64]
+    );
 
     res.json({ 
       success: true, 
@@ -904,14 +891,13 @@ app.post('/api/deposit', async (req, res) => {
     res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการบันทึกข้อมูลที่เซิร์ฟเวอร์' });
   }
 });
-
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // API: (Admin) ดึงรายการฝากเงินที่รอตรวจสอบทั้งหมด
 // ==========================================
 app.get('/api/admin/pending-deposits', async (req, res) => {
   try {
-    const pool = await poolPromise;
-    const result = await pool.request().query(`
+    const result = await pgPool.query(`
       SELECT 
         t.transaction_id, t.amount, t.slip_image, t.created_at, t.status,
         u.username,
@@ -922,7 +908,7 @@ app.get('/api/admin/pending-deposits', async (req, res) => {
       WHERE t.transaction_type = 'Deposit' AND t.status = 'Pending'
       ORDER BY t.created_at ASC
     `);
-    res.json({ success: true, transactions: result.recordset });
+    res.json({ success: true, transactions: result.rows });
   } catch (error) {
     console.error('Fetch Pending Deposits Error:', error);
     res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการดึงข้อมูล' });
@@ -930,6 +916,7 @@ app.get('/api/admin/pending-deposits', async (req, res) => {
 });
 
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // API: (Admin) จัดการอนุมัติ หรือ ปฏิเสธ รายการฝากเงิน
 // ==========================================
 app.post('/api/admin/manage-deposit', async (req, res) => {
@@ -940,48 +927,39 @@ app.post('/api/admin/manage-deposit', async (req, res) => {
   }
 
   try {
-    const pool = await poolPromise;
-    
     // เช็คก่อนว่ารายการนี้ยังมีอยู่และรอตรวจสอบจริงไหม
-    const txReq = await pool.request()
-      .input('tx_id', sql.Int, transactionId)
-      .query("SELECT * FROM Transactions WHERE transaction_id = @tx_id AND status = 'Pending'");
+    const txReq = await pgPool.query("SELECT * FROM Transactions WHERE transaction_id = $1 AND status = 'Pending'", [transactionId]);
 
-    if (txReq.recordset.length === 0) {
+    if (txReq.rows.length === 0) {
       return res.status(404).json({ success: false, message: 'ไม่พบรายการ หรือรายการนี้ถูกจัดการไปแล้ว' });
     }
 
-    const tx = txReq.recordset[0];
+    const tx = txReq.rows[0];
 
     if (action === 'approve') {
       // 🌟 ถ้า "อนุมัติ" ต้องใช้ Transaction ล็อคการทำงาน 2 อย่าง (เปลี่ยนสถานะ + เติมเงิน)
-      const transaction = new sql.Transaction(pool);
-      await transaction.begin();
-
+      const client = await pgPool.connect();
       try {
+        await client.query('BEGIN'); // เริ่ม Transaction
+
         // 1. เปลี่ยนสถานะเป็น Completed
-        await new sql.Request(transaction)
-          .input('tx_id', sql.Int, transactionId)
-          .query("UPDATE Transactions SET status = 'Completed', updated_at = GETDATE() WHERE transaction_id = @tx_id");
+        await client.query("UPDATE Transactions SET status = 'Completed', updated_at = CURRENT_TIMESTAMP WHERE transaction_id = $1", [transactionId]);
 
         // 2. เติมเงินเข้ากระเป๋า
-        await new sql.Request(transaction)
-          .input('user_id', sql.Int, tx.user_id)
-          .input('amount', sql.Decimal(18,2), tx.amount)
-          .query("UPDATE Wallets SET balance = balance + @amount, updated_at = GETDATE() WHERE user_id = @user_id");
+        await client.query("UPDATE Wallets SET balance = balance + $1, updated_at = CURRENT_TIMESTAMP WHERE user_id = $2", [tx.amount, tx.user_id]);
 
-        await transaction.commit();
+        await client.query('COMMIT'); // ยืนยันข้อมูล
         res.json({ success: true, message: 'อนุมัติยอดเงินเข้ากระเป๋าลูกค้าสำเร็จ!' });
       } catch (err) {
-        await transaction.rollback();
+        await client.query('ROLLBACK'); // ยกเลิกถ้าเกิด Error
         throw err;
+      } finally {
+        client.release(); // คืน Connection
       }
 
     } else if (action === 'reject') {
       // 🌟 ถ้า "ปฏิเสธ" (สลิปปลอม/ยอดไม่เข้า) แค่เปลี่ยนสถานะเป็น Rejected
-      await pool.request()
-        .input('tx_id', sql.Int, transactionId)
-        .query("UPDATE Transactions SET status = 'Rejected', updated_at = GETDATE() WHERE transaction_id = @tx_id");
+      await pgPool.query("UPDATE Transactions SET status = 'Rejected', updated_at = CURRENT_TIMESTAMP WHERE transaction_id = $1", [transactionId]);
       
       res.json({ success: true, message: 'ปฏิเสธรายการสำเร็จ (ลูกค้าจะไม่ได้รับเงิน)' });
     }
@@ -992,10 +970,8 @@ app.post('/api/admin/manage-deposit', async (req, res) => {
   }
 });
 
-
-
-
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // API: (Admin) จัดการอนุมัติ หรือ ปฏิเสธ บัญชีธนาคารลูกค้า
 // ==========================================
 app.post('/api/admin/verify-customer-bank', async (req, res) => {
@@ -1006,11 +982,7 @@ app.post('/api/admin/verify-customer-bank', async (req, res) => {
   }
 
   try {
-    const pool = await poolPromise;
-    await pool.request()
-      .input('id', sql.Int, userBankId)
-      .input('status', sql.VarChar, action)
-      .query("UPDATE UserBanks SET status = @status WHERE user_bank_id = @id");
+    await pgPool.query("UPDATE UserBanks SET status = $1 WHERE user_bank_id = $2", [action, userBankId]);
       
     res.json({ success: true, message: action === 'Approved' ? 'อนุมัติบัญชีสำเร็จ' : 'ปฏิเสธบัญชีสำเร็จ' });
   } catch (error) {
@@ -1018,33 +990,8 @@ app.post('/api/admin/verify-customer-bank', async (req, res) => {
     res.status(500).json({ success: false, message: 'ระบบเซิร์ฟเวอร์ขัดข้อง' });
   }
 });
-
-
 // ==========================================
-// API: (Admin) ดึงรายการฝากเงินที่รอตรวจสอบทั้งหมด
-// ==========================================
-app.get('/api/admin/pending-deposits', async (req, res) => {
-  try {
-    const pool = await poolPromise;
-    const result = await pool.request().query(`
-      SELECT 
-        t.transaction_id, t.amount, t.slip_image, t.created_at, t.status,
-        u.username,
-        b.bank_name, b.account_number
-      FROM Transactions t
-      LEFT JOIN Users u ON t.user_id = u.user_id
-      LEFT JOIN Banks b ON t.system_bank_id = b.bank_id
-      WHERE t.transaction_type = 'Deposit' AND t.status = 'Pending'
-      ORDER BY t.created_at ASC
-    `);
-    res.json({ success: true, transactions: result.recordset });
-  } catch (error) {
-    console.error('Fetch Pending Deposits Error:', error);
-    res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการดึงข้อมูล' });
-  }
-});
-
-// ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // API: (Admin) จัดการอนุมัติ หรือ ปฏิเสธ รายการฝากเงิน
 // ==========================================
 app.post('/api/admin/manage-deposit', async (req, res) => {
@@ -1055,42 +1002,38 @@ app.post('/api/admin/manage-deposit', async (req, res) => {
   }
 
   try {
-    const pool = await poolPromise;
-    const txReq = await pool.request()
-      .input('tx_id', sql.Int, transactionId)
-      .query("SELECT * FROM Transactions WHERE transaction_id = @tx_id AND status = 'Pending'");
+    const txReq = await pgPool.query("SELECT * FROM Transactions WHERE transaction_id = $1 AND status = 'Pending'", [transactionId]);
 
-    if (txReq.recordset.length === 0) {
+    if (txReq.rows.length === 0) {
       return res.status(404).json({ success: false, message: 'ไม่พบรายการ หรือรายการนี้ถูกจัดการไปแล้ว' });
     }
 
-    const tx = txReq.recordset[0];
+    const tx = txReq.rows[0];
 
     if (action === 'approve') {
-      const transaction = new sql.Transaction(pool);
-      await transaction.begin();
-
+      // 🌟 ใช้ Transaction ล็อคการทำงาน 2 อย่าง (เปลี่ยนสถานะ + เติมเงิน)
+      const client = await pgPool.connect();
       try {
-        await new sql.Request(transaction)
-          .input('tx_id', sql.Int, transactionId)
-          .query("UPDATE Transactions SET status = 'Completed', updated_at = GETDATE() WHERE transaction_id = @tx_id");
+        await client.query('BEGIN'); // เริ่ม Transaction
 
-        await new sql.Request(transaction)
-          .input('user_id', sql.Int, tx.user_id)
-          .input('amount', sql.Decimal(18,2), tx.amount)
-          .query("UPDATE Wallets SET balance = balance + @amount, updated_at = GETDATE() WHERE user_id = @user_id");
+        // 1. เปลี่ยนสถานะเป็น Completed
+        await client.query("UPDATE Transactions SET status = 'Completed', updated_at = CURRENT_TIMESTAMP WHERE transaction_id = $1", [transactionId]);
 
-        await transaction.commit();
+        // 2. เติมเงินเข้ากระเป๋า
+        await client.query("UPDATE Wallets SET balance = balance + $1, updated_at = CURRENT_TIMESTAMP WHERE user_id = $2", [tx.amount, tx.user_id]);
+
+        await client.query('COMMIT'); // ยืนยันข้อมูล
         res.json({ success: true, message: 'อนุมัติยอดเงินเข้ากระเป๋าลูกค้าสำเร็จ!' });
       } catch (err) {
-        await transaction.rollback();
+        await client.query('ROLLBACK'); // ยกเลิกถ้าเกิด Error
         throw err;
+      } finally {
+        client.release(); // คืน Connection เสมอ
       }
 
     } else if (action === 'reject') {
-      await pool.request()
-        .input('tx_id', sql.Int, transactionId)
-        .query("UPDATE Transactions SET status = 'Rejected', updated_at = GETDATE() WHERE transaction_id = @tx_id");
+      // 🌟 ถ้า "ปฏิเสธ" (สลิปปลอม/ยอดไม่เข้า) แค่เปลี่ยนสถานะเป็น Rejected
+      await pgPool.query("UPDATE Transactions SET status = 'Rejected', updated_at = CURRENT_TIMESTAMP WHERE transaction_id = $1", [transactionId]);
       
       res.json({ success: true, message: 'ปฏิเสธรายการสำเร็จ (ลูกค้าจะไม่ได้รับเงิน)' });
     }
@@ -1104,12 +1047,12 @@ app.post('/api/admin/manage-deposit', async (req, res) => {
 
 
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 1. API ดึงรายการคำขอเพิ่มบัญชีธนาคารทั้งหมด (แอดมิน)
 // ==========================================
 app.get('/api/admin/user-banks', async (req, res) => {
     try {
-        const pool = await sql.connect(dbConfig);
-        const result = await pool.request().query(`
+        const result = await pgPool.query(`
             SELECT 
                 ub.user_bank_id, ub.user_id, ub.bank_id, ub.account_name, ub.account_number, 
                 ub.is_primary, ub.created_at, ub.currency_code, ub.status, 
@@ -1121,7 +1064,7 @@ app.get('/api/admin/user-banks', async (req, res) => {
             WHERE ub.status != 'Deleted'
             ORDER BY ub.created_at DESC
         `);
-        res.json({ success: true, data: result.recordset });
+        res.json({ success: true, data: result.rows });
     } catch (err) {
         console.error('Error fetching user banks:', err);
         res.status(500).json({ success: false, message: 'Server error' });
@@ -1129,17 +1072,15 @@ app.get('/api/admin/user-banks', async (req, res) => {
 });
 
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🗑️ [CLIENT] ลบสมุดบัญชี (แบบ Soft Delete ไม่ลบจริงจากฐานข้อมูล)
 // ==========================================
 app.delete('/api/user-banks/:id', async (req, res) => {
     try {
         const bankId = req.params.id;
-        const pool = await sql.connect(dbConfig);
         
         // 🌟 อัปเดตสถานะเป็น Deleted แทนการใช้คำสั่ง DELETE FROM
-        await pool.request()
-            .input('id', sql.Int, bankId)
-            .query(`UPDATE UserBanks SET status = 'Deleted' WHERE user_bank_id = @id`);
+        await pgPool.query(`UPDATE UserBanks SET status = 'Deleted' WHERE user_bank_id = $1`, [bankId]);
             
         res.json({ success: true, message: 'ลบบัญชีสำเร็จ' });
     } catch (err) {
@@ -1149,26 +1090,22 @@ app.delete('/api/user-banks/:id', async (req, res) => {
 
 
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🏦 [ADMIN] อนุมัติ / ปฏิเสธ สมุดบัญชีลูกค้า
 // ==========================================
 app.put('/api/admin/user-banks/:id/status', async (req, res) => {
     try {
         const user_bank_id = req.params.id;
         const { status, reject_reason } = req.body; 
-
-        const pool = await sql.connect(dbConfig);
         
         // อัปเดตสถานะสมุดบัญชี และใส่เหตุผลที่ไม่อนุมัติ (ถ้ามี)
-        await pool.request()
-            .input('id', sql.Int, user_bank_id)
-            .input('status', sql.VarChar, status)
-            .input('reason', sql.NVarChar(sql.MAX), reject_reason || null)
-            .query(`
+        await pgPool.query(`
                 UPDATE UserBanks 
-                SET status = @status, 
-                    reject_reason = @reason
-                WHERE user_bank_id = @id
-            `);
+                SET status = $1, 
+                    reject_reason = $2
+                WHERE user_bank_id = $3
+            `, [status, reject_reason || null, user_bank_id]
+        );
             
         res.json({ success: true, message: 'อัปเดตสถานะสมุดบัญชีสำเร็จ' });
     } catch (err) {
@@ -1176,7 +1113,9 @@ app.put('/api/admin/user-banks/:id/status', async (req, res) => {
         res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดที่เซิร์ฟเวอร์: ' + err.message });
     }
 });
+
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // ✏️ [CLIENT] แก้ไขสมุดบัญชีที่โดนปฏิเสธ (ส่งตรวจใหม่)
 // ==========================================
 app.put('/api/user-banks/:id', async (req, res) => {
@@ -1185,56 +1124,48 @@ app.put('/api/user-banks/:id', async (req, res) => {
         const { firstname, lastname, bankId: newBankId, accountNumber, currencyCode, passbookBase64 } = req.body;
         const accountName = `${firstname} ${lastname}`;
 
-        const pool = await sql.connect(dbConfig);
-
         let updateQuery = `
             UPDATE UserBanks 
-            SET bank_id = @bankId, 
-                account_number = @accNum, 
-                account_name = @accName, 
-                currency_code = @curr, 
+            SET bank_id = $1, 
+                account_number = $2, 
+                account_name = $3, 
+                currency_code = $4, 
                 status = 'Re-submitted' /* 🌟 1. เปลี่ยนสถานะเป็น "ส่งเรื่องแก้แล้ว" */
                 /* 🌟 2. เอาคำสั่ง reject_reason = NULL ออก (เก็บความจำไว้ให้แอดมินดู) */
         `;
-        if (passbookBase64) updateQuery += `, passbook_image = @img`;
-        updateQuery += ` WHERE user_bank_id = @id`;
+        
+        // จัดเตรียมตัวแปรสำหรับการ Query
+        let queryParams = [newBankId, accountNumber, accountName, currencyCode];
 
-        const request = pool.request()
-            .input('id', sql.Int, bankId)
-            .input('bankId', sql.Int, newBankId)
-            .input('accNum', sql.VarChar, accountNumber)
-            .input('accName', sql.NVarChar, accountName) 
-            .input('curr', sql.VarChar, currencyCode);
+        // สร้างเงื่อนไข Query แบบ Dynamic
+        if (passbookBase64) {
+            updateQuery += `, passbook_image = $5 WHERE user_bank_id = $6`;
+            queryParams.push(passbookBase64, bankId);
+        } else {
+            updateQuery += ` WHERE user_bank_id = $5`;
+            queryParams.push(bankId);
+        }
 
-        if (passbookBase64) request.input('img', sql.NVarChar(sql.MAX), passbookBase64);
-
-        await request.query(updateQuery);
+        await pgPool.query(updateQuery, queryParams);
+        
         res.json({ success: true, message: 'บันทึกข้อมูลและส่งตรวจสอบใหม่สำเร็จ' });
     } catch (err) {
         res.status(500).json({ success: false, message: 'Server error: ' + err.message });
     }
 });
-
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🌟 1. API: ดึงข้อมูลสัตว์และตัวเลขทั้งหมด (GET)
 // ==========================================
 app.get('/api/admin/animal-numbers', async (req, res) => {
     try {
-        // 🌟 ทริค: ลองเชื่อมต่อ DB ดูก่อน ถ้ามีการเชื่อมต่อค้างอยู่แล้วก็ให้ข้ามไปใช้งานได้เลย ไม่ต้อง Error
-        try { 
-            await sql.connect(dbConfig); 
-        } catch (err) { 
-            /* ปล่อยผ่านกรณีที่มัน Connected อยู่แล้ว */ 
-        }
-
-        const request = new sql.Request();
-        const result = await request.query(`
+        const result = await pgPool.query(`
             SELECT * FROM Master_Animal_Numbers 
             ORDER BY created_at DESC
         `);
         
         // ส่งข้อมูล Array กลับไปให้หน้าเว็บ
-        res.status(200).json(result.recordset);
+        res.status(200).json(result.rows);
 
     } catch (error) {
         console.error('Error fetching animal numbers:', error);
@@ -1247,19 +1178,19 @@ app.get('/api/admin/animal-numbers', async (req, res) => {
 });
 
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🌟 API: เพิ่มข้อมูลสัตว์และตัวเลขใหม่ (POST)
 // ==========================================
 app.post('/api/admin/animal-numbers', async (req, res) => {
     const { animal_name_th, image_url, lottery_type, num1, num2, num3, is_active, action_by } = req.body;
 
     try {
-        const pool = await sql.connect(dbConfig); 
-
-        const checkQuery = await pool.request()
-            .input('lotteryType', sql.VarChar, lottery_type)
-            .query(`SELECT num1, num2, num3 FROM Master_Animal_Numbers WHERE lottery_type = @lotteryType`);
+        const checkQuery = await pgPool.query(
+            `SELECT num1, num2, num3 FROM Master_Animal_Numbers WHERE lottery_type = $1`, 
+            [lottery_type]
+        );
         
-        const existingNumbers = checkQuery.recordset.flatMap(row => [row.num1, row.num2, row.num3]);
+        const existingNumbers = checkQuery.rows.flatMap(row => [row.num1, row.num2, row.num3]);
         const newNumbers = [num1, num2];
         if (num3 !== '-') newNumbers.push(num3);
 
@@ -1273,19 +1204,19 @@ app.post('/api/admin/animal-numbers', async (req, res) => {
             INSERT INTO Master_Animal_Numbers 
             (animal_name_th, image_url, lottery_type, num1, num2, num3, is_active, created_by)
             VALUES 
-            (@animalName, @imageUrl, @lotteryType, @num1, @num2, @num3, @isActive, @actionBy)
+            ($1, $2, $3, $4, $5, $6, $7, $8)
         `;
 
-        await pool.request()
-            .input('animalName', sql.NVarChar, animal_name_th)
-            .input('imageUrl', sql.VarChar(sql.MAX), image_url) 
-            .input('lotteryType', sql.VarChar, lottery_type)
-            .input('num1', sql.VarChar, num1)
-            .input('num2', sql.VarChar, num2)
-            .input('num3', sql.VarChar, num3)
-            .input('isActive', sql.Bit, is_active ? 1 : 0)
-            .input('actionBy', sql.NVarChar, action_by || 'Unknown') // 🌟 เก็บชื่อคนทำ
-            .query(insertQuery);
+        await pgPool.query(insertQuery, [
+            animal_name_th, 
+            image_url, 
+            lottery_type, 
+            num1, 
+            num2, 
+            num3, 
+            is_active ? '1' : '0', 
+            action_by || 'Unknown' // 🌟 เก็บชื่อคนทำ
+        ]);
 
         res.status(201).json({ success: true, message: 'บันทึกข้อมูลสัตว์และตัวเลขสำเร็จ' });
     } catch (error) {
@@ -1295,22 +1226,21 @@ app.post('/api/admin/animal-numbers', async (req, res) => {
 });
 
 // ==========================================
-// 🌟 API: แก้ไขข้อมูลสัตว์และตัวเลข (PUT) - มาใหม่!
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
+// 🌟 API: แก้ไขข้อมูลสัตว์และตัวเลข (PUT)
 // ==========================================
 app.put('/api/admin/animal-numbers/:id', async (req, res) => {
     const { id } = req.params;
     const { animal_name_th, image_url, lottery_type, num1, num2, num3, is_active, action_by } = req.body;
 
     try {
-        const pool = await sql.connect(dbConfig); 
-
         // 🌟 ดักเลขซ้ำ (แต่ต้องยกเว้น ID ของตัวเองที่กำลังแก้อยู่)
-        const checkQuery = await pool.request()
-            .input('lotteryType', sql.VarChar, lottery_type)
-            .input('currentId', sql.Int, id)
-            .query(`SELECT num1, num2, num3 FROM Master_Animal_Numbers WHERE lottery_type = @lotteryType AND animal_id != @currentId`);
+        const checkQuery = await pgPool.query(
+            `SELECT num1, num2, num3 FROM Master_Animal_Numbers WHERE lottery_type = $1 AND animal_id != $2`, 
+            [lottery_type, id]
+        );
         
-        const existingNumbers = checkQuery.recordset.flatMap(row => [row.num1, row.num2, row.num3]);
+        const existingNumbers = checkQuery.rows.flatMap(row => [row.num1, row.num2, row.num3]);
         const newNumbers = [num1, num2];
         if (num3 !== '-') newNumbers.push(num3);
 
@@ -1322,28 +1252,28 @@ app.put('/api/admin/animal-numbers/:id', async (req, res) => {
 
         const updateQuery = `
             UPDATE Master_Animal_Numbers 
-            SET animal_name_th = @animalName,
-                image_url = @imageUrl,
-                lottery_type = @lotteryType,
-                num1 = @num1,
-                num2 = @num2,
-                num3 = @num3,
-                is_active = @isActive,
-                updated_by = @actionBy
-            WHERE animal_id = @id
+            SET animal_name_th = $1,
+                image_url = $2,
+                lottery_type = $3,
+                num1 = $4,
+                num2 = $5,
+                num3 = $6,
+                is_active = $7,
+                updated_by = $8
+            WHERE animal_id = $9
         `;
 
-        await pool.request()
-            .input('id', sql.Int, id)
-            .input('animalName', sql.NVarChar, animal_name_th)
-            .input('imageUrl', sql.VarChar(sql.MAX), image_url) 
-            .input('lotteryType', sql.VarChar, lottery_type)
-            .input('num1', sql.VarChar, num1)
-            .input('num2', sql.VarChar, num2)
-            .input('num3', sql.VarChar, num3)
-            .input('isActive', sql.Bit, is_active ? 1 : 0)
-            .input('actionBy', sql.NVarChar, action_by || 'Unknown') // 🌟 เก็บชื่อคนแก้ไข
-            .query(updateQuery);
+        await pgPool.query(updateQuery, [
+            animal_name_th, 
+            image_url, 
+            lottery_type, 
+            num1, 
+            num2, 
+            num3, 
+            is_active ? '1' : '0', 
+            action_by || 'Unknown', 
+            id
+        ]);
 
         res.status(200).json({ success: true, message: 'แก้ไขข้อมูลสำเร็จ' });
     } catch (error) {
@@ -1353,33 +1283,32 @@ app.put('/api/admin/animal-numbers/:id', async (req, res) => {
 });
 
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🌟 API: สำหรับการซื้อหวย (ตัดเงิน/คำนวณวัน/จ่ายค่าคอม/แสตมป์ชื่อลูกทีม)
 // ==========================================
 app.post('/api/lottery/buy', async (req, res) => {
     // 🌟 อัปเกรด 1: รับค่า note เข้ามาจากฝั่งหน้าบ้าน
     const { user_id, cart, total_price, currency, note } = req.body;
-    const pool = await sql.connect(dbConfig);
     
     // ==========================================
     // 🌟 0. แทรกระบบเช็คสถานะการขาย
     // ==========================================
-    const statusRes = await pool.request().query("SELECT is_sales_open FROM System_Settings WHERE id = 1");
-    if (!statusRes.recordset[0].is_sales_open) {
+    const statusRes = await pgPool.query("SELECT is_sales_open FROM System_Settings WHERE id = 1");
+    if (!statusRes.rows[0].is_sales_open || statusRes.rows[0].is_sales_open === '0') {
         return res.status(400).json({ success: false, message: 'ระบบปิดรับซื้อแล้วในขณะนี้ กรุณารอรอบถัดไป' });
     }
 
-    const transaction = new sql.Transaction(pool);
+    const client = await pgPool.connect();
 
     try {
-        await transaction.begin();
-        const request = new sql.Request(transaction);
+        await client.query('BEGIN'); // เริ่ม Transaction
 
         // 1. ดึงอัตราแลกเปลี่ยนมาเป็น "ตัวกลาง"
         let exchangeRate = 1;
         if (currency === 'LAK') {
-            const rateRes = await request.query("SELECT rate FROM ExchangeRates WHERE currency_pair = 'THB_LAK'");
-            if (rateRes.recordset.length > 0) {
-                exchangeRate = rateRes.recordset[0].rate;
+            const rateRes = await client.query("SELECT rate FROM ExchangeRates WHERE currency_pair = 'THB_LAK'");
+            if (rateRes.rows.length > 0) {
+                exchangeRate = rateRes.rows[0].rate;
             }
         }
 
@@ -1390,93 +1319,72 @@ app.post('/api/lottery/buy', async (req, res) => {
         const deductAmount = baseTHBAmount * exchangeRate; 
 
         // 4. เช็คยอดเงินและหักเงินในกระเป๋า
-        const userRes = await request
-            .input('userId', sql.Int, user_id)
-            .query('SELECT balance FROM Wallets WHERE user_id = @userId'); 
+        const userRes = await client.query('SELECT balance FROM Wallets WHERE user_id = $1', [user_id]); 
 
-        if (userRes.recordset.length === 0) throw new Error('ไม่พบข้อมูลกระเป๋าเงินในระบบ (กรุณาแจ้งแอดมินตรวจสอบ)');
-        if (userRes.recordset[0].balance < deductAmount) { 
+        if (userRes.rows.length === 0) throw new Error('ไม่พบข้อมูลกระเป๋าเงินในระบบ (กรุณาแจ้งแอดมินตรวจสอบ)');
+        if (parseFloat(userRes.rows[0].balance) < deductAmount) { 
             throw new Error('ยอดเงินในกระเป๋าไม่เพียงพอ');
         }
 
-        request.input('deductAmount', sql.Decimal(18,2), deductAmount);
-        await request.query(`
-            UPDATE Users SET wallet_balance = ISNULL(wallet_balance, 0) - @deductAmount WHERE user_id = @userId;
-            UPDATE Wallets SET balance = balance - @deductAmount WHERE user_id = @userId;
-        `);
+        await client.query(`
+            UPDATE Users SET wallet_balance = COALESCE(wallet_balance, 0) - $1 WHERE user_id = $2;
+            UPDATE Wallets SET balance = balance - $1 WHERE user_id = $2;
+        `, [deductAmount, user_id]);
 
         // 5. บันทึกประวัติ
-        await request
-            .input('title', sql.NVarChar, 'ซื้อหวยเวียดนาม')
-            .input('amount', sql.Decimal(18,2), -deductAmount) 
-            .query(`INSERT INTO Transactions (user_id, transaction_type, title, amount, status, created_at)
-                    VALUES (@userId, 'Buy Lottery', @title, @amount, 'Completed', GETDATE())`);
+        await client.query(`
+            INSERT INTO Transactions (user_id, transaction_type, title, amount, status, created_at)
+            VALUES ($1, 'Buy Lottery', 'ซื้อหวยเวียดนาม', $2, 'Completed', CURRENT_TIMESTAMP)
+        `, [user_id, -deductAmount]);
 
         // ==========================================
         // 🌟 แทรกระบบคำนวณ งวดวันที่ (draw_date) เข้าไปในบิล
+        // (ประยุกต์ใช้เวลาของ Postgres แทน DECLARE แบบเดิม)
         // ==========================================
-        const orderRes = await request
-            .input('currency', sql.VarChar, currency)
-            .input('totalPrice', sql.Decimal(18,2), deductAmount)
-            .input('note', sql.NVarChar, note || null) // 🌟 อัปเกรด 2: เตรียมค่า note ลงตัวแปร SQL
-            .query(`
-                DECLARE @TargetDrawDate DATE;
-                
-                DECLARE @ThaiTime DATETIME = DATEADD(HOUR, 7, GETUTCDATE());
-                DECLARE @CurrentTime TIME = CAST(@ThaiTime AS TIME);
-                DECLARE @CurrentDate DATE = CAST(@ThaiTime AS DATE);
-                
-                DECLARE @DB_CloseTime TIME = (SELECT TOP 1 close_time FROM System_Settings);
-                
-                IF @CurrentTime >= @DB_CloseTime
-                    SET @TargetDrawDate = DATEADD(day, 1, @CurrentDate);
-                ELSE
-                    SET @TargetDrawDate = @CurrentDate;
-
-                -- 🌟 อัปเกรด 3: เพิ่มคอลัมน์ order_note ลงไปตอน INSERT
-                INSERT INTO Lottery_Orders (user_id, total_amount, currency_code, status, draw_date, created_at, order_note)
-                OUTPUT INSERTED.order_id
-                VALUES (@userId, @totalPrice, @currency, N'รอผลตรวจ', @TargetDrawDate, @ThaiTime, @note)
-            `);
+        const orderRes = await client.query(`
+            INSERT INTO Lottery_Orders (user_id, total_amount, currency_code, status, draw_date, created_at, order_note)
+            VALUES (
+                $1, $2, $3, 'รอผลตรวจ', 
+                CASE 
+                    WHEN (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Bangkok')::time >= (SELECT close_time FROM System_Settings LIMIT 1)
+                    THEN (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Bangkok')::date + INTERVAL '1 day'
+                    ELSE (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Bangkok')::date
+                END, 
+                CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Bangkok', $4
+            )
+            RETURNING order_id
+        `, [user_id, deductAmount, currency, note || null]);
         
-        const orderId = orderRes.recordset[0].order_id;
+        const orderId = orderRes.rows[0].order_id;
 
+        // บันทึกรายการย่อย
         for (const item of cart) {
-            const itemReq = new sql.Request(transaction);
-            await itemReq
-                .input('orderId', sql.Int, orderId)
-                .input('lotteryNumber', sql.VarChar, item.number)
-                .input('lotteryType', sql.VarChar, item.type)
-                .input('price', sql.Decimal(18,2), item.price)
-                .query(`INSERT INTO Lottery_Order_Items (order_id, lottery_type, selected_number, price, status)
-                        VALUES (@orderId, @lotteryType, @lotteryNumber, @price, N'รอผลตรวจ')`);
+            await client.query(`
+                INSERT INTO Lottery_Order_Items (order_id, lottery_type, selected_number, price, status)
+                VALUES ($1, $2, $3, $4, 'รอผลตรวจ')
+            `, [orderId, item.type, item.number, item.price]);
         }
 
         // ==========================================
         // 🌟 6. ระบบจ่ายค่าแนะนำ (ดึง % จาก Database, แสตมป์ชื่อลูกทีม และแปลงสกุลเงินอัตโนมัติ!)
         // ==========================================
-        const refReq = new sql.Request(transaction);
-        refReq.input('buyerId', sql.Int, user_id);
-        
-        // 🌟 อัปเกรด 4: เพิ่มการดึงสกุลเงินของลูกทีมและคนแนะนำขึ้นมาเทียบกัน
-        const referrerRes = await refReq.query(`
+        const referrerRes = await client.query(`
             SELECT u_referrer.user_id, u_buyer.username as buyer_username,
-                   ISNULL(u_buyer.currency_code, 'THB') as buyer_currency,
-                   ISNULL(u_referrer.currency_code, 'THB') as referrer_currency
+                   COALESCE(u_buyer.currency_code, 'THB') as buyer_currency,
+                   COALESCE(u_referrer.currency_code, 'THB') as referrer_currency
             FROM Users u_buyer
             JOIN Users u_referrer ON u_buyer.referrer_username = u_referrer.username
-            WHERE u_buyer.user_id = @buyerId
-        `);
+            WHERE u_buyer.user_id = $1
+        `, [user_id]);
 
-        if (referrerRes.recordset.length > 0) {
-            const referrerId = referrerRes.recordset[0].user_id;
-            const buyerUsername = referrerRes.recordset[0].buyer_username;
-            const buyerCurrency = referrerRes.recordset[0].buyer_currency;
-            const referrerCurrency = referrerRes.recordset[0].referrer_currency;
+        if (referrerRes.rows.length > 0) {
+            const referrerId = referrerRes.rows[0].user_id;
+            const buyerUsername = referrerRes.rows[0].buyer_username;
+            const buyerCurrency = referrerRes.rows[0].buyer_currency;
+            const referrerCurrency = referrerRes.rows[0].referrer_currency;
             
-            const settingReq = new sql.Request(transaction);
-            const settingRes = await settingReq.query("SELECT purchase_percent FROM Commission_Settings WHERE id = 1");
-            const purchasePercent = settingRes.recordset.length > 0 ? settingRes.recordset[0].purchase_percent : 2.00; 
+            const settingRes = await client.query("SELECT purchase_percent FROM Commission_Settings WHERE id = 1");
+            const purchasePercent = settingRes.rows.length > 0 ? settingRes.rows[0].purchase_percent : 2.00; 
             
             // คำนวณค่าคอมตั้งต้น (ตามสกุลเงินที่ใช้ซื้อ)
             const rawCommission = deductAmount * (purchasePercent / 100); 
@@ -1486,88 +1394,84 @@ app.post('/api/lottery/buy', async (req, res) => {
             if (buyerCurrency !== referrerCurrency) {
                 const pair = `${buyerCurrency}_${referrerCurrency}`; 
                 
-                const rateReq = new sql.Request(transaction);
-                rateReq.input('pair', sql.VarChar, pair);
-                const rateRes = await rateReq.query(`SELECT rate FROM ExchangeRates WHERE currency_pair = @pair`);
+                const rateRes = await client.query(`SELECT rate FROM ExchangeRates WHERE currency_pair = $1`, [pair]);
                     
-                if (rateRes.recordset.length > 0) {
-                    finalCommission = finalCommission * rateRes.recordset[0].rate;
+                if (rateRes.rows.length > 0) {
+                    finalCommission = finalCommission * rateRes.rows[0].rate;
                 } else {
                     const reversePair = `${referrerCurrency}_${buyerCurrency}`;
-                    const reverseRateReq = new sql.Request(transaction);
-                    reverseRateReq.input('revPair', sql.VarChar, reversePair);
-                    const reverseRateRes = await reverseRateReq.query(`SELECT rate FROM ExchangeRates WHERE currency_pair = @revPair`);
+                    const reverseRateRes = await client.query(`SELECT rate FROM ExchangeRates WHERE currency_pair = $1`, [reversePair]);
                     
-                    if (reverseRateRes.recordset.length > 0) {
-                        finalCommission = finalCommission / reverseRateRes.recordset[0].rate;
+                    if (reverseRateRes.rows.length > 0) {
+                        finalCommission = finalCommission / reverseRateRes.rows[0].rate;
                     }
                 }
             }
 
-            const commReq = new sql.Request(transaction);
-            commReq.input('referrerId', sql.Int, referrerId);
-            commReq.input('commission', sql.Decimal(18,2), finalCommission); // 🌟 ใช้ยอดที่แปลงเสร็จแล้ว!
-            commReq.input('transTitle', sql.NVarChar, `รายได้ ${purchasePercent}% จากทีมงาน (${buyerUsername})`); 
+            const transTitle = `รายได้ ${purchasePercent}% จากทีมงาน (${buyerUsername})`;
             
-            await commReq.query(`
-                UPDATE Wallets SET balance = balance + @commission WHERE user_id = @referrerId;
-                UPDATE Users SET total_purchase_comm = ISNULL(total_purchase_comm, 0) + @commission WHERE user_id = @referrerId;
+            await client.query(`
+                UPDATE Wallets SET balance = balance + $1 WHERE user_id = $2;
+                UPDATE Users SET total_purchase_comm = COALESCE(total_purchase_comm, 0) + $1 WHERE user_id = $2;
                 INSERT INTO Transactions (user_id, transaction_type, title, amount, status, created_at)
-                VALUES (@referrerId, 'Affiliate Purchase', @transTitle, @commission, 'Completed', GETDATE());
-            `);
+                VALUES ($2, 'Affiliate Purchase', $3, $1, 'Completed', CURRENT_TIMESTAMP);
+            `, [finalCommission, referrerId, transTitle]);
         }
 
-        await transaction.commit();
+        await client.query('COMMIT');
         res.status(200).json({ success: true, message: 'ชำระเงินสำเร็จ', order_id: orderId });
 
     } catch (error) {
-        await transaction.rollback();
+        await client.query('ROLLBACK');
         res.status(400).json({ success: false, message: error.message || 'เกิดข้อผิดพลาดในการชำระเงิน' });
+    } finally {
+        client.release();
     }
 });
 
-// API สำหรับดึงเรทรางวัลไปแสดงที่หน้าสลิป
+
+// ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว (ลบตัวซ้ำออกแล้ว)
+// 🌟 API: ดึงอัตราจ่ายเงินรางวัลหวยไปแสดงที่หน้าสลิป
+// ==========================================
 app.get('/api/lottery/prize-rates', async (req, res) => {
     try {
-        const pool = await sql.connect(dbConfig);
-        const result = await pool.request().query('SELECT * FROM Lottery_Prize_Rates ORDER BY CAST(lottery_type AS INT) ASC');
-        res.status(200).json({ success: true, data: result.recordset });
+        const result = await pgPool.query('SELECT * FROM Lottery_Prize_Rates ORDER BY CAST(lottery_type AS INTEGER) ASC');
+        res.status(200).json({ success: true, data: result.rows });
     } catch (error) {
+        console.error('Error fetching prize rates:', error);
         res.status(500).json({ success: false, message: 'ไม่สามารถดึงข้อมูลอัตราจ่ายได้' });
     }
 });
 
 
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🌟 API: ดึงประวัติการซื้อหวยของ User (GET)
 // ==========================================
 app.get('/api/lottery/history/:userId', async (req, res) => {
     const userId = req.params.userId;
     try {
-        const pool = await sql.connect(dbConfig);
-        
         // 1. ดึงหัวบิลทั้งหมดของ User นี้ เรียงจากใหม่ไปเก่า
-        const orderRes = await pool.request()
-            .input('userId', sql.Int, userId)
-            .query(`
+        const orderRes = await pgPool.query(`
                 SELECT order_id, total_amount, currency_code, status, created_at
                 FROM Lottery_Orders
-                WHERE user_id = @userId
+                WHERE user_id = $1
                 ORDER BY created_at DESC
-            `);
+            `, [userId]
+        );
             
-        const orders = orderRes.recordset;
+        const orders = orderRes.rows;
 
         // 2. ดึงรายละเอียดเลขหวยแต่ละตัว มาผูกกับหัวบิล
         for (let order of orders) {
-            const itemRes = await pool.request()
-                .input('orderId', sql.Int, order.order_id)
-                .query(`
+            const itemRes = await pgPool.query(`
                     SELECT item_id, lottery_type, selected_number, price, status
                     FROM Lottery_Order_Items
-                    WHERE order_id = @orderId
-                `);
-            order.items = itemRes.recordset;
+                    WHERE order_id = $1
+                `, [order.order_id]
+            );
+            order.items = itemRes.rows;
         }
 
         res.status(200).json({ success: true, data: orders });
@@ -1579,41 +1483,27 @@ app.get('/api/lottery/history/:userId', async (req, res) => {
 
 
 // ==========================================
-// 🌟 API: ดึงอัตราจ่ายเงินรางวัลหวย
-// ==========================================
-app.get('/api/lottery/prize-rates', async (req, res) => {
-    try {
-        const pool = await sql.connect(dbConfig);
-        const result = await pool.request().query('SELECT * FROM Lottery_Prize_Rates ORDER BY CAST(lottery_type AS INT) ASC');
-        res.status(200).json({ success: true, data: result.recordset });
-    } catch (error) {
-        console.error('Error fetching prize rates:', error);
-        res.status(500).json({ success: false, message: 'ไม่สามารถดึงข้อมูลอัตราจ่ายได้' });
-    }
-});
-
-
-// ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🌟 API: ดึงประวัติการเงินทั้งหมดของลูกค้า (Statement)
 // ==========================================
 app.get('/api/transactions/:userId', async (req, res) => {
     try {
-        const pool = await sql.connect(dbConfig);
-        const result = await pool.request()
-            .input('userId', sql.Int, req.params.userId)
-            .query(`
+        const result = await pgPool.query(`
                 SELECT * FROM Transactions 
-                WHERE user_id = @userId 
+                WHERE user_id = $1 
                 ORDER BY created_at DESC
-            `);
+            `, [req.params.userId]
+        );
             
-        res.status(200).json({ success: true, data: result.recordset });
+        res.status(200).json({ success: true, data: result.rows });
     } catch (error) {
         console.error('Error fetching transactions history:', error);
         res.status(500).json({ success: false, message: 'ไม่สามารถดึงข้อมูลประวัติการเงินได้' });
     }
 });
+
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // API 1: ลูกค้าแจ้งฝากเงิน (บันทึกเป็น Pending เสมอ + ดักบิลซ้อน)
 // ==========================================
 app.post('/api/deposit-submit', async (req, res) => {
@@ -1621,19 +1511,17 @@ app.post('/api/deposit-submit', async (req, res) => {
     const { userId, bankName, accountNumber, currencyCode, amount, depositDate, depositTime, slipBase64 } = req.body;
     const cleanAmount = Math.round(parseFloat(amount) * 100) / 100; 
     const depositDatetime = `${depositDate} ${depositTime}`;
-    const pool = await sql.connect(dbConfig); 
 
     // 🛡️ [ด่านหน้าสุด]: เช็คว่ามีบิลที่ "รอตรวจ" (Pending) หรือ "รอแก้ไข" (Rejected) ค้างอยู่ไหม?
-    const checkActive = await pool.request()
-        .input('userId', sql.Int, userId)
-        .query(`
-            SELECT COUNT(*) as activeCount 
-            FROM Transactions_Deposit 
-            WHERE user_id = @userId AND status IN ('Pending', 'Rejected')
-        `);
+    // Postgres คืนค่า COUNT เป็น String จึงต้อง CAST เป็น INTEGER เพื่อเช็คค่าตัวเลขอย่างปลอดภัย
+    const checkActive = await pgPool.query(`
+        SELECT CAST(COUNT(*) AS INTEGER) as "activeCount" 
+        FROM Transactions_Deposit 
+        WHERE user_id = $1 AND status IN ('Pending', 'Rejected')
+    `, [userId]);
 
     // ถ้ามีบิลค้างอยู่เกิน 0 ให้เด้งออกทันที! ห้ามส่งคำขอใหม่เด็ดขาด
-    if (checkActive.recordset[0].activeCount > 0) {
+    if (checkActive.rows[0].activeCount > 0) {
         return res.status(400).json({ 
             success: false, 
             message: 'คุณมีรายการฝากเงินที่กำลังรอดำเนินการ หรือรอแก้ไขอยู่ กรุณาจัดการบิลเดิมให้เสร็จสิ้นก่อนทำรายการใหม่ครับ' 
@@ -1642,28 +1530,19 @@ app.post('/api/deposit-submit', async (req, res) => {
     // ----------------------------------------
 
     // ดึง Username
-    const userResult = await pool.request()
-      .input('searchUserId', sql.Int, userId)
-      .query(`SELECT username FROM Users WHERE user_id = @searchUserId`);
+    const userResult = await pgPool.query(`SELECT username FROM Users WHERE user_id = $1`, [userId]);
     let customerName = 'ไม่ระบุชื่อ'; 
-    if (userResult.recordset.length > 0) {
-      customerName = userResult.recordset[0].username;
+    if (userResult.rows.length > 0) {
+      customerName = userResult.rows[0].username;
     }
 
     // บันทึกคำขอฝากเงิน (สถานะจะเป็น Pending ตลอดไปจนกว่าแอดมินจะกดอนุมัติ)
-    await pool.request()
-      .input('userId', sql.Int, userId)
-      .input('customerName', sql.NVarChar(100), customerName)
-      .input('bankName', sql.NVarChar(100), bankName || '')
-      .input('accountNumber', sql.VarChar(50), accountNumber || '')
-      .input('amount', sql.Decimal(18, 2), cleanAmount) 
-      .input('currencyCode', sql.VarChar(10), currencyCode || 'THB')
-      .input('slipImage', sql.NVarChar(sql.MAX), slipBase64) 
-      .input('depositDatetime', sql.DateTime, depositDatetime) 
-      .query(`
+    await pgPool.query(`
         INSERT INTO Transactions_Deposit (user_id, customer_name, bank_name, account_number, amount, currency_code, slip_image, status, deposit_datetime, created_at)
-        VALUES (@userId, @customerName, @bankName, @accountNumber, @amount, @currencyCode, @slipImage, 'Pending', @depositDatetime, GETDATE())
-      `);
+        VALUES ($1, $2, $3, $4, $5, $6, $7, 'Pending', $8, CURRENT_TIMESTAMP)
+      `, 
+      [userId, customerName, bankName || '', accountNumber || '', cleanAmount, currencyCode || 'THB', slipBase64, depositDatetime]
+    );
 
     res.json({ success: true, message: 'ส่งคำขอฝากเงินสำเร็จ! รอแอดมินตรวจสอบสลิป' });
   } catch (error) {
@@ -1674,88 +1553,84 @@ app.post('/api/deposit-submit', async (req, res) => {
 
 
 // ==========================================
-// API: ดึงรายการแจ้งฝากเงิน + สรุปยอดรายเดือน (สำหรับ Admin) แก้เพิ่มถ้าซ่ำให้ลบตัวอิ่น
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
+// API: ดึงรายการแจ้งฝากเงิน + สรุปยอดรายเดือน (สำหรับ Admin)
 // ==========================================
 app.get('/api/admin/deposit-requests', async (req, res) => {
   try {
-    const pool = await sql.connect(dbConfig);
-    
     // 🌟 แก้ไข: ดึงรายการรอตรวจทั้งหมด + ประวัติย้อนหลัง 7 วัน (รายการเมื่อวานจะได้ไม่หาย)
     const queryList = `
       SELECT 
         deposit_id, user_id, customer_name, bank_name, account_number, 
         amount, currency_code, slip_image, status, 
-        FORMAT(deposit_datetime, 'yyyy-MM-ddTHH:mm:ss') AS deposit_datetime, 
-        FORMAT(created_at, 'yyyy-MM-ddTHH:mm:ss') AS created_at, 
+        to_char(deposit_datetime, 'YYYY-MM-DD"T"HH24:MI:SS') AS deposit_datetime, 
+        to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SS') AS created_at, 
         reject_reasons, edit_count
       FROM Transactions_Deposit
       WHERE status IN ('Pending', 'Slip Verified') 
-         OR CAST(created_at AS DATE) >= CAST(DATEADD(day, -7, GETDATE()) AS DATE)
+         OR CAST(created_at AS DATE) >= CAST(CURRENT_TIMESTAMP - INTERVAL '7 days' AS DATE)
       ORDER BY created_at DESC
     `;
-    const resultList = await pool.request().query(queryList);
+    const resultList = await pgPool.query(queryList);
 
+    // ใช้ EXTRACT() สำหรับหาเดือนและปีปัจจุบัน
     const querySummary = `
-      SELECT t.currency_code, ISNULL(SUM(t.amount), 0) as total_amount
+      SELECT t.currency_code, COALESCE(SUM(t.amount), 0) as total_amount
       FROM Transactions_Deposit t
       INNER JOIN Bank_Statements b ON t.deposit_id = b.reconciled_with_deposit_id
       WHERE t.status = 'Approved'
-        AND MONTH(t.created_at) = MONTH(GETDATE())
-        AND YEAR(t.created_at) = YEAR(GETDATE())
+        AND EXTRACT(MONTH FROM t.created_at) = EXTRACT(MONTH FROM CURRENT_TIMESTAMP)
+        AND EXTRACT(YEAR FROM t.created_at) = EXTRACT(YEAR FROM CURRENT_TIMESTAMP)
       GROUP BY t.currency_code
     `;
-    const resultSummary = await pool.request().query(querySummary);
+    const resultSummary = await pgPool.query(querySummary);
     
     const monthlySummary = {};
-    resultSummary.recordset.forEach(row => {
+    resultSummary.rows.forEach(row => {
       monthlySummary[row.currency_code] = row.total_amount;
     });
 
-    res.json({ success: true, requests: resultList.recordset, summary: monthlySummary });
+    res.json({ success: true, requests: resultList.rows, summary: monthlySummary });
 
   } catch (error) {
     console.error('Error fetching deposit requests:', error);
     res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการดึงข้อมูล' });
   }
 });
-
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🌟 API: แอดมินตีกลับคำขอฝากเงิน (แก้ไขบั๊ก Error 500 เรียบร้อย)
 // ==========================================
 app.post('/api/admin/deposit-reject', async (req, res) => {
   try {
     const { depositId, userId, rejectReasons } = req.body;
-    const pool = await sql.connect(dbConfig);
 
     // แปลงเหตุผลเป็น JSON (ใส่กันเหนียวไว้เผื่อไม่มีค่าส่งมา)
     const reasonsJson = JSON.stringify(rejectReasons || []);
 
     // 1. อัปเดตสถานะเป็น ตีกลับ (Rejected) และบวก edit_count
-    const updateResult = await pool.request()
-      .input('depositId', sql.Int, depositId)
-      .input('reasons', sql.NVarChar, reasonsJson)
-      .query(`
+    const updateResult = await pgPool.query(`
         UPDATE Transactions_Deposit 
         SET status = 'Rejected', 
             reviewed_by = 'Admin (Returned)', 
-            reject_reasons = @reasons,
-            edit_count = ISNULL(edit_count, 0) + 1
-        OUTPUT INSERTED.edit_count
-        WHERE deposit_id = @depositId
-      `);
+            reject_reasons = $1,
+            edit_count = COALESCE(edit_count, 0) + 1
+        WHERE deposit_id = $2
+        RETURNING edit_count
+      `, [reasonsJson, depositId]
+    );
       
-    const currentEditCount = updateResult.recordset[0].edit_count;
+    const currentEditCount = updateResult.rows[0].edit_count;
 
     // 2. 🛡️ ระบบป้องกันก่อกวน: ถ้าลูกค้ารายเดิม ส่งแก้บิลเดิมผิดเกิน 3 ครั้ง ให้ยกเลิกถาวร!
     if (currentEditCount > 3) {
-      await pool.request()
-        .input('depositId', sql.Int, depositId)
-        .query(`
+      await pgPool.query(`
           UPDATE Transactions_Deposit 
           SET status = 'Cancelled', 
               reviewed_by = 'System Blocked (Spam)' 
-          WHERE deposit_id = @depositId
-        `);
+          WHERE deposit_id = $1
+        `, [depositId]
+      );
         
       return res.json({ 
         success: true, 
@@ -1772,6 +1647,7 @@ app.post('/api/admin/deposit-reject', async (req, res) => {
 });
 
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // API: ลูกค้าแก้ไขคำขอที่ถูกตีกลับ แล้วส่งมาให้แอดมินตรวจใหม่
 // ==========================================
 app.put('/api/deposit-edit/:id', async (req, res) => {
@@ -1782,24 +1658,18 @@ app.put('/api/deposit-edit/:id', async (req, res) => {
     const depositDatetime = `${depositDate} ${depositTime}`;
     const cleanAmount = Math.round(parseFloat(amount) * 100) / 100;
     
-    const pool = await sql.connect(dbConfig);
-    
     // 🌟 อัปเดตข้อมูลที่ลูกค้าแก้ เปลี่ยนสถานะเป็น Pending เพื่อกลับไปเข้าคิวให้แอดมินตรวจ
-    await pool.request()
-      .input('id', sql.Int, depositId)
-      .input('amount', sql.Decimal(18,2), cleanAmount)
-      .input('depositDatetime', sql.DateTime, depositDatetime)
-      .input('slipImage', sql.NVarChar(sql.MAX), slipBase64)
-      .query(`
+    await pgPool.query(`
         UPDATE Transactions_Deposit
-        SET amount = @amount,
-            deposit_datetime = @depositDatetime,
-            slip_image = @slipImage,
+        SET amount = $1,
+            deposit_datetime = $2,
+            slip_image = $3,
             status = 'Pending', 
             reviewed_by = 'User Updated',
             reject_reasons = NULL
-        WHERE deposit_id = @id
-      `);
+        WHERE deposit_id = $4
+      `, [cleanAmount, depositDatetime, slipBase64, depositId]
+    );
       
     res.json({ success: true, message: 'ส่งคำขอที่แก้ไขแล้วเรียบร้อย กรุณารอแอดมินตรวจสอบ' });
   } catch(error) {
@@ -1810,13 +1680,13 @@ app.put('/api/deposit-edit/:id', async (req, res) => {
 
 
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // API: ดึงรายชื่อธนาคารสำหรับ Dropdown
 // ==========================================
 app.get('/api/admin/banks', async (req, res) => {
   try {
-    const pool = await sql.connect(dbConfig);
-    const result = await pool.request().query("SELECT * FROM Banks WHERE is_active = 1");
-    res.json({ success: true, banks: result.recordset });
+    const result = await pgPool.query("SELECT * FROM Banks WHERE is_active = '1'");
+    res.json({ success: true, banks: result.rows });
   } catch (error) {
     res.status(500).json({ success: false, message: 'ไม่สามารถดึงข้อมูลธนาคารได้' });
   }
@@ -1825,200 +1695,173 @@ app.get('/api/admin/banks', async (req, res) => {
 
 
 // ==========================================
-// API 1: ลูกค้าแจ้งฝากเงิน (ค้นหาว่าแอดมินคีย์ยอดรอไว้แล้วหรือยัง)
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
+// API 1: ลูกค้าแจ้งฝากเงิน (อัปเดตค้นหาว่าแอดมินคีย์ยอดรอไว้แล้วหรือยัง)
 // ==========================================
 app.post('/api/deposit-submit', async (req, res) => {
+  const client = await pgPool.connect(); // 🌟 ใช้ Transaction เผื่อกรณีคีย์ตรงกันแล้วต้องอัปเดตเงิน
+
   try {
     const { userId, bankName, accountNumber, currencyCode, amount, depositDate, depositTime, slipBase64 } = req.body;
     const cleanAmount = Math.round(parseFloat(amount) * 100) / 100; 
     const depositDatetime = `${depositDate} ${depositTime}`;
-    const pool = await sql.connect(dbConfig); 
+    
+    await client.query('BEGIN'); // เริ่มล็อคฐานข้อมูล
 
     // ดึงชื่อลูกค้า
-    const nameResult = await pool.request()
-      .input('searchUserId', sql.Int, userId)
-      .query(`SELECT firstname, lastname FROM UserName_Lastname WHERE user_id = @searchUserId`);
+    const nameResult = await client.query(`SELECT firstname, lastname FROM UserName_Lastname WHERE user_id = $1`, [userId]);
     let fullName = 'ผู้ใช้ทั่วไป'; 
-    if (nameResult.recordset.length > 0) {
-      fullName = `${nameResult.recordset[0].firstname} ${nameResult.recordset[0].lastname}`; 
+    if (nameResult.rows.length > 0) {
+      fullName = `${nameResult.rows[0].firstname} ${nameResult.rows[0].lastname}`; 
     }
 
     // บันทึกคำขอฝากเงินของลูกค้า (สถานะเริ่มต้นคือ Pending)
-    const insertResult = await pool.request()
-      .input('userId', sql.Int, userId)
-      .input('customerName', sql.NVarChar(100), fullName)
-      .input('bankName', sql.NVarChar(100), bankName || '')
-      .input('accountNumber', sql.VarChar(50), accountNumber || '')
-      .input('amount', sql.Decimal(18, 2), cleanAmount) 
-      .input('currencyCode', sql.VarChar(10), currencyCode || 'THB')
-      .input('slipImage', sql.NVarChar(sql.MAX), slipBase64) 
-      .input('depositDatetime', sql.DateTime, depositDatetime) 
-      .query(`
+    const insertResult = await client.query(`
         INSERT INTO Transactions_Deposit (user_id, customer_name, bank_name, account_number, amount, currency_code, slip_image, status, deposit_datetime, created_at)
-        OUTPUT INSERTED.deposit_id
-        VALUES (@userId, @customerName, @bankName, @accountNumber, @amount, @currencyCode, @slipImage, 'Pending', @depositDatetime, GETDATE())
-      `);
+        VALUES ($1, $2, $3, $4, $5, $6, $7, 'Pending', $8, CURRENT_TIMESTAMP)
+        RETURNING deposit_id
+      `, 
+      [userId, fullName, bankName || '', accountNumber || '', cleanAmount, currencyCode || 'THB', slipBase64, depositDatetime]
+    );
 
-    const newDepositId = insertResult.recordset[0].deposit_id;
+    const newDepositId = insertResult.rows[0].deposit_id;
 
     // 🌟 1.1 ตรวจสอบว่า "แอดมินได้คีย์ยอดนี้รอไว้ในระบบแล้วหรือยัง?"
-    const findAdminStatement = await pool.request()
-      .input('amount', sql.Decimal(18,2), cleanAmount)
-      .input('accountNumber', sql.VarChar, accountNumber)
-      .input('transferDate', sql.VarChar, depositDate)
-      .input('transferTime', sql.VarChar, depositTime)
-      .query(`
-        SELECT TOP 1 statement_id FROM Bank_Statements
-        WHERE is_reconciled = 0
-          AND account_number = @accountNumber
-          AND ABS(amount - @amount) <= 0.01
-          AND CAST(transfer_date AS DATE) = CAST(@transferDate AS DATE)
-          AND CAST(transfer_time AS TIME(0)) = CAST(@transferTime AS TIME(0))
-      `);
+    const findAdminStatement = await client.query(`
+        SELECT statement_id FROM Bank_Statements
+        WHERE is_reconciled = '0'
+          AND account_number = $1
+          AND ABS(amount - $2) <= 0.01
+          AND CAST(transfer_date AS DATE) = CAST($3 AS DATE)
+          AND CAST(transfer_time AS TIME) = CAST($4 AS TIME)
+        LIMIT 1
+      `, [accountNumber, cleanAmount, depositDate, depositTime]
+    );
 
-    if (findAdminStatement.recordset.length > 0) {
+    if (findAdminStatement.rows.length > 0) {
       // 🌟 เจอที่แอดมินคีย์รอไว้! -> อนุมัติและเติมเงินทันที
-      const stmtId = findAdminStatement.recordset[0].statement_id;
+      const stmtId = findAdminStatement.rows[0].statement_id;
 
-      await pool.request().input('depositId', sql.Int, newDepositId)
-        .query("UPDATE Transactions_Deposit SET status = 'Approved', reviewed_by = 'Auto-Reconciled' WHERE deposit_id = @depositId");
+      await client.query("UPDATE Transactions_Deposit SET status = 'Approved', reviewed_by = 'Auto-Reconciled' WHERE deposit_id = $1", [newDepositId]);
 
-      await pool.request().input('userId', sql.Int, userId).input('amount', sql.Decimal(18,2), cleanAmount)
-        .query("UPDATE Wallets SET balance = ISNULL(balance, 0) + @amount, last_updated = GETDATE() WHERE user_id = @userId");
+      await client.query("UPDATE Wallets SET balance = COALESCE(balance, 0) + $1, last_updated = CURRENT_TIMESTAMP WHERE user_id = $2", [cleanAmount, userId]);
 
-      await pool.request().input('userId', sql.Int, userId).input('amount', sql.Decimal(18,2), cleanAmount).input('title', sql.NVarChar(255), 'ฝากเงิน (อัตโนมัติ)')
-        .query("INSERT INTO Transactions (user_id, transaction_type, title, amount, status, created_at) VALUES (@userId, 'Deposit', @title, @amount, 'Completed', GETDATE())");
+      await client.query("INSERT INTO Transactions (user_id, transaction_type, title, amount, status, created_at) VALUES ($1, 'Deposit', 'ฝากเงิน (อัตโนมัติ)', $2, 'Completed', CURRENT_TIMESTAMP)", [userId, cleanAmount]);
 
-      await pool.request().input('stmtId', sql.Int, stmtId).input('depositId', sql.Int, newDepositId)
-        .query("UPDATE Bank_Statements SET is_reconciled = 1, reconciled_with_deposit_id = @depositId WHERE statement_id = @stmtId");
+      await client.query("UPDATE Bank_Statements SET is_reconciled = '1', reconciled_with_deposit_id = $1 WHERE statement_id = $2", [newDepositId, stmtId]);
     }
 
+    await client.query('COMMIT'); // ยืนยันข้อมูลทั้งหมดลง Database
     res.json({ success: true, message: 'ส่งคำขอฝากเงินสำเร็จ!' });
+
   } catch (error) {
+    await client.query('ROLLBACK'); // ยกเลิกหากเกิดปัญหา
     console.error('Error:', error);
     res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการบันทึกข้อมูล' });
+  } finally {
+    client.release(); // คืน Connection
   }
 });
 
 
-
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🚀 THE FUTURE RECONCILIATION ENGINE (ระบบกระทบยอดอัตโนมัติ 2 ทาง)
 // API: แอดมินกด "ตรวจสอบสลิปผ่าน"
 // ==========================================
 app.post('/api/admin/deposit-approve', async (req, res) => {
   const { depositId, userId, amount } = req.body;
 
+  const client = await pgPool.connect(); // 🌟 ใช้ Transaction
+
   try {
-    const pool = await sql.connect(dbConfig);
-    const transaction = new sql.Transaction(pool);
-    await transaction.begin();
+    await client.query('BEGIN');
 
-    try {
-      // 1. ดึงข้อมูลคำขอฝากเงินขึ้นมา
-      const depositRes = await transaction.request()
-        .input('depositId', sql.Int, depositId)
-        .query(`
-          SELECT amount, deposit_datetime, account_number, bank_name, currency_code 
-          FROM Transactions_Deposit 
-          WHERE deposit_id = @depositId
-        `);
+    // 1. ดึงข้อมูลคำขอฝากเงินขึ้นมา
+    const depositRes = await client.query(`
+        SELECT amount, deposit_datetime, account_number, bank_name, currency_code 
+        FROM Transactions_Deposit 
+        WHERE deposit_id = $1
+      `, [depositId]
+    );
       
-      if (depositRes.recordset.length === 0) throw new Error('ไม่พบข้อมูลคำขอฝากเงิน');
-      const depositData = depositRes.recordset[0];
+    if (depositRes.rows.length === 0) throw new Error('ไม่พบข้อมูลคำขอฝากเงิน');
+    const depositData = depositRes.rows[0];
 
-      // 2. เปลี่ยนสถานะคำขอฝากเป็น 'Slip Verified' 
-      await transaction.request()
-        .input('depositId', sql.Int, depositId)
-        .query(`
-          UPDATE Transactions_Deposit 
-          SET status = 'Slip Verified', reviewed_by = 'Admin' 
-          WHERE deposit_id = @depositId
-        `);
+    // 2. เปลี่ยนสถานะคำขอฝากเป็น 'Slip Verified' 
+    await client.query(`
+        UPDATE Transactions_Deposit 
+        SET status = 'Slip Verified', reviewed_by = 'Admin' 
+        WHERE deposit_id = $1
+      `, [depositId]
+    );
 
-      // 3. วิ่งไปค้นหายอดเงินเข้า (Bank_Statements) 
-      const matchRes = await transaction.request()
-        .input('amount', sql.Decimal(18, 2), depositData.amount)
-        .input('accountNumber', sql.VarChar, depositData.account_number || '')
-        .input('depositDate', sql.DateTime, depositData.deposit_datetime)
-        .query(`
-          SELECT TOP 1 statement_id 
-          FROM Bank_Statements 
-          WHERE (is_reconciled = 0 OR is_reconciled IS NULL) 
-            AND amount = @amount 
-            AND account_number = @accountNumber
-            AND transfer_date = CAST(@depositDate AS DATE)
-        `);
+    // 3. วิ่งไปค้นหายอดเงินเข้า (Bank_Statements) 
+    const matchRes = await client.query(`
+        SELECT statement_id 
+        FROM Bank_Statements 
+        WHERE (is_reconciled = '0' OR is_reconciled IS NULL) 
+          AND amount = $1 
+          AND account_number = $2
+          AND transfer_date = CAST($3 AS DATE)
+        LIMIT 1
+      `, [depositData.amount, depositData.account_number || '', depositData.deposit_datetime]
+    );
 
-      // 4. กรณีที่ 1: พบยอดเงินที่ตรงกัน! (กระทบยอดสำเร็จทันที)
-      if (matchRes.recordset.length > 0) {
-        const matchedStatementId = matchRes.recordset[0].statement_id;
+    // 4. กรณีที่ 1: พบยอดเงินที่ตรงกัน! (กระทบยอดสำเร็จทันที)
+    if (matchRes.rows.length > 0) {
+      const matchedStatementId = matchRes.rows[0].statement_id;
 
-        // 4.1 อัปเดตสถานะทั้ง 2 ฝั่งให้เป็น 'สำเร็จ'
-        await transaction.request()
-          .input('depositId', sql.Int, depositId)
-          .input('statementId', sql.Int, matchedStatementId)
-          .query(`
-            UPDATE Transactions_Deposit SET status = 'Approved' WHERE deposit_id = @depositId;
-            UPDATE Bank_Statements SET is_reconciled = 1, reconciled_with_deposit_id = @depositId WHERE statement_id = @statementId;
-          `);
+      // 4.1 อัปเดตสถานะทั้ง 2 ฝั่งให้เป็น 'สำเร็จ'
+      await client.query(`UPDATE Transactions_Deposit SET status = 'Approved' WHERE deposit_id = $1`, [depositId]);
+      await client.query(`UPDATE Bank_Statements SET is_reconciled = '1', reconciled_with_deposit_id = $1 WHERE statement_id = $2`, [depositId, matchedStatementId]);
 
-        // 4.2 เติมเงินเข้า Wallet ลูกค้า
-        await transaction.request()
-          .input('userId', sql.Int, userId)
-          .input('amount', sql.Decimal(18, 2), amount)
-          .query(`UPDATE Wallets SET balance = ISNULL(balance, 0) + @amount, last_updated = GETDATE() WHERE user_id = @userId`);
+      // 4.2 เติมเงินเข้า Wallet ลูกค้า
+      await client.query(`UPDATE Wallets SET balance = COALESCE(balance, 0) + $1, last_updated = CURRENT_TIMESTAMP WHERE user_id = $2`, [amount, userId]);
 
-        // 4.3 บันทึกประวัติการเงิน (Transaction Log)
-        // 🌟 [แก้ไขชื่อคอลัมน์ให้ถูกต้องตาม DB แล้วครับ!]
-        await transaction.request()
-          .input('userId', sql.Int, userId)
-          .input('amount', sql.Decimal(18, 2), amount)
-          .input('title', sql.NVarChar(255), 'ระบบกระทบยอดเงินฝากอัตโนมัติ')
-          .query(`
-            INSERT INTO Transactions (user_id, transaction_type, title, amount, status, created_at) 
-            VALUES (@userId, 'Deposit', @title, @amount, 'Completed', GETDATE())
-          `);
+      // 4.3 บันทึกประวัติการเงิน (Transaction Log)
+      await client.query(`
+          INSERT INTO Transactions (user_id, transaction_type, title, amount, status, created_at) 
+          VALUES ($1, 'Deposit', 'ระบบกระทบยอดเงินฝากอัตโนมัติ', $2, 'Completed', CURRENT_TIMESTAMP)
+        `, [userId, amount]
+      );
 
-        await transaction.commit();
-        res.json({ success: true, message: 'สลิปถูกต้อง และระบบชนยอดอัตโนมัติสำเร็จ! (เงินเข้าลูกค้าแล้ว)' });
+      await client.query('COMMIT');
+      res.json({ success: true, message: 'สลิปถูกต้อง และระบบชนยอดอัตโนมัติสำเร็จ! (เงินเข้าลูกค้าแล้ว)' });
       
-      } 
-      // 5. กรณีที่ 2: ยังไม่มียอดเงินตรงกันเข้ามา (ให้ค้างสถานะรอฝั่งบัญชีคีย์ยอด)
-      else {
-        await transaction.commit();
-        res.json({ success: true, message: 'สลิปถูกต้องแล้ว (กำลังรอฝั่งบัญชีเงินเข้าคีย์ยอดเพื่อชนยอดอัตโนมัติ)' });
-      }
-
-    } catch (err) {
-      await transaction.rollback();
-      console.error("SQL Transaction Error:", err);
-      res.status(500).json({ success: false, message: 'DB Error: ' + err.message });
+    } 
+    // 5. กรณีที่ 2: ยังไม่มียอดเงินตรงกันเข้ามา (ให้ค้างสถานะรอฝั่งบัญชีคีย์ยอด)
+    else {
+      await client.query('COMMIT');
+      res.json({ success: true, message: 'สลิปถูกต้องแล้ว (กำลังรอฝั่งบัญชีเงินเข้าคีย์ยอดเพื่อชนยอดอัตโนมัติ)' });
     }
+
   } catch (error) {
+    await client.query('ROLLBACK');
     console.error('Auto Reconciliation Connection Error:', error);
-    res.status(500).json({ success: false, message: 'ไม่สามารถเชื่อมต่อฐานข้อมูลได้: ' + error.message });
+    res.status(500).json({ success: false, message: 'ไม่สามารถเชื่อมต่อฐานข้อมูล หรือเกิดข้อผิดพลาด: ' + error.message });
+  } finally {
+    client.release();
   }
 });
 
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🌟 API 1: ดึงประวัติการฝากเงินของลูกค้า (เพื่อเช็คยอดตีกลับและแจ้งเตือน)
 // ==========================================
 app.get('/api/user/deposits/:userId', async (req, res) => {
   const { userId } = req.params;
   try {
-    const pool = await sql.connect(dbConfig);
-    const result = await pool.request()
-      .input('userId', sql.Int, userId)
-      .query(`
+    const result = await pgPool.query(`
         SELECT deposit_id, amount, deposit_datetime, slip_image, status, reject_reasons, account_number, bank_name
         FROM Transactions_Deposit 
-        WHERE user_id = @userId 
+        WHERE user_id = $1 
         ORDER BY created_at DESC
-      `);
+      `, [userId]
+    );
     
-    // ส่งข้อมูลกลับไปให้หน้าบ้าน (Dashboard และ TopNavbar เอาไปนับจำนวน Rejected)
-    res.json({ success: true, data: result.recordset });
+    // ส่งข้อมูลกลับไปให้หน้าบ้าน
+    res.json({ success: true, data: result.rows });
   } catch (error) {
     console.error('Error fetching user deposits:', error);
     res.status(500).json({ success: false, message: 'Server error' });
@@ -2026,52 +1869,43 @@ app.get('/api/user/deposits/:userId', async (req, res) => {
 });
 
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🌟 API 2: สำหรับลูกค้ารับส่งข้อมูลที่ "แก้ไขแล้ว" กลับไปให้แอดมิน
 // ==========================================
 app.put('/api/deposit-edit/:depositId', async (req, res) => {
   const { depositId } = req.params;
   const { amount, depositDate, depositTime, slipBase64 } = req.body;
   
-  // 🌟 [แก้บั๊กเวลาเพี้ยน] จัดฟอร์แมตเวลาให้เป็น YYYY-MM-DD HH:mm:ss เป๊ะๆ
+  // 🌟 [แก้บั๊กเวลาเพี้ยน]
   let timeStr = depositTime;
-  if (timeStr.length === 5) timeStr += ':00'; // ถ้ามาแค่ 11:11 ให้เติมวินาทีเป็น 11:11:00
+  if (timeStr.length === 5) timeStr += ':00'; 
   
-  const depositDatetime = `${depositDate} ${timeStr}`; // ใช้เว้นวรรค ห้ามใช้ตัว T เพื่อกัน SQL เพี้ยน
+  const depositDatetime = `${depositDate} ${timeStr}`; 
 
   try {
-    const pool = await sql.connect(dbConfig);
-    
     if (slipBase64) {
-      await pool.request()
-        .input('depositId', sql.Int, depositId)
-        .input('amount', sql.Decimal(18, 2), amount)
-        // 🌟 บังคับให้ SQL รับเป็นตัวหนังสือตรงๆ (VarChar) ห้ามมันบวกลบเวลาเอง
-        .input('depositDatetime', sql.VarChar, depositDatetime) 
-        .input('slipImage', sql.VarChar(sql.MAX), slipBase64)
-        .query(`
+      await pgPool.query(`
           UPDATE Transactions_Deposit 
-          SET amount = @amount, 
-              deposit_datetime = @depositDatetime, 
-              slip_image = @slipImage,
+          SET amount = $1, 
+              deposit_datetime = $2, 
+              slip_image = $3,
               status = 'Pending', 
               reject_reasons = NULL,
-              edit_count = ISNULL(edit_count, 0) + 1
-          WHERE deposit_id = @depositId
-        `);
+              edit_count = COALESCE(edit_count, 0) + 1
+          WHERE deposit_id = $4
+        `, [amount, depositDatetime, slipBase64, depositId]
+      );
     } else {
-      await pool.request()
-        .input('depositId', sql.Int, depositId)
-        .input('amount', sql.Decimal(18, 2), amount)
-        .input('depositDatetime', sql.VarChar, depositDatetime)
-        .query(`
+      await pgPool.query(`
           UPDATE Transactions_Deposit 
-          SET amount = @amount, 
-              deposit_datetime = @depositDatetime, 
+          SET amount = $1, 
+              deposit_datetime = $2, 
               status = 'Pending', 
               reject_reasons = NULL,
-              edit_count = ISNULL(edit_count, 0) + 1
-          WHERE deposit_id = @depositId
-        `);
+              edit_count = COALESCE(edit_count, 0) + 1
+          WHERE deposit_id = $3
+        `, [amount, depositDatetime, depositId]
+      );
     }
 
     res.json({ success: true, message: 'ส่งข้อมูลแก้ไขเรียบร้อยแล้ว แอดมินจะรีบตรวจสอบอีกครั้งครับ' });
@@ -2083,6 +1917,7 @@ app.put('/api/deposit-edit/:depositId', async (req, res) => {
 
 
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // API 2: บัญชีคีย์ยอดโอนเข้า (ค้นหาบิลที่แอดมินตรวจไว้แล้ว แบบฉลาด 🌟)
 // ==========================================
 app.post('/api/admin/key-statement', async (req, res) => {
@@ -2101,62 +1936,58 @@ app.post('/api/admin/key-statement', async (req, res) => {
     if (cleanTime.length === 5) cleanTime += ':00';
     const cleanAmount = Math.round(parseFloat(amount) * 100) / 100;
     
-    const pool = await sql.connect(dbConfig);
-
-    // 1. บันทึกยอดที่ฝั่งบัญชีคีย์เข้ามา
-    const insertStmt = await pool.request()
-      .input('bankId', sql.Int, bankId)
-      .input('bankName', sql.NVarChar, bankName)
-      .input('accountNumber', sql.VarChar, accountNumber)
-      .input('amount', sql.Decimal(18,2), cleanAmount)
-      .input('transferDate', sql.VarChar, transferDate)
-      .input('transferTime', sql.VarChar, cleanTime)
-      .input('recordedBy', sql.NVarChar, adminName)
-      .query(`
+    // 🌟 1. บันทึกยอดที่ฝั่งบัญชีคีย์เข้ามา
+    const insertStmt = await pgPool.query(`
         INSERT INTO Bank_Statements (bank_id, bank_name, account_number, amount, transfer_date, transfer_time, recorded_by, is_reconciled)
-        OUTPUT INSERTED.statement_id
-        VALUES (@bankId, @bankName, @accountNumber, @amount, CAST(@transferDate AS DATE), CAST(@transferTime AS TIME(0)), @recordedBy, 0)
-      `);
-    const statementId = insertStmt.recordset[0].statement_id;
+        VALUES ($1, $2, $3, $4, CAST($5 AS DATE), CAST($6 AS TIME), $7, '0')
+        RETURNING statement_id
+      `, [bankId, bankName, accountNumber, cleanAmount, transferDate, cleanTime, adminName]
+    );
+    const statementId = insertStmt.rows[0].statement_id;
 
-    // 2. 🌟 ค้นหาและจับคู่สลิปแบบฉลาด (Smart Match)
-    const findSlip = await pool.request()
-      .input('amount', sql.Decimal(18,2), cleanAmount)
-      .input('accountNumber', sql.VarChar, accountNumber)
-      .input('transferDate', sql.VarChar, transferDate)
-      .input('transferTime', sql.VarChar, cleanTime)
-      .query(`
-        SELECT TOP 1 deposit_id, user_id FROM Transactions_Deposit 
+    // 2. 🌟 ค้นหาและจับคู่สลิปแบบฉลาด (Smart Match) แปลงสมการหาค่าความต่างของเวลาให้เข้ากับ Postgres
+    const findSlip = await pgPool.query(`
+        SELECT deposit_id, user_id FROM Transactions_Deposit 
         WHERE status = 'Slip Verified' 
           -- 🌟 ตัดขีดกลางและช่องว่างก่อนเทียบเลขบัญชี
-          AND REPLACE(REPLACE(account_number, '-', ''), ' ', '') = REPLACE(REPLACE(@accountNumber, '-', ''), ' ', '')
+          AND REPLACE(REPLACE(account_number, '-', ''), ' ', '') = REPLACE(REPLACE($1, '-', ''), ' ', '')
           -- 🌟 ยอดเงินต้องตรงกันเป๊ะ
-          AND ABS(amount - @amount) <= 0.01
+          AND ABS(amount - $2) <= 0.01
           -- 🌟 วันที่โอนต้องตรงกัน
-          AND CAST(deposit_datetime AS DATE) = CAST(@transferDate AS DATE)
-          -- 🌟 อนุโลมเวลาคลาดเคลื่อนได้ไม่เกิน +/- 10 นาที
-          AND ABS(DATEDIFF(MINUTE, CAST(deposit_datetime AS TIME(0)), CAST(@transferTime AS TIME(0)))) <= 10
+          AND CAST(deposit_datetime AS DATE) = CAST($3 AS DATE)
+          -- 🌟 อนุโลมเวลาคลาดเคลื่อนได้ไม่เกิน +/- 10 นาที (แปลงเวลาเป็นวินาทีหาร 60 = นาที)
+          AND ABS(EXTRACT(EPOCH FROM (CAST(deposit_datetime AS TIME) - CAST($4 AS TIME))) / 60) <= 10
         -- 🌟 เรียงลำดับเอาบิลที่เวลาใกล้เคียงที่สุดขึ้นมาก่อน
-        ORDER BY ABS(DATEDIFF(MINUTE, CAST(deposit_datetime AS TIME(0)), CAST(@transferTime AS TIME(0)))) ASC
-      `);
+        ORDER BY ABS(EXTRACT(EPOCH FROM (CAST(deposit_datetime AS TIME) - CAST($4 AS TIME)))) ASC
+        LIMIT 1
+      `, [accountNumber, cleanAmount, transferDate, cleanTime]
+    );
 
     // 3. ถ้าเจอบิลที่ตรงกัน ให้ประมวลผลแจกเงินเข้า Wallet ทันที!
-    if (findSlip.recordset.length > 0) {
-      const match = findSlip.recordset[0];
+    if (findSlip.rows.length > 0) {
+      const match = findSlip.rows[0];
 
-      await pool.request().input('depositId', sql.Int, match.deposit_id)
-        .query("UPDATE Transactions_Deposit SET status = 'Approved', reviewed_by = 'Bank (Matched)' WHERE deposit_id = @depositId");
-      
-      await pool.request().input('userId', sql.Int, match.user_id).input('amount', sql.Decimal(18,2), cleanAmount)
-        .query("UPDATE Wallets SET balance = ISNULL(balance, 0) + @amount, last_updated = GETDATE() WHERE user_id = @userId");
+      // ใช้ Transaction ยืนยันการจ่ายเงินอย่างปลอดภัย
+      const client = await pgPool.connect();
+      try {
+        await client.query('BEGIN');
+        
+        await client.query("UPDATE Transactions_Deposit SET status = 'Approved', reviewed_by = 'Bank (Matched)' WHERE deposit_id = $1", [match.deposit_id]);
+        
+        await client.query("UPDATE Wallets SET balance = COALESCE(balance, 0) + $1, last_updated = CURRENT_TIMESTAMP WHERE user_id = $2", [cleanAmount, match.user_id]);
 
-      await pool.request().input('userId', sql.Int, match.user_id).input('amount', sql.Decimal(18,2), cleanAmount).input('title', sql.NVarChar(255), 'ฝากเงิน (สำเร็จ)')
-        .query("INSERT INTO Transactions (user_id, transaction_type, title, amount, status, created_at) VALUES (@userId, 'Deposit', @title, @amount, 'Completed', GETDATE())");
+        await client.query("INSERT INTO Transactions (user_id, transaction_type, title, amount, status, created_at) VALUES ($1, 'Deposit', 'ฝากเงิน (สำเร็จ)', $2, 'Completed', CURRENT_TIMESTAMP)", [match.user_id, cleanAmount]);
 
-      await pool.request().input('stmtId', sql.Int, statementId).input('depositId', sql.Int, match.deposit_id)
-        .query("UPDATE Bank_Statements SET is_reconciled = 1, reconciled_with_deposit_id = @depositId WHERE statement_id = @stmtId");
+        await client.query("UPDATE Bank_Statements SET is_reconciled = '1', reconciled_with_deposit_id = $1 WHERE statement_id = $2", [match.deposit_id, statementId]);
 
-      return res.json({ success: true, message: 'คีย์ยอดสำเร็จ และระบบจับคู่ให้อัตโนมัติ! (เติมเงินเข้า Wallet ให้ลูกค้าแล้ว)' });
+        await client.query('COMMIT');
+        return res.json({ success: true, message: 'คีย์ยอดสำเร็จ และระบบจับคู่ให้อัตโนมัติ! (เติมเงินเข้า Wallet ให้ลูกค้าแล้ว)' });
+      } catch (err) {
+        await client.query('ROLLBACK');
+        throw err;
+      } finally {
+        client.release();
+      }
     }
 
     // 4. ถ้าไม่เจอ ให้ติดสถานะ "รอกระทบยอด" ไว้ก่อน
@@ -2169,9 +2000,12 @@ app.post('/api/admin/key-statement', async (req, res) => {
 
 
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // API: บัญชีแก้ไขรายการคีย์ยอด (อัปเดต + ค้นหาจับคู่แบบฉลาด 🌟)
 // ==========================================
 app.put('/api/admin/key-statement/:id', async (req, res) => {
+  const client = await pgPool.connect(); // 🌟 ใช้ Transaction ครอบทั้งกระบวนการ
+
   try {
     const statementId = req.params.id;
     const { bankId, bankName, accountNumber, amount, transferDate, transferTime, adminName } = req.body;
@@ -2188,73 +2022,66 @@ app.put('/api/admin/key-statement/:id', async (req, res) => {
     if (cleanTime.length === 5) cleanTime += ':00';
     const cleanAmount = Math.round(parseFloat(amount) * 100) / 100;
 
-    const pool = await sql.connect(dbConfig);
+    await client.query('BEGIN'); // เริ่ม Transaction
 
     // 1. อัปเดตข้อมูลในตาราง Bank_Statements
-    await pool.request()
-      .input('stmtId', sql.Int, statementId)
-      .input('bankId', sql.Int, bankId)
-      .input('bankName', sql.NVarChar, bankName)
-      .input('accountNumber', sql.VarChar, accountNumber)
-      .input('amount', sql.Decimal(18,2), cleanAmount)
-      .input('transferDate', sql.VarChar, transferDate)
-      .input('transferTime', sql.VarChar, cleanTime)
-      .input('recordedBy', sql.NVarChar, adminName)
-      .query(`
+    await client.query(`
         UPDATE Bank_Statements 
-        SET bank_id = @bankId, bank_name = @bankName, account_number = @accountNumber, 
-            amount = @amount, transfer_date = CAST(@transferDate AS DATE), 
-            transfer_time = CAST(@transferTime AS TIME(0)), recorded_by = @recordedBy
-        WHERE statement_id = @stmtId AND is_reconciled = 0
-      `);
+        SET bank_id = $1, bank_name = $2, account_number = $3, 
+            amount = $4, transfer_date = CAST($5 AS DATE), 
+            transfer_time = CAST($6 AS TIME), recorded_by = $7
+        WHERE statement_id = $8 AND is_reconciled = '0'
+      `, [bankId, bankName, accountNumber, cleanAmount, transferDate, cleanTime, adminName, statementId]
+    );
 
     // 2. 🌟 ค้นหาและจับคู่สลิปแบบฉลาด (Smart Match) อีกรอบหลังจากแก้ข้อมูล
-    const findSlip = await pool.request()
-      .input('amount', sql.Decimal(18,2), cleanAmount)
-      .input('accountNumber', sql.VarChar, accountNumber)
-      .input('transferDate', sql.VarChar, transferDate)
-      .input('transferTime', sql.VarChar, cleanTime)
-      .query(`
-        SELECT TOP 1 deposit_id, user_id FROM Transactions_Deposit 
+    const findSlip = await client.query(`
+        SELECT deposit_id, user_id FROM Transactions_Deposit 
         WHERE status = 'Slip Verified' 
-          AND REPLACE(REPLACE(account_number, '-', ''), ' ', '') = REPLACE(REPLACE(@accountNumber, '-', ''), ' ', '')
-          AND ABS(amount - @amount) <= 0.01
-          AND CAST(deposit_datetime AS DATE) = CAST(@transferDate AS DATE)
-          AND ABS(DATEDIFF(MINUTE, CAST(deposit_datetime AS TIME(0)), CAST(@transferTime AS TIME(0)))) <= 10
-        ORDER BY ABS(DATEDIFF(MINUTE, CAST(deposit_datetime AS TIME(0)), CAST(@transferTime AS TIME(0)))) ASC
-      `);
+          AND REPLACE(REPLACE(account_number, '-', ''), ' ', '') = REPLACE(REPLACE($1, '-', ''), ' ', '')
+          AND ABS(amount - $2) <= 0.01
+          AND CAST(deposit_datetime AS DATE) = CAST($3 AS DATE)
+          AND ABS(EXTRACT(EPOCH FROM (CAST(deposit_datetime AS TIME) - CAST($4 AS TIME))) / 60) <= 10
+        ORDER BY ABS(EXTRACT(EPOCH FROM (CAST(deposit_datetime AS TIME) - CAST($4 AS TIME)))) ASC
+        LIMIT 1
+      `, [accountNumber, cleanAmount, transferDate, cleanTime]
+    );
 
     // 3. ถ้าเจอสลิปที่ตรงกัน ให้ประมวลผลแจกเงิน!
-    if (findSlip.recordset.length > 0) {
-      const match = findSlip.recordset[0];
+    if (findSlip.rows.length > 0) {
+      const match = findSlip.rows[0];
 
-      await pool.request().input('depositId', sql.Int, match.deposit_id)
-        .query("UPDATE Transactions_Deposit SET status = 'Approved', reviewed_by = 'Bank (Matched)' WHERE deposit_id = @depositId");
+      await client.query("UPDATE Transactions_Deposit SET status = 'Approved', reviewed_by = 'Bank (Matched)' WHERE deposit_id = $1", [match.deposit_id]);
       
-      await pool.request().input('userId', sql.Int, match.user_id).input('amount', sql.Decimal(18,2), cleanAmount)
-        .query("UPDATE Wallets SET balance = ISNULL(balance, 0) + @amount, last_updated = GETDATE() WHERE user_id = @userId");
+      await client.query("UPDATE Wallets SET balance = COALESCE(balance, 0) + $1, last_updated = CURRENT_TIMESTAMP WHERE user_id = $2", [cleanAmount, match.user_id]);
 
-      await pool.request().input('userId', sql.Int, match.user_id).input('amount', sql.Decimal(18,2), cleanAmount).input('title', sql.NVarChar(255), 'ฝากเงิน (สำเร็จ)')
-        .query("INSERT INTO Transactions (user_id, transaction_type, title, amount, status, created_at) VALUES (@userId, 'Deposit', @title, @amount, 'Completed', GETDATE())");
+      await client.query("INSERT INTO Transactions (user_id, transaction_type, title, amount, status, created_at) VALUES ($1, 'Deposit', 'ฝากเงิน (สำเร็จ)', $2, 'Completed', CURRENT_TIMESTAMP)", [match.user_id, cleanAmount]);
 
-      await pool.request().input('stmtId', sql.Int, statementId).input('depositId', sql.Int, match.deposit_id)
-        .query("UPDATE Bank_Statements SET is_reconciled = 1, reconciled_with_deposit_id = @depositId WHERE statement_id = @stmtId");
+      await client.query("UPDATE Bank_Statements SET is_reconciled = '1', reconciled_with_deposit_id = $1 WHERE statement_id = $2", [match.deposit_id, statementId]);
 
+      await client.query('COMMIT');
       return res.json({ success: true, message: 'อัปเดตข้อมูลสำเร็จ และระบบจับคู่ให้อัตโนมัติ! (เติมเงินให้ลูกค้าแล้ว)' });
     }
 
+    await client.query('COMMIT');
     res.json({ success: true, message: 'อัปเดตข้อมูลสำเร็จ (แต่ยังไม่พบบิลจากลูกค้าที่ตรงกัน รอการจับคู่)' });
   } catch (error) {
+    await client.query('ROLLBACK');
     console.error('Error:', error);
     res.status(500).json({ success: false, message: 'ระบบขัดข้อง: ' + error.message });
+  } finally {
+    client.release();
   }
 });
 
 
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // API: บัญชีคีย์ยอดโอนเข้า + กระทบยอด + แปลงสกุลเงินอัตโนมัติ (เวอร์ชันสมบูรณ์)
 // ==========================================
 app.post('/api/admin/key-statement', async (req, res) => {
+  const client = await pgPool.connect(); // 🌟 เริ่ม Transaction
+
   try {
     const { bankId, bankName, accountNumber, amount, transferDate, transferTime, adminName } = req.body;
     
@@ -2270,156 +2097,157 @@ app.post('/api/admin/key-statement', async (req, res) => {
     if (cleanTime.length === 5) cleanTime += ':00';
     
     const cleanAmount = Math.round(parseFloat(amount) * 100) / 100;
-    const pool = await sql.connect(dbConfig);
+
+    await client.query('BEGIN'); // เริ่มล็อก DB
 
     // 2. บันทึกยอดที่บัญชีคีย์ลงระบบ Bank_Statements (is_reconciled = 0 คือรอกระทบยอด)
-    const insertStmt = await pool.request()
-      .input('bankId', sql.Int, bankId).input('bankName', sql.NVarChar, bankName).input('accountNumber', sql.VarChar, accountNumber)
-      .input('amount', sql.Decimal(18,2), cleanAmount).input('transferDate', sql.VarChar, transferDate).input('transferTime', sql.VarChar, cleanTime).input('recordedBy', sql.NVarChar, adminName)
-      .query(`
+    const insertStmt = await client.query(`
         INSERT INTO Bank_Statements (bank_id, bank_name, account_number, amount, transfer_date, transfer_time, recorded_by, is_reconciled)
-        OUTPUT INSERTED.statement_id
-        VALUES (@bankId, @bankName, @accountNumber, @amount, CAST(@transferDate AS DATE), CAST(@transferTime AS TIME(0)), @recordedBy, 0)
-      `);
-    const statementId = insertStmt.recordset[0].statement_id;
+        VALUES ($1, $2, $3, $4, CAST($5 AS DATE), CAST($6 AS TIME), $7, '0')
+        RETURNING statement_id
+      `, [bankId, bankName, accountNumber, cleanAmount, transferDate, cleanTime, adminName]
+    );
+    const statementId = insertStmt.rows[0].statement_id;
 
     // 3. 🌟 ค้นหา "กุญแจดอกที่ 1" (หาสลิปที่แอดมินเพิ่งกดตรวจผ่าน 'Slip Verified' รออยู่)
-    const findSlip = await pool.request()
-      .input('amount', sql.Decimal(18,2), cleanAmount).input('accountNumber', sql.VarChar, accountNumber).input('transferDate', sql.VarChar, transferDate).input('transferTime', sql.VarChar, cleanTime)
-      .query(`
-        SELECT TOP 1 deposit_id, user_id 
+    const findSlip = await client.query(`
+        SELECT deposit_id, user_id 
         FROM Transactions_Deposit 
         WHERE (status = 'Slip Verified' OR (status = 'Pending' AND reviewed_by = 'Slip Verified'))
-          AND account_number = @accountNumber AND ABS(amount - @amount) <= 0.01
-          AND CAST(deposit_datetime AS DATE) = CAST(@transferDate AS DATE)
-          AND CAST(deposit_datetime AS TIME(0)) = CAST(@transferTime AS TIME(0))
-      `);
+          AND account_number = $1 AND ABS(amount - $2) <= 0.01
+          AND CAST(deposit_datetime AS DATE) = CAST($3 AS DATE)
+          AND CAST(deposit_datetime AS TIME) = CAST($4 AS TIME)
+        LIMIT 1
+      `, [accountNumber, cleanAmount, transferDate, cleanTime]
+    );
 
-    if (findSlip.recordset.length > 0) {
+    if (findSlip.rows.length > 0) {
       // 🟢 กรณีที่ 1: แอดมินตรวจสลิปแล้ว + บัญชีเพิ่งมาคีย์ยอด (กุญแจ 2 ดอกตรงกัน!) -> จ่ายเงินได้!
-      const match = findSlip.recordset[0];
+      const match = findSlip.rows[0];
       const userId = match.user_id;
 
       // 🌟 ระบบแปลงค่าเงิน: เช็คก่อนว่าลูกค้าคนนี้ใช้กระเป๋าเงินสกุลอะไร?
-      const userProfile = await pool.request().input('userId', sql.Int, userId)
-        .query("SELECT currency_code FROM User_Profile_Banks WHERE user_id = @userId");
+      const userProfile = await client.query("SELECT currency_code FROM User_Profile_Banks WHERE user_id = $1", [userId]);
       
       let userCurrency = 'THB';
-      if (userProfile.recordset.length > 0) {
-         userCurrency = userProfile.recordset[0].currency_code;
+      if (userProfile.rows.length > 0) {
+         userCurrency = userProfile.rows[0].currency_code;
       }
 
       let finalAmountToWallet = cleanAmount;
 
       // 🌟 ถ้าลูกค้าใช้เงินกีบ (LAK) ให้ดึงเรทแลกเปลี่ยนมาคูณยอดเงินก่อนเข้ากระเป๋า
       if (userCurrency === 'LAK') {
-         const rateResult = await pool.request().query("SELECT TOP 1 exchange_rate FROM ExchangeRates WHERE currency_from = 'THB' AND currency_to = 'LAK' ORDER BY updated_at DESC");
+         const rateResult = await client.query("SELECT exchange_rate FROM ExchangeRates WHERE currency_from = 'THB' AND currency_to = 'LAK' ORDER BY updated_at DESC LIMIT 1");
          let exchangeRate = 500; // ค่าเรทสำรองกันพลาด
-         if (rateResult.recordset.length > 0 && rateResult.recordset[0].exchange_rate > 0) {
-            exchangeRate = rateResult.recordset[0].exchange_rate;
+         if (rateResult.rows.length > 0 && rateResult.rows[0].exchange_rate > 0) {
+            exchangeRate = rateResult.rows[0].exchange_rate;
          }
          finalAmountToWallet = cleanAmount * exchangeRate;
       }
 
-      // เริ่มทำ Transaction (อัปเดตหลายตารางพร้อมกัน ป้องกันฐานข้อมูลพังกลางคัน)
-      const transaction = new sql.Transaction(pool);
-      await transaction.begin();
+      // 3.1 อัปเดตสถานะสลิปว่า Approved
+      await client.query("UPDATE Transactions_Deposit SET status = 'Approved', reviewed_by = 'Bank (Matched)' WHERE deposit_id = $1", [match.deposit_id]);
+      
+      // 3.2 🌟 เติมเงินเข้ากระเป๋า (ใช้ finalAmountToWallet ที่ผ่านการแปลงค่าเงินแล้ว)
+      await client.query("UPDATE Wallets SET balance = COALESCE(balance, 0) + $1, last_updated = CURRENT_TIMESTAMP WHERE user_id = $2", [finalAmountToWallet, userId]);
+      
+      // (ถ้าคุณพี่ใช้ตาราง User_Profile_Banks เก็บยอดเงินด้วย ให้อัปเดตตารางนี้ด้วยครับ)
+      await client.query("UPDATE User_Profile_Banks SET wallet_balance = COALESCE(wallet_balance, 0) + $1 WHERE user_id = $2", [finalAmountToWallet, userId]);
 
-      try {
-          // 3.1 อัปเดตสถานะสลิปว่า Approved
-          await transaction.request().input('depositId', sql.Int, match.deposit_id)
-            .query("UPDATE Transactions_Deposit SET status = 'Approved', reviewed_by = 'Bank (Matched)' WHERE deposit_id = @depositId");
-          
-          // 3.2 🌟 เติมเงินเข้ากระเป๋า (ใช้ finalAmountToWallet ที่ผ่านการแปลงค่าเงินแล้ว)
-          await transaction.request().input('userId', sql.Int, userId).input('amount', sql.Decimal(18,2), finalAmountToWallet)
-            .query("UPDATE Wallets SET balance = ISNULL(balance, 0) + @amount, last_updated = GETDATE() WHERE user_id = @userId");
-          
-          // (ถ้าคุณพี่ใช้ตาราง User_Profile_Banks เก็บยอดเงินด้วย ให้อัปเดตตารางนี้ด้วยครับ)
-          await transaction.request().input('userId', sql.Int, userId).input('amount', sql.Decimal(18,2), finalAmountToWallet)
-            .query("UPDATE User_Profile_Banks SET wallet_balance = ISNULL(wallet_balance, 0) + @amount WHERE user_id = @userId");
+      // 3.3 บันทึกประวัติ Transaction ลูกค้า (บันทึกเป็นยอดเงินปลายทาง)
+      const txTitle = userCurrency === 'LAK' ? 'ฝากเงิน (สำเร็จ - แปลงจาก THB)' : 'ฝากเงิน (สำเร็จ)';
+      await client.query(`
+          INSERT INTO Transactions (user_id, transaction_type, title, amount, status, created_at) 
+          VALUES ($1, 'Deposit', $2, $3, 'Completed', CURRENT_TIMESTAMP)
+        `, [userId, txTitle, finalAmountToWallet]
+      );
 
-          // 3.3 บันทึกประวัติ Transaction ลูกค้า (บันทึกเป็นยอดเงินปลายทาง)
-          const txTitle = userCurrency === 'LAK' ? 'ฝากเงิน (สำเร็จ - แปลงจาก THB)' : 'ฝากเงิน (สำเร็จ)';
-          await transaction.request().input('userId', sql.Int, userId).input('amount', sql.Decimal(18,2), finalAmountToWallet).input('title', sql.NVarChar(255), txTitle)
-            .query("INSERT INTO Transactions (user_id, transaction_type, title, amount, status, created_at) VALUES (@userId, 'Deposit', @title, @amount, 'Completed', GETDATE())");
+      // 3.4 🌟 อัปเดตตารางคีย์ยอด (Bank_Statements) ว่า "กระทบยอดสำเร็จแล้ว"
+      await client.query("UPDATE Bank_Statements SET is_reconciled = '1', reconciled_with_deposit_id = $1 WHERE statement_id = $2", [match.deposit_id, statementId]);
 
-          // 3.4 🌟 อัปเดตตารางคีย์ยอด (Bank_Statements) ว่า "กระทบยอดสำเร็จแล้ว" (is_reconciled = 1) ตัวนี้แหละที่ทำให้ตารางหน้าบ้านเด้งขึ้น "สำเร็จ"
-          await transaction.request().input('stmtId', sql.Int, statementId).input('depositId', sql.Int, match.deposit_id)
-            .query("UPDATE Bank_Statements SET is_reconciled = 1, reconciled_with_deposit_id = @depositId WHERE statement_id = @stmtId");
-
-          await transaction.commit();
-          
-          return res.json({ success: true, message: `คีย์ยอดสำเร็จและจับคู่แล้ว! (เข้ากระเป๋าลูกค้า ${finalAmountToWallet.toLocaleString()} ${userCurrency})` });
-      } catch (err) {
-          await transaction.rollback();
-          throw err;
-      }
+      await client.query('COMMIT');
+      return res.json({ success: true, message: `คีย์ยอดสำเร็จและจับคู่แล้ว! (เข้ากระเป๋าลูกค้า ${finalAmountToWallet.toLocaleString()} ${userCurrency})` });
     }
 
-    // 🟡 กรณีที่ 2: บัญชีคีย์ยอดก่อน (แอดมินยังไม่กดตรวจสลิป) -> is_reconciled จะเป็น 0 ต่อไป และโชว์ในแท็บ "รอกระทบยอด"
+    // 🟡 กรณีที่ 2: บัญชีคีย์ยอดก่อน (แอดมินยังไม่กดตรวจสลิป) -> is_reconciled จะเป็น 0 ต่อไป
+    await client.query('COMMIT');
     res.json({ success: true, message: 'บันทึกยอดเงินเข้าธนาคารสำเร็จ (รอแอดมินตรวจรูปสลิป ระบบถึงจะจ่ายเงิน)' });
   } catch (error) {
+    await client.query('ROLLBACK');
     console.error('Error Key Statement:', error);
     res.status(500).json({ success: false, message: 'ระบบขัดข้อง: ' + error.message });
+  } finally {
+    client.release();
   }
 });
 
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // API 3: รายงานสรุป (แยกยอดเงินรับ ตามบัญชีธนาคาร 100%)
 // ==========================================
 app.get('/api/admin/statement-report', async (req, res) => {
   try {
     const { startDate, endDate } = req.query;
-    const pool = await sql.connect(dbConfig);
     
+    // 🌟 คิวรี่ 1: ดึงรายการประวัติ (อัปเกรดเป็น Parameter Query ป้องกันถูกเจาะระบบ)
     let query = `
-      SELECT bs.*, FORMAT(CAST(bs.transfer_time AS DATETIME), 'HH:mm:ss') AS time_formatted, ISNULL(bk.currency, 'THB') AS currency
+      SELECT bs.*, to_char(bs.transfer_time, 'HH24:MI:SS') AS time_formatted, COALESCE(bk.currency, 'THB') AS currency
       FROM Bank_Statements bs LEFT JOIN Banks bk ON bs.bank_id = bk.bank_id
       WHERE 1=1
     `;
-    if (startDate && endDate) query += ` AND bs.transfer_date >= '${startDate}' AND bs.transfer_date <= '${endDate}'`;
+    
+    let queryParams = [];
+    if (startDate && endDate) {
+      query += ` AND bs.transfer_date >= CAST($1 AS DATE) AND bs.transfer_date <= CAST($2 AS DATE)`;
+      queryParams.push(startDate, endDate);
+    }
+    
     query += " ORDER BY bs.created_at DESC";
-    const records = await pool.request().query(query);
+    const records = await pgPool.query(query, queryParams);
 
-    // 🌟 คิวรี่ใหม่: จัดกลุ่มแยกตาม "ชื่อธนาคาร และ เลขบัญชี" แทนการแยกแค่สกุลเงิน
+    // 🌟 คิวรี่ 2: จัดกลุ่มแยกตาม "ชื่อธนาคาร และ เลขบัญชี" (ปรับการใช้ฟังก์ชันเวลาให้เป็น Postgres)
+    // ใช้ Double Quotes ครอบชื่อคอลัมน์ที่เป็น CamelCase ("todayTotal", "monthlyTotal") เพื่อให้ส่งไป React ได้เป๊ะตามเดิม
     const summaryQuery = `
       SELECT 
         bk.bank_name,
         bk.account_number,
-        ISNULL(bk.currency, 'THB') AS currency,
-        ISNULL(SUM(CASE WHEN CAST(bs.transfer_date AS DATE) = CAST(GETDATE() AS DATE) THEN bs.amount ELSE 0 END), 0) AS todayTotal,
-        ISNULL(SUM(CASE WHEN MONTH(bs.transfer_date) = MONTH(GETDATE()) AND YEAR(bs.transfer_date) = YEAR(GETDATE()) THEN bs.amount ELSE 0 END), 0) AS monthlyTotal
+        COALESCE(bk.currency, 'THB') AS currency,
+        COALESCE(SUM(CASE WHEN CAST(bs.transfer_date AS DATE) = CAST(CURRENT_TIMESTAMP AS DATE) THEN bs.amount ELSE 0 END), 0) AS "todayTotal",
+        COALESCE(SUM(CASE WHEN EXTRACT(MONTH FROM bs.transfer_date) = EXTRACT(MONTH FROM CURRENT_TIMESTAMP) AND EXTRACT(YEAR FROM bs.transfer_date) = EXTRACT(YEAR FROM CURRENT_TIMESTAMP) THEN bs.amount ELSE 0 END), 0) AS "monthlyTotal"
       FROM Bank_Statements bs
       LEFT JOIN Banks bk ON bs.bank_id = bk.bank_id
       GROUP BY bk.bank_name, bk.account_number, bk.currency
     `;
-    const summaryRecords = await pool.request().query(summaryQuery);
+    const summaryRecords = await pgPool.query(summaryQuery);
 
-    res.json({ success: true, records: records.recordset, summary: summaryRecords.recordset }); // 🌟 ส่งกลับไปเป็น Array
+    res.json({ success: true, records: records.rows, summary: summaryRecords.rows });
   } catch (error) {
     console.error('Error:', error);
     res.status(500).json({ success: false, message: 'ไม่สามารถดึงรายงานได้' });
   }
 });
 
-
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // API: ดึงรายชื่อธนาคารสำหรับ Dropdown
 // ==========================================
 app.get('/api/admin/banks', async (req, res) => {
   try {
-    const pool = await sql.connect(dbConfig);
-    const result = await pool.request().query("SELECT * FROM Banks WHERE is_active = 1");
-    res.json({ success: true, banks: result.recordset });
+    const result = await pgPool.query("SELECT * FROM Banks WHERE is_active = '1'");
+    res.json({ success: true, banks: result.rows });
   } catch (error) {
     res.status(500).json({ success: false, message: 'ไม่สามารถดึงข้อมูลธนาคารได้' });
   }
 });
 
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // API ตัวที่ 1: คีย์ยอดเงินเข้า และ กระทบยอดอัตโนมัติ (Auto-Reconciliation)
 // ==========================================
 app.post('/api/admin/key-statement', async (req, res) => {
+  const client = await pgPool.connect(); // 🌟 ใช้ Transaction ครอบการทำงาน
+
   try {
     const { bankId, bankName, accountNumber, amount, transferDate, transferTime, adminName } = req.body;
     
@@ -2441,214 +2269,159 @@ app.post('/api/admin/key-statement', async (req, res) => {
     // ปัดเศษป้องกันปัญหาทศนิยมเพี้ยน
     const cleanAmount = Math.round(parseFloat(amount) * 100) / 100;
 
-    const pool = await sql.connect(dbConfig);
+    await client.query('BEGIN'); // เริ่มล็อกฐานข้อมูล
 
     // 2. บันทึกข้อมูลลง Bank_Statements โดยใช้ sql.VarChar แล้ว CAST ใน SQL ป้องกันเบราว์เซอร์ส่ง Data Type เพี้ยน
-    const insertStmt = await pool.request()
-      .input('bankId', sql.Int, bankId)
-      .input('bankName', sql.NVarChar, bankName)
-      .input('accountNumber', sql.VarChar, accountNumber)
-      .input('amount', sql.Decimal(18,2), cleanAmount)
-      .input('transferDate', sql.VarChar, transferDate) 
-      .input('transferTime', sql.VarChar, cleanTime)    
-      .input('recordedBy', sql.NVarChar, adminName)
-      .query(`
+    const insertStmt = await client.query(`
         INSERT INTO Bank_Statements (bank_id, bank_name, account_number, amount, transfer_date, transfer_time, recorded_by, is_reconciled)
-        OUTPUT INSERTED.statement_id
-        VALUES (@bankId, @bankName, @accountNumber, @amount, CAST(@transferDate AS DATE), CAST(@transferTime AS TIME(0)), @recordedBy, 0)
-      `);
+        VALUES ($1, $2, $3, $4, CAST($5 AS DATE), CAST($6 AS TIME), $7, '0')
+        RETURNING statement_id
+      `, [bankId, bankName, accountNumber, cleanAmount, transferDate, cleanTime, adminName]
+    );
       
-    const statementId = insertStmt.recordset[0].statement_id;
+    const statementId = insertStmt.rows[0].statement_id;
 
     // 3. ค้นหาคำขอที่รอตรวจสอบ (ยอมรับความคลาดเคลื่อนได้ 0.01 บาท)
-    const findMatch = await pool.request()
-      .input('amount', sql.Decimal(18,2), cleanAmount)
-      .input('accountNumber', sql.VarChar, accountNumber)
-      .input('transferDate', sql.VarChar, transferDate)
-      .input('transferTime', sql.VarChar, cleanTime)
-      .query(`
-        SELECT TOP 1 deposit_id, user_id 
+    const findMatch = await client.query(`
+        SELECT deposit_id, user_id 
         FROM Transactions_Deposit
         WHERE status = 'Pending' 
-          AND account_number = @accountNumber
-          AND ABS(amount - @amount) <= 0.01 
-          AND CAST(deposit_datetime AS DATE) = CAST(@transferDate AS DATE)
-          AND CAST(deposit_datetime AS TIME(0)) = CAST(@transferTime AS TIME(0))
-      `);
+          AND account_number = $1
+          AND ABS(amount - $2) <= 0.01 
+          AND CAST(deposit_datetime AS DATE) = CAST($3 AS DATE)
+          AND CAST(deposit_datetime AS TIME) = CAST($4 AS TIME)
+        LIMIT 1
+      `, [accountNumber, cleanAmount, transferDate, cleanTime]
+    );
 
     // 4. ถ้าเจอคู่ที่ตรงกัน ทำการอนุมัติ โอนเข้า Wallets และสร้าง Transactions
-    if (findMatch.recordset.length > 0) {
-      const match = findMatch.recordset[0];
+    if (findMatch.rows.length > 0) {
+      const match = findMatch.rows[0];
       
       // อัปเดตสถานะบิล
-      await pool.request()
-        .input('depositId', sql.Int, match.deposit_id)
-        .query("UPDATE Transactions_Deposit SET status = 'Approved', reviewed_by = 'Auto-Reconciled' WHERE deposit_id = @depositId");
+      await client.query("UPDATE Transactions_Deposit SET status = 'Approved', reviewed_by = 'Auto-Reconciled' WHERE deposit_id = $1", [match.deposit_id]);
         
       // เติมเงินเข้าตาราง Wallets
-      await pool.request()
-        .input('userId', sql.Int, match.user_id)
-        .input('amount', sql.Decimal(18,2), cleanAmount)
-        .query("UPDATE Wallets SET balance = ISNULL(balance, 0) + @amount, last_updated = GETDATE() WHERE user_id = @userId");
+      await client.query("UPDATE Wallets SET balance = COALESCE(balance, 0) + $1, last_updated = CURRENT_TIMESTAMP WHERE user_id = $2", [cleanAmount, match.user_id]);
 
       // บันทึกประวัติในตาราง Transactions พร้อม title
-      await pool.request()
-        .input('userId', sql.Int, match.user_id)
-        .input('amount', sql.Decimal(18,2), cleanAmount)
-        .input('title', sql.NVarChar(255), 'ฝากเงิน (อัตโนมัติ)') 
-        .query(`
+      await client.query(`
           INSERT INTO Transactions (user_id, transaction_type, title, amount, status, created_at) 
-          VALUES (@userId, 'Deposit', @title, @amount, 'Completed', GETDATE())
-        `);
+          VALUES ($1, 'Deposit', 'ฝากเงิน (อัตโนมัติ)', $2, 'Completed', CURRENT_TIMESTAMP)
+        `, [match.user_id, cleanAmount]
+      );
 
       // อัปเดต Bank_Statements ว่าจับคู่สำเร็จแล้ว
-      await pool.request()
-        .input('stmtId', sql.Int, statementId)
-        .input('depositId', sql.Int, match.deposit_id)
-        .query("UPDATE Bank_Statements SET is_reconciled = 1, reconciled_with_deposit_id = @depositId WHERE statement_id = @stmtId");
+      await client.query("UPDATE Bank_Statements SET is_reconciled = '1', reconciled_with_deposit_id = $1 WHERE statement_id = $2", [match.deposit_id, statementId]);
 
+      await client.query('COMMIT'); // ยืนยันข้อมูล
       return res.json({ success: true, message: 'คีย์ยอดและกระทบยอดสำเร็จ! อนุมัติเงินเข้ากระเป๋าลูกค้าแล้ว', autoMatched: true });
     }
 
+    await client.query('COMMIT'); // ยืนยันข้อมูลเฉพาะ Statement ถ้าหาไม่เจอ
     res.json({ success: true, message: 'บันทึกยอดเงินสำเร็จ (ยังไม่พบคำขอที่ตรงกัน รอระบบตรวจสอบภายหลัง)', autoMatched: false });
 
   } catch (error) {
+    await client.query('ROLLBACK'); // ยกเลิกการบันทึกถ้าพังกลางคัน
     console.error('❌ Error in key-statement:', error);
     res.status(500).json({ success: false, message: 'ระบบขัดข้อง: ' + error.message });
+  } finally {
+    client.release();
   }
 });
 
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // API: ดึงรายงานสรุปและประวัติการคีย์ยอด
 // ==========================================
 app.get('/api/admin/statement-report', async (req, res) => {
   try {
     const { startDate, endDate } = req.query;
-    const pool = await sql.connect(dbConfig);
     
-    // ดึงประวัติที่กรองตามช่วงวันที่
+    // ดึงประวัติที่กรองตามช่วงวันที่ (ปรับใช้ Parameter ป้องกัน SQL Injection)
     let query = "SELECT * FROM Bank_Statements WHERE 1=1";
+    let queryParams = [];
+
     if (startDate && endDate) {
-      query += ` AND transfer_date >= '${startDate}' AND transfer_date <= '${endDate}'`;
+      query += ` AND transfer_date >= CAST($1 AS DATE) AND transfer_date <= CAST($2 AS DATE)`;
+      queryParams.push(startDate, endDate);
     }
     query += " ORDER BY created_at DESC";
     
-    const records = await pool.request().query(query);
+    const records = await pgPool.query(query, queryParams);
 
-    // คำนวณสรุปยอดวันนี้ และเดือนนี้
-    const summary = await pool.request().query(`
+    // 🌟 คำนวณสรุปยอดวันนี้ และเดือนนี้ (ใช้คำสั่งเวลาของ Postgres และคงตัวพิมพ์ใหญ่ใน JSON)
+    const summary = await pgPool.query(`
       SELECT 
-        ISNULL(SUM(CASE WHEN CAST(created_at AS DATE) = CAST(GETDATE() AS DATE) THEN amount ELSE 0 END), 0) AS todayTotal,
-        ISNULL(SUM(CASE WHEN MONTH(created_at) = MONTH(GETDATE()) AND YEAR(created_at) = YEAR(GETDATE()) THEN amount ELSE 0 END), 0) AS monthlyTotal
+        COALESCE(SUM(CASE WHEN CAST(created_at AS DATE) = CAST(CURRENT_TIMESTAMP AS DATE) THEN amount ELSE 0 END), 0) AS "todayTotal",
+        COALESCE(SUM(CASE WHEN EXTRACT(MONTH FROM created_at) = EXTRACT(MONTH FROM CURRENT_TIMESTAMP) AND EXTRACT(YEAR FROM created_at) = EXTRACT(YEAR FROM CURRENT_TIMESTAMP) THEN amount ELSE 0 END), 0) AS "monthlyTotal"
       FROM Bank_Statements
     `);
 
     res.json({ 
       success: true, 
-      records: records.recordset, 
-      todayTotal: summary.recordset[0].todayTotal,
-      monthlyTotal: summary.recordset[0].monthlyTotal
+      records: records.rows, 
+      todayTotal: summary.rows[0].todayTotal,
+      monthlyTotal: summary.rows[0].monthlyTotal
     });
   } catch (error) {
+    console.error('Error fetching statement report:', error);
     res.status(500).json({ success: false, message: 'ไม่สามารถดึงรายงานได้' });
   }
 });
 
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🌟 API 1: ดึงประวัติการฝากเงินของลูกค้า (เพื่อเช็คยอดตีกลับและแจ้งเตือน)
 // ==========================================
 app.get('/api/user/deposits/:userId', async (req, res) => {
   const { userId } = req.params;
   try {
-    const pool = await sql.connect(dbConfig);
-    const result = await pool.request()
-      .input('userId', sql.Int, userId)
-      .query(`
+    const result = await pgPool.query(`
         SELECT 
           deposit_id, amount, deposit_datetime, slip_image, status, reject_reasons, account_number, bank_name,
-          -- 🌟 สั่ง SQL ให้หั่นวันที่และเวลาเป็นข้อความ (String) ป้องกันเวลาเพี้ยน +7
-          CONVERT(varchar(10), deposit_datetime, 120) AS edit_date,
-          CONVERT(varchar(8), deposit_datetime, 108) AS edit_time
+          -- 🌟 สั่ง SQL ให้หั่นวันที่และเวลาเป็นข้อความ (String) ด้วย to_char ป้องกันเวลาเพี้ยน +7
+          to_char(deposit_datetime, 'YYYY-MM-DD') AS edit_date,
+          to_char(deposit_datetime, 'HH24:MI:SS') AS edit_time
         FROM Transactions_Deposit 
-        WHERE user_id = @userId 
+        WHERE user_id = $1 
         ORDER BY created_at DESC
-      `);
+      `, [userId]
+    );
     
-    res.json({ success: true, data: result.recordset });
+    res.json({ success: true, data: result.rows });
   } catch (error) {
     console.error('Error fetching user deposits:', error);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
-
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว (ลบตัวซ้ำออกให้แล้วครับ)
 // 🌟 API: ดึงข้อมูลทีมงานและรายได้ (อัปเดต 3 รายได้)
 // ==========================================
 app.get('/api/team/:userId', async (req, res) => {
   const { userId } = req.params;
   try {
-    const pool = await sql.connect(dbConfig);
-    const teamRes = await pool.request()
-      .input('userId', sql.Int, userId)
-      .query(`
+    const teamRes = await pgPool.query(`
         SELECT 
           user_id as id,
           username as name, 
-          'https://ui-avatars.com/api/?name=' + username + '&background=random' as avatar,
-          CONVERT(varchar(10), created_at, 103) as joinDate, 
+          'https://ui-avatars.com/api/?name=' || username || '&background=random' as avatar,
+          to_char(created_at, 'DD/MM/YYYY') as "joinDate", 
           
           -- ดึงรายได้ 3 ช่องทาง
-          ISNULL(total_purchase_comm, 0) as purchaseComm,
-          ISNULL(total_win_comm, 0) as winComm,
-          ISNULL(total_daily_bonus, 0) as dailyBonus,
+          COALESCE(total_purchase_comm, 0) as "purchaseComm",
+          COALESCE(total_win_comm, 0) as "winComm",
+          COALESCE(total_daily_bonus, 0) as "dailyBonus",
           
-          CAST(CASE WHEN DATEDIFF(day, created_at, GETDATE()) < 30 THEN 1 ELSE 0 END AS BIT) as isActive
+          CASE WHEN (CURRENT_TIMESTAMP - created_at) < INTERVAL '30 days' THEN 1 ELSE 0 END as "isActive"
         FROM Users
-        WHERE referrer_username = (SELECT username FROM Users WHERE user_id = @userId)
+        WHERE referrer_username = (SELECT username FROM Users WHERE user_id = $1 LIMIT 1)
         ORDER BY created_at DESC
-      `);
+      `, [userId]
+    );
       
-    const teamMembers = teamRes.recordset || [];
-    
-    // รวมรายได้ทั้งหมด
-    const totalIncome = teamMembers.reduce((sum, m) => sum + Number(m.purchaseComm) + Number(m.winComm) + Number(m.dailyBonus), 0);
-    const incomeThisMonth = totalIncome * 0.5; // (สมมติยอดเดือนนี้)
-
-    res.json({ success: true, teamMembers, totalIncome, incomeThisMonth });
-  } catch (error) {
-    console.error('Error fetching team:', error);
-    res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการดึงข้อมูลทีม' });
-  }
-});
-
-// ==========================================
-// 🌟 API: ดึงข้อมูลทีมงานและรายได้ (อัปเดต 3 รายได้)
-// ==========================================
-app.get('/api/team/:userId', async (req, res) => {
-  const { userId } = req.params;
-  try {
-    const pool = await sql.connect(dbConfig);
-    const teamRes = await pool.request()
-      .input('userId', sql.Int, userId)
-      .query(`
-        SELECT 
-          user_id as id,
-          username as name, 
-          'https://ui-avatars.com/api/?name=' + username + '&background=random' as avatar,
-          CONVERT(varchar(10), created_at, 103) as joinDate, 
-          
-          -- ดึงรายได้ 3 ช่องทาง
-          ISNULL(total_purchase_comm, 0) as purchaseComm,
-          ISNULL(total_win_comm, 0) as winComm,
-          ISNULL(total_daily_bonus, 0) as dailyBonus,
-          
-          CAST(CASE WHEN DATEDIFF(day, created_at, GETDATE()) < 30 THEN 1 ELSE 0 END AS BIT) as isActive
-        FROM Users
-        WHERE referrer_username = (SELECT username FROM Users WHERE user_id = @userId)
-        ORDER BY created_at DESC
-      `);
-      
-    const teamMembers = teamRes.recordset || [];
+    const teamMembers = teamRes.rows || [];
     
     // รวมรายได้ทั้งหมด
     const totalIncome = teamMembers.reduce((sum, m) => sum + Number(m.purchaseComm) + Number(m.winComm) + Number(m.dailyBonus), 0);
@@ -2664,116 +2437,130 @@ app.get('/api/team/:userId', async (req, res) => {
 
 // ... (API อื่นๆ ของคุณที่อยู่ด้านบน) ...
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🚀 Cron Job: แจกโบนัสทีมรายวัน (รันอัตโนมัติทุกวันเวลา 05:00 น.)
 // ==========================================
 cron.schedule('0 5 * * *', async () => {
+    const client = await pgPool.connect(); // 🌟 ใช้ Transaction ครอบการแจกโบนัส
+
     try {
-        const pool = await sql.connect(dbConfig);
         console.log('⏰ [5:00 AM] กำลังคำนวณและแจกโบนัสรายวันให้ผู้แนะนำ...');
-        
-        await pool.request().query(`
-            DECLARE @DailyPercent DECIMAL(18,2) = (SELECT TOP 1 daily_bonus_percent FROM Commission_Settings);
+        await client.query('BEGIN');
 
-            -- 1. บันทึกประวัติ (Transactions) ว่าได้รับโบนัส
-            INSERT INTO Transactions (user_id, transaction_type, title, amount, status, created_at)
-            SELECT 
-                u.user_id, 'Bonus', N'โบนัสรายวันจากยอดรวมทีม', 
-                SUM(o.total_amount) * (@DailyPercent / 100.0), 'Completed', GETDATE()
-            FROM Lottery_Orders o
-            JOIN Users d ON o.user_id = d.user_id
-            JOIN Users u ON d.referrer_username = u.username
-            -- คิดจากยอดบิลของเมื่อวาน (เพราะรันตี 5 ของวันนี้)
-            WHERE CAST(o.created_at AS DATE) = CAST(DATEADD(DAY, -1, GETDATE()) AS DATE)
-            GROUP BY u.user_id
-            HAVING SUM(o.total_amount) > 0;
+        // 0. ดึงเรทเปอร์เซ็นต์โบนัสรายวันมาก่อน
+        const percentRes = await client.query("SELECT daily_bonus_percent FROM Commission_Settings LIMIT 1");
+        const dailyPercent = percentRes.rows.length > 0 ? parseFloat(percentRes.rows[0].daily_bonus_percent) : 0;
 
-            -- 2. เติมเงินโบนัสเข้า Wallets ของคนที่เป็นผู้แนะนำทั้งหมด
-            UPDATE w
-            SET w.balance = ISNULL(w.balance, 0) + t.bonus_amount
-            FROM Wallets w
-            JOIN (
+        if (dailyPercent > 0) {
+            // 1. บันทึกประวัติ (Transactions) ว่าได้รับโบนัส
+            await client.query(`
+                INSERT INTO Transactions (user_id, transaction_type, title, amount, status, created_at)
                 SELECT 
-                    u.user_id, 
-                    SUM(o.total_amount) * ((SELECT TOP 1 daily_bonus_percent FROM Commission_Settings) / 100.0) as bonus_amount
+                    u.user_id, 'Bonus', 'โบนัสรายวันจากยอดรวมทีม', 
+                    SUM(o.total_amount) * ($1 / 100.0), 'Completed', CURRENT_TIMESTAMP
                 FROM Lottery_Orders o
                 JOIN Users d ON o.user_id = d.user_id
                 JOIN Users u ON d.referrer_username = u.username
-                WHERE CAST(o.created_at AS DATE) = CAST(DATEADD(DAY, -1, GETDATE()) AS DATE)
+                -- คิดจากยอดบิลของเมื่อวาน (เพราะรันตี 5 ของวันนี้)
+                WHERE CAST(o.created_at AS DATE) = CAST(CURRENT_TIMESTAMP - INTERVAL '1 day' AS DATE)
                 GROUP BY u.user_id
-                HAVING SUM(o.total_amount) > 0
-            ) t ON w.user_id = t.user_id;
-        `);
+                HAVING SUM(o.total_amount) > 0;
+            `, [dailyPercent]);
+
+            // 2. เติมเงินโบนัสเข้า Wallets ของคนที่เป็นผู้แนะนำทั้งหมด
+            await client.query(`
+                UPDATE Wallets w
+                SET balance = COALESCE(w.balance, 0) + t.bonus_amount
+                FROM (
+                    SELECT 
+                        u.user_id, 
+                        SUM(o.total_amount) * ($1 / 100.0) as bonus_amount
+                    FROM Lottery_Orders o
+                    JOIN Users d ON o.user_id = d.user_id
+                    JOIN Users u ON d.referrer_username = u.username
+                    WHERE CAST(o.created_at AS DATE) = CAST(CURRENT_TIMESTAMP - INTERVAL '1 day' AS DATE)
+                    GROUP BY u.user_id
+                    HAVING SUM(o.total_amount) > 0
+                ) t WHERE w.user_id = t.user_id;
+            `, [dailyPercent]);
+        }
+
+        await client.query('COMMIT');
         console.log('✅ [5:00 AM] แจกโบนัสรายวันสำเร็จเรียบร้อย!');
     } catch (err) {
+        await client.query('ROLLBACK');
         console.error('❌ เกิดข้อผิดพลาดในการแจกโบนัสรายวัน (Cron 5AM):', err);
+    } finally {
+        client.release();
     }
 });
+
+
 // ==========================================
-// ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🌟 API: รายงานยอดขายหวยรายวัน (Admin) - แบบจัดกลุ่มบิล + รูปสัตว์
 // ==========================================
 app.get('/api/admin/daily-sales', async (req, res) => {
   try {
-    const pool = await sql.connect(dbConfig);
     const targetDate = req.query.date || new Date().toISOString().split('T')[0];
 
     // 1. ดึงสรุปยอดขาย 
-    const summaryRes = await pool.request()
-      .input('targetDate', sql.Date, targetDate)
-      .query(`
+    const summaryRes = await pgPool.query(`
         SELECT 
-          ISNULL(SUM(CASE WHEN CAST(created_at AS DATE) = @targetDate THEN total_amount ELSE 0 END), 0) AS daily_total,
-          ISNULL(SUM(CASE WHEN MONTH(created_at) = MONTH(@targetDate) AND YEAR(created_at) = YEAR(@targetDate) THEN total_amount ELSE 0 END), 0) AS monthly_total
+          COALESCE(SUM(CASE WHEN CAST(created_at AS DATE) = CAST($1 AS DATE) THEN total_amount ELSE 0 END), 0) AS daily_total,
+          COALESCE(SUM(CASE WHEN EXTRACT(MONTH FROM created_at) = EXTRACT(MONTH FROM CAST($1 AS DATE)) AND EXTRACT(YEAR FROM created_at) = EXTRACT(YEAR FROM CAST($1 AS DATE)) THEN total_amount ELSE 0 END), 0) AS monthly_total
         FROM Lottery_Orders;
-      `);
+      `, [targetDate]
+    );
 
-    // 2. ดึงรายการซื้อทั้งหมดของวันนี้ พร้อมชื่อและรูปสัตว์
-    const salesRes = await pool.request()
-      .input('targetDate', sql.Date, targetDate)
-      .query(`
+    // 2. ดึงรายการซื้อทั้งหมดของวันนี้ พร้อมชื่อและรูปสัตว์ (ปรับ TOP 1 เป็น LIMIT 1)
+    const salesRes = await pgPool.query(`
         SELECT 
           o.order_id,
           u.username,
           o.total_amount,
           o.currency_code,
           o.status as order_status,
-          CONVERT(varchar(16), o.created_at, 120) as buy_time,
+          to_char(o.created_at, 'YYYY-MM-DD HH24:MI') as buy_time,
           i.item_id,
           i.lottery_type,
           i.selected_number,
           i.price,
           i.status as item_status,
-          ISNULL(i.prize_amount, 0) as prize_amount,
+          COALESCE(i.prize_amount, 0) as prize_amount,
           
           -- ดึงชื่อนามสัตว์
-          ISNULL((
-            SELECT TOP 1 animal_name_th 
+          COALESCE((
+            SELECT animal_name_th 
             FROM Master_Animal_Numbers 
-            WHERE lottery_type = i.lottery_type 
+            WHERE CAST(lottery_type AS VARCHAR) = CAST(i.lottery_type AS VARCHAR) 
               AND (num1 = i.selected_number OR num2 = i.selected_number OR num3 = i.selected_number)
+            LIMIT 1
           ), '') as animal_name,
 
           -- ดึงรูปภาพสัตว์
-          ISNULL((
-            SELECT TOP 1 image_url 
+          COALESCE((
+            SELECT image_url 
             FROM Master_Animal_Numbers 
-            WHERE lottery_type = i.lottery_type 
+            WHERE CAST(lottery_type AS VARCHAR) = CAST(i.lottery_type AS VARCHAR) 
               AND (num1 = i.selected_number OR num2 = i.selected_number OR num3 = i.selected_number)
+            LIMIT 1
           ), '') as animal_image
 
         FROM Lottery_Orders o
         JOIN Users u ON o.user_id = u.user_id
         JOIN Lottery_Order_Items i ON o.order_id = i.order_id
-        WHERE CAST(o.created_at AS DATE) = @targetDate
+        WHERE CAST(o.created_at AS DATE) = CAST($1 AS DATE)
         ORDER BY o.created_at DESC;
-      `);
+      `, [targetDate]
+    );
 
     // 3. จัดกลุ่มข้อมูลด้วย JavaScript (รวม Item เข้าไปอยู่ในบิลเดียวกัน)
     const groupedOrders = {};
     const winnersList = [];
     let dailyPayout = 0;
 
-    salesRes.recordset.forEach(row => {
+    salesRes.rows.forEach(row => {
         // ถ้ายังไม่มีบิลนี้ใน Object ให้สร้างใหม่
         if (!groupedOrders[row.order_id]) {
             groupedOrders[row.order_id] = {
@@ -2805,18 +2592,18 @@ app.get('/api/admin/daily-sales', async (req, res) => {
         // ถ้าเลขนี้ "ถูกรางวัล" ให้แยกออกมาไว้ในตารางผู้โชคดีด้วย
         if (row.item_status === 'ถูกรางวัล' || row.item_status === 'ถูก') {
             winnersList.push({ ...itemDetails, username: row.username, currency_code: row.currency_code });
-            dailyPayout += row.prize_amount;
+            dailyPayout += Number(row.prize_amount); // 🌟 กันเหนียวด้วย Number() เพื่อป้องกัน String ต่อกัน
         }
     });
 
     res.json({
       success: true,
       summary: {
-        dailyTotal: summaryRes.recordset[0].daily_total,
-        monthlyTotal: summaryRes.recordset[0].monthly_total,
+        dailyTotal: summaryRes.rows[0].daily_total,
+        monthlyTotal: summaryRes.rows[0].monthly_total,
         dailyPayout: dailyPayout
       },
-      salesDetails: Object.values(groupedOrders), // แปลง Object เป็น Array ส่งให้ React
+      salesDetails: Object.values(groupedOrders), 
       winners: winnersList
     });
 
@@ -2825,19 +2612,17 @@ app.get('/api/admin/daily-sales', async (req, res) => {
     res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการดึงรายงาน' });
   }
 });
-
-//==============================
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // ⚙️ API: ดึงข้อมูลการตั้งค่าระบบ (GET)
 // ==========================================
 app.get('/api/admin/settings', async (req, res) => {
     try {
-        const pool = await sql.connect(dbConfig);
-        const result = await pool.request().query(`
+        const result = await pgPool.query(`
             SELECT 
-                CONVERT(varchar(5), close_time, 108) as close_time,
-                CONVERT(varchar(5), open_time, 108) as open_time,
-                CONVERT(varchar(5), draw_time, 108) as draw_time,
+                to_char(close_time, 'HH24:MI') as close_time,
+                to_char(open_time, 'HH24:MI') as open_time,
+                to_char(draw_time, 'HH24:MI') as draw_time,
                 is_sales_open,
                 is_auto_draw,
                 auto_draw_percent
@@ -2845,8 +2630,8 @@ app.get('/api/admin/settings', async (req, res) => {
             WHERE id = 1
         `);
 
-        if (result.recordset.length > 0) {
-            res.json({ success: true, data: result.recordset[0] });
+        if (result.rows.length > 0) {
+            res.json({ success: true, data: result.rows[0] });
         } else {
             res.json({ success: false, message: "ไม่พบการตั้งค่าในระบบ" });
         }
@@ -2857,6 +2642,7 @@ app.get('/api/admin/settings', async (req, res) => {
 });
 
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🌟 API: บันทึกการตั้งค่าระบบและเวลา (POST)
 // ==========================================
 app.post('/api/admin/settings', async (req, res) => {
@@ -2866,26 +2652,26 @@ app.post('/api/admin/settings', async (req, res) => {
     console.log("📥 ข้อมูลที่หน้าเว็บส่งมาบันทึก:", req.body); 
 
     try {
-        const pool = await sql.connect(dbConfig);
-        await pool.request()
-            .input('closeTime', sql.VarChar, close_time) 
-            .input('openTime', sql.VarChar, open_time)
-            .input('drawTime', sql.VarChar, draw_time)
-            .input('isOpen', sql.Bit, is_sales_open ? 1 : 0)
-            .input('isAuto', sql.Bit, is_auto_draw ? 1 : 0)
-            .input('percent', sql.Int, parseInt(auto_draw_percent) || 50) 
-            .query(`
+        await pgPool.query(`
                 UPDATE System_Settings 
                 SET 
-                    close_time = CAST(@closeTime AS TIME), 
-                    open_time = CAST(@openTime AS TIME), 
-                    draw_time = CAST(@drawTime AS TIME), 
-                    is_sales_open = @isOpen,
-                    is_auto_draw = @isAuto,
-                    auto_draw_percent = @percent,
-                    last_updated = GETDATE()
+                    close_time = CAST($1 AS TIME), 
+                    open_time = CAST($2 AS TIME), 
+                    draw_time = CAST($3 AS TIME), 
+                    is_sales_open = $4,
+                    is_auto_draw = $5,
+                    auto_draw_percent = $6,
+                    last_updated = CURRENT_TIMESTAMP
                 WHERE id = 1
-            `);
+            `, [
+                close_time, 
+                open_time, 
+                draw_time, 
+                is_sales_open ? '1' : '0', 
+                is_auto_draw ? '1' : '0', 
+                parseInt(auto_draw_percent) || 50
+            ]
+        );
             
         console.log("✅ บันทึกเวลา ระบบออโต้ และ % สกอร์ ลงฐานข้อมูลสำเร็จ!");
         res.json({ success: true, message: 'บันทึกสำเร็จ' });
@@ -2895,168 +2681,146 @@ app.post('/api/admin/settings', async (req, res) => {
     }
 });
 
-// ==========================================
-// 🌟 API 3: ส่งสถานะและเวลา ให้หน้าบ้านลูกค้า (ฝั่ง Client)
-// ==========================================
-app.get('/api/lottery/status', async (req, res) => {
-    try {
-        const pool = await sql.connect(dbConfig);
-        const result = await pool.request().query(`
-            SELECT 
-                CONVERT(varchar(5), close_time, 108) as close_time,
-                CONVERT(varchar(5), open_time, 108) as open_time,
-                CONVERT(varchar(5), draw_time, 108) as draw_time,
-                is_sales_open 
-            FROM System_Settings 
-            WHERE id = 1
-        `);
-        res.json({ success: true, data: result.recordset[0] });
-    } catch (err) {
-        res.status(500).json({ success: false });
-    }
-});
 
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🌟 API 2: บันทึกผลออกรางวัล และ ค้นหาคนถูกรางวัล
 // ==========================================
 app.post('/api/admin/draw-results', async (req, res) => {
     const { prize_8, prize_6, prize_4, prize_3, prize_2 } = req.body;
     const today = new Date().toISOString().split('T')[0];
+    
+    const client = await pgPool.connect(); // 🌟 ใช้ Transaction ป้องกันการอัปเดตบิลผิดพลาด
 
     try {
-        const pool = await sql.connect(dbConfig);
-        
-        // 1. บันทึกผลลงตาราง Draw_Results
-        await pool.request()
-            .input('dDate', sql.Date, today)
-            .input('p8', sql.VarChar, prize_8)
-            .input('p6', sql.VarChar, prize_6)
-            .input('p4', sql.VarChar, prize_4)
-            .input('p3', sql.VarChar, prize_3)
-            .input('p2', sql.VarChar, prize_2)
-            .query(`
-                IF EXISTS (SELECT 1 FROM Draw_Results WHERE draw_date = @dDate)
-                    UPDATE Draw_Results SET prize_8=@p8, prize_6=@p6, prize_4=@p4, prize_3=@p3, prize_2=@p2 WHERE draw_date=@dDate;
-                ELSE
-                    INSERT INTO Draw_Results (draw_date, prize_8, prize_6, prize_4, prize_3, prize_2) 
-                    VALUES (@dDate, @p8, @p6, @p4, @p3, @p2);
-            `);
+        await client.query('BEGIN');
 
-        // 2. อัปเดตสถานะบิลที่ "รอผลตรวจ" ให้เป็น "ถูกรางวัล" หรือ "ไม่ถูก"
-        // (สมมติเรทจ่าย: 2ตัว=x90, 3ตัว=x900, 4ตัว=x7000, 6ตัว=x400000, 8ตัว=x1000000)
-        await pool.request().input('dDate', sql.Date, today).query(`
-            UPDATE i SET 
+        // 1. ตรวจสอบว่าวันนี้มีผลรางวัลหรือยัง?
+        const checkExist = await client.query("SELECT 1 FROM Draw_Results WHERE draw_date = CAST($1 AS DATE)", [today]);
+        
+        if (checkExist.rows.length > 0) {
+            await client.query(`
+                UPDATE Draw_Results 
+                SET prize_8=$1, prize_6=$2, prize_4=$3, prize_3=$4, prize_2=$5 
+                WHERE draw_date=CAST($6 AS DATE)
+            `, [prize_8, prize_6, prize_4, prize_3, prize_2, today]);
+        } else {
+            await client.query(`
+                INSERT INTO Draw_Results (draw_date, prize_8, prize_6, prize_4, prize_3, prize_2) 
+                VALUES (CAST($1 AS DATE), $2, $3, $4, $5, $6)
+            `, [today, prize_8, prize_6, prize_4, prize_3, prize_2]);
+        }
+
+        // 2. อัปเดตสถานะบิลที่ "รอผลตรวจ" ให้เป็น "ถูกรางวัล" หรือ "ไม่ถูก" (🌟 ปรับใช้ Parameter เพื่อป้องกัน SQL Injection)
+        await client.query(`
+            UPDATE Lottery_Order_Items i SET 
                 status = CASE 
-                    WHEN (i.lottery_type = '2' AND i.selected_number = '${prize_2}') OR
-                         (i.lottery_type = '3' AND i.selected_number = '${prize_3}') OR
-                         (i.lottery_type = '4' AND i.selected_number = '${prize_4}') OR
-                         (i.lottery_type = '6' AND i.selected_number = '${prize_6}') OR
-                         (i.lottery_type = '8' AND i.selected_number = '${prize_8}') THEN N'ถูกรางวัล'
-                    ELSE N'ไม่ถูกรางวัล'
+                    WHEN (i.lottery_type = '2' AND i.selected_number = $1) OR
+                         (i.lottery_type = '3' AND i.selected_number = $2) OR
+                         (i.lottery_type = '4' AND i.selected_number = $3) OR
+                         (i.lottery_type = '6' AND i.selected_number = $4) OR
+                         (i.lottery_type = '8' AND i.selected_number = $5) THEN 'ถูกรางวัล'
+                    ELSE 'ไม่ถูกรางวัล'
                 END,
                 prize_amount = CASE
-                    WHEN i.lottery_type = '2' AND i.selected_number = '${prize_2}' THEN i.price * 90
-                    WHEN i.lottery_type = '3' AND i.selected_number = '${prize_3}' THEN i.price * 900
-                    WHEN i.lottery_type = '4' AND i.selected_number = '${prize_4}' THEN i.price * 7000
-                    WHEN i.lottery_type = '6' AND i.selected_number = '${prize_6}' THEN i.price * 400000
-                    WHEN i.lottery_type = '8' AND i.selected_number = '${prize_8}' THEN i.price * 1000000
+                    WHEN i.lottery_type = '2' AND i.selected_number = $1 THEN i.price * 90
+                    WHEN i.lottery_type = '3' AND i.selected_number = $2 THEN i.price * 900
+                    WHEN i.lottery_type = '4' AND i.selected_number = $3 THEN i.price * 7000
+                    WHEN i.lottery_type = '6' AND i.selected_number = $4 THEN i.price * 400000
+                    WHEN i.lottery_type = '8' AND i.selected_number = $5 THEN i.price * 1000000
                     ELSE 0
                 END
-            FROM Lottery_Order_Items i
-            JOIN Lottery_Orders o ON i.order_id = o.order_id
-            WHERE CAST(o.created_at AS DATE) = @dDate AND i.status = N'รอผลตรวจ';
-        `);
+            FROM Lottery_Orders o
+            WHERE i.order_id = o.order_id AND CAST(o.created_at AS DATE) = CAST($6 AS DATE) AND i.status = 'รอผลตรวจ';
+        `, [prize_2, prize_3, prize_4, prize_6, prize_8, today]);
 
         // 3. ดึงรายชื่อคนถูกรางวัลส่งกลับไปหน้าเว็บเพื่อทำ PDF
-        const winnersRes = await pool.request().input('dDate', sql.Date, today).query(`
+        const winnersRes = await client.query(`
             SELECT u.username, i.lottery_type, i.selected_number, i.price, i.prize_amount, o.currency_code
             FROM Lottery_Order_Items i
             JOIN Lottery_Orders o ON i.order_id = o.order_id
             JOIN Users u ON o.user_id = u.user_id
-            WHERE CAST(o.created_at AS DATE) = @dDate AND i.status = N'ถูกรางวัล';
-        `);
+            WHERE CAST(o.created_at AS DATE) = CAST($1 AS DATE) AND i.status = 'ถูกรางวัล';
+        `, [today]);
 
-        res.json({ success: true, winners: winnersRes.recordset });
+        await client.query('COMMIT');
+        res.json({ success: true, winners: winnersRes.rows });
     } catch (err) {
-        console.error(err);
+        await client.query('ROLLBACK');
+        console.error('Error drawing results:', err);
         res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการตรวจรางวัล' });
+    } finally {
+        client.release();
     }
 });
 
 
 // ==========================================
-// 🌟 API: สำหรับหน้าลูกค้า เช็คสถานะการขายและเวลาต่างๆ
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว (ลบตัวซ้ำออกให้แล้วครับ)
+// 🌟 API 3: ส่งสถานะและเวลา ให้หน้าบ้านลูกค้า (ฝั่ง Client)
 // ==========================================
 app.get('/api/lottery/status', async (req, res) => {
     try {
-        const pool = await sql.connect(dbConfig);
-        const result = await pool.request().query(`
+        const result = await pgPool.query(`
             SELECT 
-                CONVERT(varchar(5), close_time, 108) as close_time,
-                CONVERT(varchar(5), open_time, 108) as open_time,
-                CONVERT(varchar(5), draw_time, 108) as draw_time,
+                to_char(close_time, 'HH24:MI') as close_time,
+                to_char(open_time, 'HH24:MI') as open_time,
+                to_char(draw_time, 'HH24:MI') as draw_time,
                 is_sales_open 
             FROM System_Settings 
             WHERE id = 1
         `);
-        res.json({ success: true, data: result.recordset[0] });
+        res.json({ success: true, data: result.rows[0] });
     } catch (err) {
+        console.error('Error fetching lottery status:', err);
         res.status(500).json({ success: false });
     }
 });
-
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🌟 API: ดึงประวัติผลการออกรางวัลและรายชื่อคนถูกรางวัล ย้อนหลังตามวันที่ (เพิ่มยอดขาย)
 // ==========================================
 app.get('/api/admin/draw-history', async (req, res) => {
     const { date } = req.query; // คาดหวัง Format: YYYY-MM-DD (ค.ศ.)
     try {
-        const pool = await sql.connect(dbConfig);
-        
         // 1. ดึงผลรางวัลของวันนั้น
-        const resultRes = await pool.request()
-            .input('dDate', sql.Date, date)
-            .query("SELECT * FROM Draw_Results WHERE draw_date = @dDate");
+        const resultRes = await pgPool.query("SELECT * FROM Draw_Results WHERE draw_date = CAST($1 AS DATE)", [date]);
             
         // 2. ดึงคนถูกรางวัลของวันนั้น
-        const winnersRes = await pool.request()
-            .input('dDate', sql.Date, date)
-            .query(`
+        const winnersRes = await pgPool.query(`
                 SELECT i.item_id as order_item_id, u.username, i.lottery_type, i.selected_number, i.price, i.prize_amount, o.currency_code
                 FROM Lottery_Order_Items i
                 JOIN Lottery_Orders o ON i.order_id = o.order_id
                 JOIN Users u ON o.user_id = u.user_id
-                WHERE o.draw_date = @dDate AND i.status = N'ถูกรางวัล'
-            `);
+                WHERE o.draw_date = CAST($1 AS DATE) AND i.status = 'ถูกรางวัล'
+            `, [date]);
 
         // 3. 🌟 (เพิ่มใหม่) ดึงยอดขายรวมทั้งหมดของงวดนั้น แยกตามสกุลเงิน THB และ LAK
-        const salesRes = await pool.request()
-            .input('dDate', sql.Date, date)
-            .query(`
+        const salesRes = await pgPool.query(`
                 SELECT o.currency_code, SUM(i.price) as total_sales
                 FROM Lottery_Order_Items i
                 JOIN Lottery_Orders o ON i.order_id = o.order_id
-                WHERE o.draw_date = @dDate
+                WHERE o.draw_date = CAST($1 AS DATE)
                 GROUP BY o.currency_code
-            `);
+            `, [date]);
 
         let total_sales_thb = 0;
         let total_sales_lak = 0;
 
         // แยกตะกร้ายอดขายเงินบาท กับ เงินกีบ
-        salesRes.recordset.forEach(row => {
+        salesRes.rows.forEach(row => {
             if (row.currency_code === 'THB') {
-                total_sales_thb += row.total_sales;
+                total_sales_thb += Number(row.total_sales);
             } else if (row.currency_code === 'LAK' || row.currency_code === '₭') {
-                total_sales_lak += row.total_sales;
+                total_sales_lak += Number(row.total_sales);
             }
         });
 
         // 4. ส่งแพ็คเกจข้อมูลกลับไปให้หน้าเว็บ
         res.json({ 
             success: true, 
-            results: resultRes.recordset.length > 0 ? resultRes.recordset[0] : null,
-            winners: winnersRes.recordset,
+            results: resultRes.rows.length > 0 ? resultRes.rows[0] : null,
+            winners: winnersRes.rows,
             total_sales_thb: total_sales_thb, // 🌟 ยอดขาย THB
             total_sales_lak: total_sales_lak  // 🌟 ยอดขาย LAK
         });
@@ -3068,24 +2832,20 @@ app.get('/api/admin/draw-history', async (req, res) => {
 
 
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🌟 API: ดึงประวัติผลการออกรางวัลแบบ "ช่วงวันที่" (รายเดือน)
 // ==========================================
 app.get('/api/admin/draw-history-range', async (req, res) => {
     const { startDate, endDate } = req.query;
     try {
-        const pool = await sql.connect(dbConfig);
-        const result = await pool.request()
-            // ใช้ VarChar แล้ว CAST เป็น DATE เพื่อป้องกันบั๊กเวลาเหลื่อมล้ำ
-            .input('startDate', sql.VarChar, startDate)
-            .input('endDate', sql.VarChar, endDate)
-            .query(`
+        const result = await pgPool.query(`
                 SELECT * FROM Draw_Results
-                WHERE draw_date >= CAST(@startDate AS DATE) 
-                  AND draw_date <= CAST(@endDate AS DATE)
+                WHERE draw_date >= CAST($1 AS DATE) 
+                  AND draw_date <= CAST($2 AS DATE)
                 ORDER BY draw_date DESC
-            `);
+            `, [startDate, endDate]);
             
-        res.json({ success: true, history: result.recordset });
+        res.json({ success: true, history: result.rows });
     } catch (err) {
         console.error("Error fetching history range:", err);
         res.status(500).json({ success: false });
@@ -3094,106 +2854,120 @@ app.get('/api/admin/draw-history-range', async (req, res) => {
 
 
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🌟 API 1: ดึงเรทการจ่ายรางวัล (Lottery_Prize_Rates)
 // ==========================================
 app.get('/api/admin/prize-rates', async (req, res) => {
     try {
-        const pool = await sql.connect(dbConfig);
-        const result = await pool.request().query("SELECT * FROM Lottery_Prize_Rates ORDER BY CAST(lottery_type AS INT)");
-        res.json({ success: true, rates: result.recordset });
-    } catch (err) { res.status(500).json({ success: false }); }
+        const result = await pgPool.query("SELECT * FROM Lottery_Prize_Rates ORDER BY CAST(lottery_type AS INTEGER) ASC");
+        res.json({ success: true, rates: result.rows });
+    } catch (err) { 
+        res.status(500).json({ success: false }); 
+    }
 });
 
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🌟 API 2: อัปเดตเรทการจ่ายรางวัล
 // ==========================================
 app.post('/api/admin/prize-rates', async (req, res) => {
     const { rates } = req.body;
+    const client = await pgPool.connect(); // ใช้ Transaction เพื่อประสิทธิภาพเวลา Update หลายแถว
     try {
-        const pool = await sql.connect(dbConfig);
+        await client.query('BEGIN');
         for (let r of rates) {
-            await pool.request()
-                .input('id', sql.Int, r.id)
-                .input('multiplier', sql.Decimal(18,2), r.multiplier)
-                .query("UPDATE Lottery_Prize_Rates SET multiplier = @multiplier WHERE id = @id");
+            await client.query("UPDATE Lottery_Prize_Rates SET multiplier = $1 WHERE id = $2", [r.multiplier, r.id]);
         }
+        await client.query('COMMIT');
         res.json({ success: true, message: "อัปเดตอัตราจ่ายสำเร็จ" });
-    } catch (err) { res.status(500).json({ success: false }); }
+    } catch (err) { 
+        await client.query('ROLLBACK');
+        console.error('Error updating prize rates:', err);
+        res.status(500).json({ success: false }); 
+    } finally {
+        client.release();
+    }
 });
 
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🌟 API: ดึงและอัปเดตอัตราแลกเปลี่ยน (ExchangeRates)
 // ==========================================
 app.get('/api/admin/exchange-rates', async (req, res) => {
     try {
-        const pool = await sql.connect(dbConfig);
-        const result = await pool.request().query("SELECT * FROM ExchangeRates");
-        res.json({ success: true, rates: result.recordset });
-    } catch (err) { res.status(500).json({ success: false }); }
+        const result = await pgPool.query("SELECT * FROM ExchangeRates");
+        res.json({ success: true, rates: result.rows });
+    } catch (err) { 
+        res.status(500).json({ success: false }); 
+    }
 });
 
 app.post('/api/admin/exchange-rates', async (req, res) => {
     const { pair, rate } = req.body;
     try {
-        const pool = await sql.connect(dbConfig);
-        await pool.request()
-            .input('pair', sql.VarChar, pair)
-            .input('rate', sql.Decimal(18,6), rate)
-            .query("UPDATE ExchangeRates SET rate = @rate, last_updated = GETDATE() WHERE currency_pair = @pair");
+        await pgPool.query("UPDATE ExchangeRates SET rate = $1, last_updated = CURRENT_TIMESTAMP WHERE currency_pair = $2", [rate, pair]);
         res.json({ success: true, message: "อัปเดตเรทเงินสำเร็จ" });
-    } catch (err) { res.status(500).json({ success: false }); }
+    } catch (err) { 
+        console.error('Error updating exchange rate:', err);
+        res.status(500).json({ success: false }); 
+    }
 });
 
 
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🌟 API 3: เช็คยอดวิเคราะห์ความเสี่ยง (Analyze Draw)
 // ==========================================
 app.post('/api/admin/analyze-draw', async (req, res) => {
     const { number } = req.body; 
     try {
-        const pool = await sql.connect(dbConfig);
-        
         // ดึงเรทแลกเปลี่ยนสดๆ ทุกครั้งที่กดปุ่ม
-        const rateRes = await pool.request().query("SELECT rate FROM ExchangeRates WHERE currency_pair = 'THB_LAK'");
-        const exchangeRate = rateRes.recordset.length > 0 ? rateRes.recordset[0].rate : 500.0;
+        const rateRes = await pgPool.query("SELECT rate FROM ExchangeRates WHERE currency_pair = 'THB_LAK'");
+        const exchangeRate = rateRes.rows.length > 0 ? parseFloat(rateRes.rows[0].rate) : 500.0;
 
         const num6 = number;
         const num4 = number.slice(-4);
         const num3 = number.slice(-3);
         const num2 = number.slice(-2);
 
-        const salesRes = await pool.request()
-            .query(`SELECT ISNULL(SUM(CASE WHEN currency_code = 'LAK' THEN total_amount / ${exchangeRate} ELSE total_amount END), 0) as totalSalesTHB FROM Lottery_Orders WHERE status = N'รอผลตรวจ'`);
-        const totalSales = salesRes.recordset[0].totalSalesTHB;
+        // 🌟 เปลี่ยน ISNULL เป็น COALESCE และอัปเกรดความปลอดภัยด้วยการโยน $1
+        const salesRes = await pgPool.query(`
+            SELECT COALESCE(SUM(CASE WHEN currency_code = 'LAK' THEN total_amount / $1 ELSE total_amount END), 0) as "totalSalesTHB" 
+            FROM Lottery_Orders 
+            WHERE status = 'รอผลตรวจ'
+        `, [exchangeRate]);
+            
+        const totalSales = salesRes.rows[0].totalSalesTHB;
 
-        const analysisRes = await pool.request()
-            .input('n6', sql.VarChar, num6).input('n4', sql.VarChar, num4)
-            .input('n3', sql.VarChar, num3).input('n2', sql.VarChar, num2)
-            .query(`
+        // 🌟 แก้ไขการ CAST ให้เป็น VARCHAR เพื่อไม่ให้พังเวลาเจอข้อมูลเช่น '2 ล่าง'
+        const analysisRes = await pgPool.query(`
                 SELECT 
                     CAST(i.lottery_type AS VARCHAR) as lottery_type,
                     COUNT(i.item_id) as winner_count,
-                    SUM(CASE WHEN o.currency_code = 'LAK' THEN (i.price * r.multiplier) / ${exchangeRate} ELSE (i.price * r.multiplier) END) as total_payout
+                    SUM(CASE WHEN o.currency_code = 'LAK' THEN (i.price * r.multiplier) / $1 ELSE (i.price * r.multiplier) END) as total_payout
                 FROM Lottery_Order_Items i
                 JOIN Lottery_Orders o ON i.order_id = o.order_id
-                LEFT JOIN Lottery_Prize_Rates r ON CAST(i.lottery_type AS INT) = CAST(r.lottery_type AS INT)
-                WHERE o.status = N'รอผลตรวจ' AND i.status = N'รอผลตรวจ'
+                LEFT JOIN Lottery_Prize_Rates r ON CAST(i.lottery_type AS VARCHAR) = CAST(r.lottery_type AS VARCHAR)
+                WHERE o.status = 'รอผลตรวจ' AND i.status = 'รอผลตรวจ'
                 AND (
-                    (i.lottery_type = '2' AND i.selected_number = @n2) OR
-                    (i.lottery_type = '3' AND i.selected_number = @n3) OR
-                    (i.lottery_type = '4' AND i.selected_number = @n4) OR
-                    (i.lottery_type = '6' AND i.selected_number = @n6)
+                    (i.lottery_type = '2' AND i.selected_number = $2) OR
+                    (i.lottery_type = '3' AND i.selected_number = $3) OR
+                    (i.lottery_type = '4' AND i.selected_number = $4) OR
+                    (i.lottery_type = '6' AND i.selected_number = $5)
                 )
                 GROUP BY CAST(i.lottery_type AS VARCHAR)
-            `);
+            `, [exchangeRate, num2, num3, num4, num6]
+        );
         
-        res.json({ success: true, totalSales, analysis: analysisRes.recordset });
-    } catch (err) { res.status(500).json({ success: false }); }
+        res.json({ success: true, totalSales, analysis: analysisRes.rows });
+    } catch (err) { 
+        console.error('Error analyzing draw:', err);
+        res.status(500).json({ success: false }); 
+    }
 });
 
-
-
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🌟 API หวยไทย เริ่ม
 // ==========================================
 // ==========================================
@@ -3201,19 +2975,18 @@ app.post('/api/admin/analyze-draw', async (req, res) => {
 // ==========================================
 app.get('/api/admin/thai-lottery/rounds', async (req, res) => {
     try {
-        const pool = await sql.connect(dbConfig);
-        const result = await pool.request().query(`
+        const result = await pgPool.query(`
             SELECT round_id, 
-                   ISNULL(round_name, CAST(round_number AS NVARCHAR(100))) as round_number, 
-                   FORMAT(open_time, 'yyyy-MM-ddTHH:mm:ss') AS open_time, 
-                   FORMAT(close_time, 'yyyy-MM-ddTHH:mm:ss') AS close_time, 
-                   FORMAT(draw_time, 'yyyy-MM-ddTHH:mm:ss') AS draw_time, 
+                   COALESCE(round_name, CAST(round_number AS VARCHAR(100))) as round_number, 
+                   to_char(open_time, 'YYYY-MM-DD"T"HH24:MI:SS') AS open_time, 
+                   to_char(close_time, 'YYYY-MM-DD"T"HH24:MI:SS') AS close_time, 
+                   to_char(draw_time, 'YYYY-MM-DD"T"HH24:MI:SS') AS draw_time, 
                    status, result_8_super as result_6, result_2_bottom 
             FROM Yeeki_Rounds 
             WHERE category = 'THAI' 
             ORDER BY draw_time DESC
         `);
-        res.json({ success: true, rounds: result.recordset });
+        res.json({ success: true, rounds: result.rows });
     } catch (err) {
         console.error("Error fetching Thai rounds:", err);
         res.status(500).json({ success: false });
@@ -3222,27 +2995,27 @@ app.get('/api/admin/thai-lottery/rounds', async (req, res) => {
 
 
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 2. 🇹🇭 API: ดึงข้อมูลหวยไทยงวดปัจจุบัน (สำหรับหน้าเว็บลูกค้า) -> แก้บั๊ก Timezone
 // ==========================================
 app.get('/api/thai-lottery/current-round', async (req, res) => {
     try {
-        const pool = await sql.connect(dbConfig);
-        
-        const roundReq = await pool.request().query(`
-            SELECT TOP 1 
+        const roundReq = await pgPool.query(`
+            SELECT 
                 round_id, 
-                ISNULL(round_name, CAST(round_number AS NVARCHAR(100))) as round_number, 
-                FORMAT(open_time, 'yyyy-MM-ddTHH:mm:ss') AS open_time, 
-                FORMAT(close_time, 'yyyy-MM-ddTHH:mm:ss') AS close_time, 
-                FORMAT(draw_time, 'yyyy-MM-ddTHH:mm:ss') AS draw_time, 
+                COALESCE(round_name, CAST(round_number AS VARCHAR(100))) as round_number, 
+                to_char(open_time, 'YYYY-MM-DD"T"HH24:MI:SS') AS open_time, 
+                to_char(close_time, 'YYYY-MM-DD"T"HH24:MI:SS') AS close_time, 
+                to_char(draw_time, 'YYYY-MM-DD"T"HH24:MI:SS') AS draw_time, 
                 status 
             FROM Yeeki_Rounds 
             WHERE category = 'THAI' AND status != 'Completed' 
             ORDER BY close_time ASC
+            LIMIT 1
         `);
 
-        if (roundReq.recordset.length > 0) {
-            res.json({ success: true, round: roundReq.recordset[0] });
+        if (roundReq.rows.length > 0) {
+            res.json({ success: true, round: roundReq.rows[0] });
         } else {
             res.json({ success: true, round: null, message: 'ยังไม่มีการเปิดรับแทงหวยไทยในขณะนี้' });
         }
@@ -3252,7 +3025,10 @@ app.get('/api/thai-lottery/current-round', async (req, res) => {
     }
 });
 
+// ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 2. 🇹🇭 สร้างงวดหวยไทยใหม่ (แก้ปัญหา Error Type INT, ภาษาไทย และ draw_date NULL)
+// ==========================================
 app.post('/api/admin/thai-lottery/create-round', async (req, res) => {
     const { round_number, open_time, close_time, draw_time } = req.body;
     if (!round_number || !open_time || !close_time || !draw_time) {
@@ -3260,8 +3036,6 @@ app.post('/api/admin/thai-lottery/create-round', async (req, res) => {
     }
 
     try {
-        const pool = await sql.connect(dbConfig);
-        
         // 🌟 1. ดึงชื่อภาษาไทยมาเก็บไว้ในตัวแปรแยก
         const roundNameText = round_number; 
         
@@ -3269,22 +3043,16 @@ app.post('/api/admin/thai-lottery/create-round', async (req, res) => {
         const d = new Date(draw_time);
         const fakeIntRound = parseInt(`${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`);
 
-        // เช็คว่าซ้ำไหม (ใช้ตัว N นำหน้า @rName เพื่อให้รองรับภาษาไทย)
-        const checkReq = await pool.request()
-            .input('rName', sql.NVarChar, roundNameText)
-            .query(`SELECT 1 FROM Yeeki_Rounds WHERE round_name = @rName AND category = 'THAI'`);
+        // เช็คว่าซ้ำไหม
+        const checkReq = await pgPool.query(`SELECT 1 FROM Yeeki_Rounds WHERE round_name = $1 AND category = 'THAI'`, [roundNameText]);
             
-        if (checkReq.recordset.length > 0) return res.status(400).json({ success: false, message: 'งวดหวยไทยนี้ถูกสร้างไว้แล้ว' });
+        if (checkReq.rows.length > 0) return res.status(400).json({ success: false, message: 'งวดหวยไทยนี้ถูกสร้างไว้แล้ว' });
 
-        // 🌟 3. บันทึกลงฐานข้อมูล (สั่งให้ SQL คัดลอกวันที่จาก @dTime ไปใส่ใน draw_date ด้วย CAST)
-        await pool.request()
-            .input('rNumInt', sql.Int, fakeIntRound)
-            .input('rName', sql.NVarChar, roundNameText)
-            .input('oTime', sql.DateTime, open_time)
-            .input('cTime', sql.DateTime, close_time)
-            .input('dTime', sql.DateTime, draw_time)
-            .query(`INSERT INTO Yeeki_Rounds (round_number, round_name, open_time, close_time, draw_time, draw_date, status, category)
-                    VALUES (@rNumInt, @rName, @oTime, @cTime, @dTime, CAST(@dTime AS DATE), 'Pending', 'THAI')`);
+        // 🌟 3. บันทึกลงฐานข้อมูล (สั่งให้ SQL คัดลอกวันที่จาก $4 ไปใส่ใน draw_date ด้วย CAST)
+        await pgPool.query(`
+            INSERT INTO Yeeki_Rounds (round_number, round_name, open_time, close_time, draw_time, draw_date, status, category)
+            VALUES ($1, $2, $3, $4, $5, CAST($5 AS DATE), 'Pending', 'THAI')
+        `, [fakeIntRound, roundNameText, open_time, close_time, draw_time]);
 
         res.json({ success: true, message: `✅ สร้างงวดหวยไทย (${roundNameText}) สำเร็จ!` });
     } catch (err) { 
@@ -3293,8 +3061,10 @@ app.post('/api/admin/thai-lottery/create-round', async (req, res) => {
 });
 
 
-
+// ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 3. 🇹🇭 ประกาศผลหวยไทย + จ่ายเงินรางวัลและค่าคอมมิชชัน
+// ==========================================
 app.post('/api/admin/thai-lottery/execute-draw', async (req, res) => {
     const { round_id, number6, number2bot } = req.body;
     
@@ -3302,10 +3072,9 @@ app.post('/api/admin/thai-lottery/execute-draw', async (req, res) => {
         return res.status(400).json({ success: false, message: 'ข้อมูลไม่ครบถ้วน กรุณากรอกเลขให้ถูกต้อง' });
     }
 
-    let pool;
+    const client = await pgPool.connect(); // 🌟 เปิด Transaction ใช้งานจริงจัง!
+    
     try {
-        pool = await sql.connect(dbConfig);
-        
         // แตกตัวเลขตามกติกาหวยใต้ดินไทย
         const top_6 = number6;
         const top_4 = top_6.slice(-4);
@@ -3314,124 +3083,114 @@ app.post('/api/admin/thai-lottery/execute-draw', async (req, res) => {
         const bot_2 = number2bot;
         const top_3_sorted = top_3.split('').sort().join('');
 
-        // ดึงเรทจ่ายหวยยี่กีมาใช้ (เพราะกติกาและประเภทหวยเหมือนกัน)
-        const ratesReq = await pool.request().query(`SELECT lottery_type, multiplier FROM Yeeki_Prize_Rates`);
+        // ดึงเรทจ่ายหวยยี่กีมาใช้
+        const ratesReq = await client.query(`SELECT lottery_type, multiplier FROM Yeeki_Prize_Rates`);
         const prizeRates = {};
-        ratesReq.recordset.forEach(r => prizeRates[r.lottery_type] = r.multiplier);
+        ratesReq.rows.forEach(r => prizeRates[r.lottery_type] = r.multiplier);
 
         let winCommissionPercent = 0;
         try {
-            const commReq = await pool.request().query(`SELECT TOP 1 win_percent FROM Commission_Settings`);
-            if (commReq.recordset.length > 0) winCommissionPercent = commReq.recordset[0].win_percent || 0;
+            const commReq = await client.query(`SELECT win_percent FROM Commission_Settings LIMIT 1`);
+            if (commReq.rows.length > 0) winCommissionPercent = commReq.rows[0].win_percent || 0;
         } catch (e) {}
 
-        const transaction = new sql.Transaction(pool);
-        await transaction.begin();
+        await client.query('BEGIN'); // เริ่มล็อค DB
 
-        try {
-            const request = new sql.Request(transaction);
+        // 3.1 บันทึกเลขที่ออกลงตารางรอบหวย
+        await client.query(`
+            UPDATE Yeeki_Rounds 
+            SET result_8_super = $1, result_4_top = $2, result_3_top = $3, result_2_bottom = $4, status = 'Completed' 
+            WHERE round_id = $5
+        `, [top_6, top_4, top_3, bot_2, round_id]);
 
-            // 3.1 บันทึกเลขที่ออกลงตารางรอบหวย (ใช้ช่องที่มีอยู่ของ Yeeki)
-            await request
-                .input('rId', sql.Int, round_id)
-                .input('p6', sql.VarChar, top_6).input('p4', sql.VarChar, top_4)
-                .input('p3', sql.VarChar, top_3).input('p2b', sql.VarChar, bot_2)
-                .query(`UPDATE Yeeki_Rounds SET result_8_super = @p6, result_4_top = @p4, result_3_top = @p3, result_2_bottom = @p2b, status = 'Completed' WHERE round_id = @rId`);
+        // 3.2 ดึงบิลหวยไทยที่รอตรวจทั้งหมดของรอบนี้
+        const ordersReq = await client.query(`
+            SELECT i.item_id, o.user_id, i.lottery_type, i.selected_number, i.price, o.currency_code
+            FROM Yeeki_Order_Items i JOIN Yeeki_Orders o ON i.order_id = o.order_id
+            WHERE o.round_id = $1 AND i.status = 'รอผลตรวจ'
+        `, [round_id]);
+        
+        let totalWinners = 0;
 
-            // 3.2 ดึงบิลหวยไทยที่รอตรวจทั้งหมดของรอบนี้
-            const ordersReq = await request.input('roundId', sql.Int, round_id).query(`
-                SELECT i.item_id, o.user_id, i.lottery_type, i.selected_number, i.price, o.currency_code
-                FROM Yeeki_Order_Items i JOIN Yeeki_Orders o ON i.order_id = o.order_id
-                WHERE o.round_id = @roundId AND i.status = N'รอผลตรวจ'
-            `);
-            
-            let totalWinners = 0;
+        // 3.3 ตรวจบิล จ่ายเงิน จ่ายค่าคอมฯ ทีละใบ
+        for (let item of ordersReq.rows) {
+            let isWin = false;
+            let t = item.lottery_type;
+            let n = item.selected_number;
 
-            // 3.3 ตรวจบิล จ่ายเงิน จ่ายค่าคอมฯ ทีละใบ
-            for (let item of ordersReq.recordset) {
-                let isWin = false;
-                let t = item.lottery_type;
-                let n = item.selected_number;
+            // กติกาตรวจหวยไทย
+            if (t === '6 ตัว' && n === top_6) isWin = true;
+            else if (t === '4 ตัวท้าย' && n === top_4) isWin = true;
+            else if (t === '3 ตัวบน' && n === top_3) isWin = true;
+            else if (t === '3 ตัวโต๊ด' && n.split('').sort().join('') === top_3_sorted) isWin = true;
+            else if (t === '2 ตัวบน' && n === top_2) isWin = true;
+            else if ((t === '2 ตัวล่าง' || t === '2 ล่าง') && n === bot_2) isWin = true;
+            else if (t === 'วิ่งบน' && top_3.includes(n)) isWin = true;
+            else if (t === 'วิ่งล่าง' && bot_2.includes(n)) isWin = true;
 
-                // กติกาตรวจหวยไทย
-                if (t === '6 ตัว' && n === top_6) isWin = true;
-                else if (t === '4 ตัวท้าย' && n === top_4) isWin = true;
-                else if (t === '3 ตัวบน' && n === top_3) isWin = true;
-                else if (t === '3 ตัวโต๊ด' && n.split('').sort().join('') === top_3_sorted) isWin = true;
-                else if (t === '2 ตัวบน' && n === top_2) isWin = true;
-                else if ((t === '2 ตัวล่าง' || t === '2 ล่าง') && n === bot_2) isWin = true;
-                else if (t === 'วิ่งบน' && top_3.includes(n)) isWin = true;
-                else if (t === 'วิ่งล่าง' && bot_2.includes(n)) isWin = true;
+            if (isWin) {
+                totalWinners++;
+                let prizeAmount = item.price * (prizeRates[item.lottery_type] || 0);
+                let isLAK = (item.currency_code === 'LAK' || item.currency_code === '₭');
+                let currency = isLAK ? 'LAK' : 'THB';
 
-                if (isWin) {
-                    totalWinners++;
-                    let prizeAmount = item.price * (prizeRates[item.lottery_type] || 0);
-                    let isLAK = (item.currency_code === 'LAK' || item.currency_code === '₭');
-                    let currency = isLAK ? 'LAK' : 'THB';
+                // อัปเดตสถานะชนะ
+                await client.query(`UPDATE Yeeki_Order_Items SET status = 'ชนะ', prize_amount = $1 WHERE item_id = $2`, [prizeAmount, item.item_id]);
 
-                    await request
-                        .input('itemId', sql.Int, item.item_id).input('prizeAmt', sql.Decimal(18, 2), prizeAmount)
-                        .query(`UPDATE Yeeki_Order_Items SET status = N'ชนะ', prize_amount = @prizeAmt WHERE item_id = @itemId`);
+                // 🌟 อัปเดตเงินเข้ากระเป๋าหลัก (balance)
+                await client.query(`UPDATE Wallets SET balance = balance + $1 WHERE user_id = $2`, [prizeAmount, item.user_id]);
 
-                    let updateWalletQuery = isLAK 
-                        ? `UPDATE Wallets SET balance_lak = balance_lak + @wAmt WHERE user_id = @uId`
-                        : `UPDATE Wallets SET balance_thb = balance_thb + @wAmt WHERE user_id = @uId`;
-                    
-                    await request.input('uId', sql.Int, item.user_id).input('wAmt', sql.Decimal(18, 2), prizeAmount).query(updateWalletQuery);
+                // บันทึก Log การรับเงิน
+                await client.query(`
+                    INSERT INTO Transactions (user_id, amount, currency_code, transaction_type, status, title, created_at) 
+                    VALUES ($1, $2, $3, 'deposit', 'Completed', $4, CURRENT_TIMESTAMP)
+                `, [item.user_id, prizeAmount, currency, `ถูกรางวัลหวยไทย ${item.lottery_type}`]);
 
-                    await request
-                        .input('txUid', sql.Int, item.user_id).input('txAmt', sql.Decimal(18, 2), prizeAmount)
-                        .input('txCur', sql.VarChar, currency).input('txNote', sql.NVarChar, `ถูกรางวัลหวยไทย ${item.lottery_type}`)
-                        .query(`INSERT INTO Transactions (user_id, amount, currency_code, transaction_type, status, note, created_at) VALUES (@txUid, @txAmt, @txCur, 'deposit', 'Completed', @txNote, GETDATE())`);
+                // 💵 จ่ายค่าคอมฯ ผู้แนะนำ
+                if (winCommissionPercent > 0) {
+                    const refReq = await client.query(`SELECT referrer_id FROM User_Referrals WHERE user_id = $1`, [item.user_id]);
+                    if (refReq.rows.length > 0) {
+                        let refId = refReq.rows[0].referrer_id;
+                        let commAmt = prizeAmount * (winCommissionPercent / 100);
+                        
+                        // 🌟 อัปเดตเงินค่าคอมเข้ากระเป๋าหลัก
+                        await client.query(`UPDATE Wallets SET balance = balance + $1 WHERE user_id = $2`, [commAmt, refId]);
 
-                    // 💵 จ่ายค่าคอมฯ ผู้แนะนำ
-                    if (winCommissionPercent > 0) {
-                        const refReq = await request.input('childId', sql.Int, item.user_id).query(`SELECT referrer_id FROM User_Referrals WHERE user_id = @childId`);
-                        if (refReq.recordset.length > 0) {
-                            let refId = refReq.recordset[0].referrer_id;
-                            let commAmt = prizeAmount * (winCommissionPercent / 100);
-                            
-                            let updateCommWalletQuery = isLAK 
-                                ? `UPDATE Wallets SET balance_lak = balance_lak + @cAmt WHERE user_id = @rId`
-                                : `UPDATE Wallets SET balance_thb = balance_thb + @cAmt WHERE user_id = @rId`;
-                                
-                            await request.input('rId', sql.Int, refId).input('cAmt', sql.Decimal(18, 2), commAmt).query(updateCommWalletQuery);
-
-                            await request
-                                .input('cTxUid', sql.Int, refId).input('cTxAmt', sql.Decimal(18, 2), commAmt)
-                                .input('cTxCur', sql.VarChar, currency).input('cTxNote', sql.NVarChar, `ค่าคอมหวยไทยลูกทีมถูกรางวัล ${winCommissionPercent}%`)
-                                .query(`INSERT INTO Transactions (user_id, amount, currency_code, transaction_type, status, note, created_at) VALUES (@cTxUid, @cTxAmt, @cTxCur, 'commission', 'Completed', @cTxNote, GETDATE())`);
-                        }
+                        // บันทึก Log การรับค่าคอม
+                        await client.query(`
+                            INSERT INTO Transactions (user_id, amount, currency_code, transaction_type, status, title, created_at) 
+                            VALUES ($1, $2, $3, 'commission', 'Completed', $4, CURRENT_TIMESTAMP)
+                        `, [refId, commAmt, currency, `ค่าคอมหวยไทยลูกทีมถูกรางวัล ${winCommissionPercent}%`]);
                     }
-                } else {
-                    await request.input('itemIdLoss', sql.Int, item.item_id).query(`UPDATE Yeeki_Order_Items SET status = N'ไม่ถูกรางวัล', prize_amount = 0 WHERE item_id = @itemIdLoss`);
                 }
+            } else {
+                await client.query(`UPDATE Yeeki_Order_Items SET status = 'ไม่ถูกรางวัล', prize_amount = 0 WHERE item_id = $1`, [item.item_id]);
             }
+        }
 
-            // 3.4 ปิดบิลใหญ่
-            await request.input('rIdMaster', sql.Int, round_id).query(`UPDATE Yeeki_Orders SET status = N'ตรวจผลแล้ว' WHERE round_id = @rIdMaster`);
+        // 3.4 ปิดบิลใหญ่
+        await client.query(`UPDATE Yeeki_Orders SET status = 'ตรวจผลแล้ว' WHERE round_id = $1`, [round_id]);
 
-            await transaction.commit();
-            res.json({ success: true, message: `✅ ประกาศผลหวยไทยสำเร็จ! จ่ายเงินผู้ชนะ ${totalWinners} รายการ` });
+        await client.query('COMMIT');
+        res.json({ success: true, message: `✅ ประกาศผลหวยไทยสำเร็จ! จ่ายเงินผู้ชนะ ${totalWinners} รายการ` });
 
-        } catch (transErr) { await transaction.rollback(); throw transErr; }
     } catch (err) {
+        await client.query('ROLLBACK');
         console.error("Execute Thai Draw Error:", err);
         res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาด: ' + err.message });
+    } finally {
+        client.release();
     }
 });
 
 
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 7. 🇹🇭 API: ดึงรายการบิลลูกค้าหวยไทยรายงวด (สำหรับหน้ารายงาน)
 // ==========================================
 app.get('/api/admin/thai-lottery/round-tickets/:roundId', async (req, res) => {
     try {
-        const pool = await sql.connect(dbConfig);
-        const request = pool.request();
-        request.input('roundId', sql.Int, req.params.roundId);
-        
-        const result = await request.query(`
+        const result = await pgPool.query(`
             SELECT 
                 u.username,
                 o.currency_code,
@@ -3440,15 +3199,15 @@ app.get('/api/admin/thai-lottery/round-tickets/:roundId', async (req, res) => {
                 i.price,
                 i.status,
                 i.prize_amount,
-                o.created_at -- 🌟 แก้ไข: ใช้เวลาจากบิลใหญ่ (o.created_at)
+                o.created_at
             FROM Yeeki_Order_Items i
             JOIN Yeeki_Orders o ON i.order_id = o.order_id
             LEFT JOIN Users u ON o.user_id = u.user_id
-            WHERE o.round_id = @roundId
-            ORDER BY o.created_at DESC -- 🌟 แก้ไข: เรียงลำดับจากบิลใหญ่
-        `);
+            WHERE o.round_id = $1
+            ORDER BY o.created_at DESC
+        `, [req.params.roundId]);
         
-        res.json({ success: true, tickets: result.recordset });
+        res.json({ success: true, tickets: result.rows });
     } catch (err) {
         console.error("Fetch Tickets Error:", err);
         res.status(500).json({ success: false, message: err.message });
@@ -3456,37 +3215,36 @@ app.get('/api/admin/thai-lottery/round-tickets/:roundId', async (req, res) => {
 });
 
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 6. 🇹🇭 API: ดึงรายงานยอดขายหวยไทย (สำหรับหน้า Admin Report)
 // ==========================================
 app.get('/api/admin/thai-lottery/sales-report', async (req, res) => {
     try {
-        const pool = await sql.connect(dbConfig);
-        
         // 🌟 ดึงข้อมูลสรุปยอดขายแยกตามงวด แยกสกุลเงิน (THB/LAK) และสถานะการตรวจรางวัล
-        const reportReq = await pool.request().query(`
+        const reportReq = await pgPool.query(`
             SELECT 
                 r.round_id, 
                 r.round_number, 
-                FORMAT(r.open_time, 'yyyy-MM-ddTHH:mm:ss') AS open_time, 
-                FORMAT(r.close_time, 'yyyy-MM-ddTHH:mm:ss') AS close_time, 
-                FORMAT(r.draw_time, 'yyyy-MM-ddTHH:mm:ss') AS draw_time, 
+                to_char(r.open_time, 'YYYY-MM-DD"T"HH24:MI:SS') AS open_time, 
+                to_char(r.close_time, 'YYYY-MM-DD"T"HH24:MI:SS') AS close_time, 
+                to_char(r.draw_time, 'YYYY-MM-DD"T"HH24:MI:SS') AS draw_time, 
                 r.status, 
                 r.result_8_super as result_6, 
                 r.result_2_bottom,
                 
                 -- สรุปยอดขาย (THB และ LAK)
-                ISNULL(SUM(CASE WHEN o.currency_code IN ('THB', '฿') THEN i.price ELSE 0 END), 0) as total_sales_thb,
-                ISNULL(SUM(CASE WHEN o.currency_code IN ('LAK', '₭') THEN i.price ELSE 0 END), 0) as total_sales_lak,
+                COALESCE(SUM(CASE WHEN o.currency_code IN ('THB', '฿') THEN i.price ELSE 0 END), 0) as total_sales_thb,
+                COALESCE(SUM(CASE WHEN o.currency_code IN ('LAK', '₭') THEN i.price ELSE 0 END), 0) as total_sales_lak,
                 
                 -- สรุปยอดจ่ายรางวัล (THB และ LAK)
-                ISNULL(SUM(CASE WHEN o.currency_code IN ('THB', '฿') AND i.status = N'ชนะ' THEN i.prize_amount ELSE 0 END), 0) as total_payout_thb,
-                ISNULL(SUM(CASE WHEN o.currency_code IN ('LAK', '₭') AND i.status = N'ชนะ' THEN i.prize_amount ELSE 0 END), 0) as total_payout_lak,
+                COALESCE(SUM(CASE WHEN o.currency_code IN ('THB', '฿') AND i.status = 'ชนะ' THEN i.prize_amount ELSE 0 END), 0) as total_payout_thb,
+                COALESCE(SUM(CASE WHEN o.currency_code IN ('LAK', '₭') AND i.status = 'ชนะ' THEN i.prize_amount ELSE 0 END), 0) as total_payout_lak,
                 
                 -- สรุปสถานะบิล
                 COUNT(i.item_id) as total_tickets,
-                COUNT(CASE WHEN i.status = N'ชนะ' THEN 1 END) as winners_count,
-                COUNT(CASE WHEN i.status = N'รอผลตรวจ' THEN 1 END) as pending_count,
-                COUNT(CASE WHEN i.status = N'ไม่ถูกรางวัล' THEN 1 END) as lost_count
+                COUNT(CASE WHEN i.status = 'ชนะ' THEN 1 END) as winners_count,
+                COUNT(CASE WHEN i.status = 'รอผลตรวจ' THEN 1 END) as pending_count,
+                COUNT(CASE WHEN i.status = 'ไม่ถูกรางวัล' THEN 1 END) as lost_count
                 
             FROM Yeeki_Rounds r
             LEFT JOIN Yeeki_Orders o ON r.round_id = o.round_id
@@ -3496,7 +3254,7 @@ app.get('/api/admin/thai-lottery/sales-report', async (req, res) => {
             ORDER BY r.draw_time DESC
         `);
 
-        res.json({ success: true, reports: reportReq.recordset });
+        res.json({ success: true, reports: reportReq.rows });
     } catch (err) {
         console.error("Sales Report Error:", err);
         res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการดึงรายงาน' });
@@ -3505,6 +3263,7 @@ app.get('/api/admin/thai-lottery/sales-report', async (req, res) => {
 
 
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 5. 🇹🇭 API: แก้ไขข้อมูลงวดหวยไทย (ป้องกันงวดขยะ)
 // ==========================================
 app.post('/api/admin/thai-lottery/edit-round', async (req, res) => {
@@ -3515,12 +3274,10 @@ app.post('/api/admin/thai-lottery/edit-round', async (req, res) => {
     }
 
     try {
-        const pool = await sql.connect(dbConfig);
-        
         // เช็คสถานะก่อนว่ามีสิทธิ์แก้ไหม (ถ้าออกผลแล้วห้ามแก้)
-        const check = await pool.request().input('rId', sql.Int, round_id).query(`SELECT status FROM Yeeki_Rounds WHERE round_id = @rId`);
-        if (check.recordset.length === 0) return res.status(404).json({ success: false, message: 'ไม่พบงวดนี้ในระบบ' });
-        if (check.recordset[0].status === 'Completed') return res.status(400).json({ success: false, message: 'งวดนี้ประกาศผลไปแล้ว ไม่สามารถแก้ไขได้' });
+        const check = await pgPool.query(`SELECT status FROM Yeeki_Rounds WHERE round_id = $1`, [round_id]);
+        if (check.rows.length === 0) return res.status(404).json({ success: false, message: 'ไม่พบงวดนี้ในระบบ' });
+        if (check.rows[0].status === 'Completed') return res.status(400).json({ success: false, message: 'งวดนี้ประกาศผลไปแล้ว ไม่สามารถแก้ไขได้' });
 
         // แปลงข้อมูลให้ตรงฟอร์แมต
         const roundNameText = round_number; 
@@ -3528,23 +3285,17 @@ app.post('/api/admin/thai-lottery/edit-round', async (req, res) => {
         const fakeIntRound = parseInt(`${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`);
 
         // อัปเดตข้อมูล
-        await pool.request()
-            .input('rId', sql.Int, round_id)
-            .input('rNumInt', sql.Int, fakeIntRound)
-            .input('rName', sql.NVarChar, roundNameText)
-            .input('oTime', sql.DateTime, open_time)
-            .input('cTime', sql.DateTime, close_time)
-            .input('dTime', sql.DateTime, draw_time)
-            .query(`
+        await pgPool.query(`
                 UPDATE Yeeki_Rounds 
-                SET round_number = @rNumInt, 
-                    round_name = @rName, 
-                    open_time = @oTime, 
-                    close_time = @cTime, 
-                    draw_time = @dTime, 
-                    draw_date = CAST(@dTime AS DATE)
-                WHERE round_id = @rId
-            `);
+                SET round_number = $1, 
+                    round_name = $2, 
+                    open_time = $3, 
+                    close_time = $4, 
+                    draw_time = $5, 
+                    draw_date = CAST($5 AS DATE)
+                WHERE round_id = $6
+            `, [fakeIntRound, roundNameText, open_time, close_time, draw_time, round_id]
+        );
 
         res.json({ success: true, message: '✅ อัปเดตข้อมูลสำเร็จ!' });
     } catch (err) {
@@ -3554,169 +3305,143 @@ app.post('/api/admin/thai-lottery/edit-round', async (req, res) => {
 });
 
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 4. 🇹🇭 API: ซื้อหวยรัฐบาลไทย (แยกตาราง Yeeki_Orders และแยกบิล 100%)
 // ==========================================
 app.post('/api/thai-lottery/buy', async (req, res) => {
     const { user_id, round_id, cart, total_price, currency, note } = req.body;
-    const pool = await sql.connect(dbConfig);
     
     // เช็คว่ามีงวดที่กำลังเปิดรับอยู่หรือไม่
-    const statusRes = await pool.request().input('rId', sql.Int, round_id).query("SELECT status, close_time FROM Yeeki_Rounds WHERE round_id = @rId AND category = 'THAI'");
-    if (statusRes.recordset.length === 0 || statusRes.recordset[0].status === 'Completed') {
+    const statusRes = await pgPool.query("SELECT status, close_time FROM Yeeki_Rounds WHERE round_id = $1 AND category = 'THAI'", [round_id]);
+    if (statusRes.rows.length === 0 || statusRes.rows[0].status === 'Completed') {
         return res.status(400).json({ success: false, message: 'งวดนี้ปิดรับแทงแล้ว หรือไม่มีในระบบ' });
     }
 
-    const transaction = new sql.Transaction(pool);
+    const client = await pgPool.connect(); // 🌟 เริ่ม Transaction แบบเต็มรูปแบบ
 
     try {
-        await transaction.begin();
-        const request = new sql.Request(transaction);
+        await client.query('BEGIN');
 
         // 1. ดึงเรทเงิน ถ้าเป็น LAK
         let exchangeRate = 1;
         if (currency === 'LAK' || currency === '₭') {
-            const rateRes = await request.query("SELECT rate FROM ExchangeRates WHERE currency_pair = 'THB_LAK'");
-            if (rateRes.recordset.length > 0) exchangeRate = rateRes.recordset[0].rate;
+            const rateRes = await client.query("SELECT rate FROM ExchangeRates WHERE currency_pair = 'THB_LAK'");
+            if (rateRes.rows.length > 0) exchangeRate = parseFloat(rateRes.rows[0].rate);
         }
 
         const baseTHBAmount = total_price / exchangeRate;
         const deductAmount = baseTHBAmount * exchangeRate; 
 
         // 2. ตัดเงิน
-        const userRes = await request.input('userId', sql.Int, user_id).query('SELECT balance FROM Wallets WHERE user_id = @userId'); 
-        if (userRes.recordset.length === 0) throw new Error('ไม่พบกระเป๋าเงิน');
-        if (userRes.recordset[0].balance < deductAmount) throw new Error('ยอดเงินในกระเป๋าไม่เพียงพอ');
+        const userRes = await client.query('SELECT balance FROM Wallets WHERE user_id = $1', [user_id]); 
+        if (userRes.rows.length === 0) throw new Error('ไม่พบกระเป๋าเงิน');
+        if (parseFloat(userRes.rows[0].balance) < deductAmount) throw new Error('ยอดเงินในกระเป๋าไม่เพียงพอ');
 
-        request.input('deductAmount', sql.Decimal(18,2), deductAmount);
-        await request.query(`
-            UPDATE Users SET wallet_balance = ISNULL(wallet_balance, 0) - @deductAmount WHERE user_id = @userId;
-            UPDATE Wallets SET balance = balance - @deductAmount WHERE user_id = @userId;
-        `);
+        await client.query(`
+            UPDATE Users SET wallet_balance = COALESCE(wallet_balance, 0) - $1 WHERE user_id = $2;
+            UPDATE Wallets SET balance = balance - $1 WHERE user_id = $2;
+        `, [deductAmount, user_id]);
 
         // 3. บันทึกประวัติ Transaction ฝั่งหวยไทย
-        await request
-            .input('titleTH', sql.NVarChar, 'ซื้อหวยรัฐบาลไทย')
-            .input('amountTH', sql.Decimal(18,2), -deductAmount) 
-            .query(`INSERT INTO Transactions (user_id, transaction_type, title, amount, status, created_at)
-                    VALUES (@userId, 'Buy Lottery', @titleTH, @amountTH, 'Completed', GETDATE())`);
+        await client.query(`
+            INSERT INTO Transactions (user_id, transaction_type, title, amount, status, created_at)
+            VALUES ($1, 'Buy Lottery', 'ซื้อหวยรัฐบาลไทย', $2, 'Completed', CURRENT_TIMESTAMP)
+        `, [user_id, -deductAmount]);
 
-        // 4. บันทึกบิลลงตาราง Yeeki_Orders (เพราะหวยไทยใช้เครื่องมือตรวจผลตัวเดียวกับยี่กี)
-        const orderRes = await request
-            .input('cur', sql.VarChar, currency)
-            .input('tPrice', sql.Decimal(18,2), deductAmount)
-            .input('rId', sql.Int, round_id)
-            .input('note', sql.NVarChar, note || null)
-            .query(`
-                DECLARE @ThaiTime DATETIME = DATEADD(HOUR, 7, GETUTCDATE());
-                INSERT INTO Yeeki_Orders (user_id, round_id, total_amount, currency_code, status, order_note, category, created_at)
-                OUTPUT INSERTED.order_id
-                VALUES (@userId, @rId, @tPrice, @cur, N'รอผลตรวจ', @note, 'THAI', @ThaiTime)
-            `);
+        // 4. บันทึกบิลลงตาราง Yeeki_Orders
+        const orderRes = await client.query(`
+            INSERT INTO Yeeki_Orders (user_id, round_id, total_amount, currency_code, status, order_note, category, created_at)
+            VALUES ($1, $2, $3, $4, 'รอผลตรวจ', $5, 'THAI', CURRENT_TIMESTAMP)
+            RETURNING order_id
+        `, [user_id, round_id, deductAmount, currency, note || null]);
         
-        const orderId = orderRes.recordset[0].order_id;
+        const orderId = orderRes.rows[0].order_id;
 
        // บันทึกตัวเลข
         for (const item of cart) {
-            const itemReq = new sql.Request(transaction);
-            await itemReq
-                .input('oId', sql.Int, orderId)
-                .input('lNum', sql.VarChar, item.number)
-                .input('lType', sql.NVarChar, item.type) // 🌟 แก้ตรงนี้: เติม N เข้าไปหน้า VarChar
-                .input('price', sql.Decimal(18,2), item.price)
-                .query(`INSERT INTO Yeeki_Order_Items (order_id, lottery_type, selected_number, price, status) VALUES (@oId, @lType, @lNum, @price, N'รอผลตรวจ')`);
+            await client.query(`
+                INSERT INTO Yeeki_Order_Items (order_id, lottery_type, selected_number, price, status) 
+                VALUES ($1, $2, $3, $4, 'รอผลตรวจ')
+            `, [orderId, item.type, item.number, item.price]);
         }
 
         // 5. ระบบจ่ายค่าแนะนำหวยไทย (Cross-Currency เหมือนเวียดนาม)
-        const refReq = new sql.Request(transaction);
-        const referrerRes = await refReq.input('buyerId', sql.Int, user_id).query(`
+        const referrerRes = await client.query(`
             SELECT u_referrer.user_id, u_buyer.username as buyer_username,
-                   ISNULL(u_buyer.currency_code, 'THB') as buyer_currency, ISNULL(u_referrer.currency_code, 'THB') as referrer_currency
-            FROM Users u_buyer JOIN Users u_referrer ON u_buyer.referrer_username = u_referrer.username WHERE u_buyer.user_id = @buyerId
-        `);
+                   COALESCE(u_buyer.currency_code, 'THB') as buyer_currency, COALESCE(u_referrer.currency_code, 'THB') as referrer_currency
+            FROM Users u_buyer JOIN Users u_referrer ON u_buyer.referrer_username = u_referrer.username WHERE u_buyer.user_id = $1
+        `, [user_id]);
 
-        if (referrerRes.recordset.length > 0) {
-            const ref = referrerRes.recordset[0];
-            const settingRes = await (new sql.Request(transaction)).query("SELECT purchase_percent FROM Commission_Settings WHERE id = 1");
-            const purchasePercent = settingRes.recordset.length > 0 ? settingRes.recordset[0].purchase_percent : 2.00; 
+        if (referrerRes.rows.length > 0) {
+            const ref = referrerRes.rows[0];
+            const settingRes = await client.query("SELECT purchase_percent FROM Commission_Settings LIMIT 1");
+            const purchasePercent = settingRes.rows.length > 0 ? parseFloat(settingRes.rows[0].purchase_percent) : 2.00; 
             
             let finalCommission = deductAmount * (purchasePercent / 100); 
 
             if (ref.buyer_currency !== ref.referrer_currency) {
                 const pair = `${ref.buyer_currency}_${ref.referrer_currency}`; 
-                const rateReq = new sql.Request(transaction);
-                const rateRes = await rateReq.input('pair', sql.VarChar, pair).query(`SELECT rate FROM ExchangeRates WHERE currency_pair = @pair`);
-                if (rateRes.recordset.length > 0) {
-                    finalCommission = finalCommission * rateRes.recordset[0].rate;
+                const rateRes = await client.query(`SELECT rate FROM ExchangeRates WHERE currency_pair = $1`, [pair]);
+                if (rateRes.rows.length > 0) {
+                    finalCommission = finalCommission * parseFloat(rateRes.rows[0].rate);
                 } else {
-                    const revRes = await (new sql.Request(transaction)).input('revPair', sql.VarChar, `${ref.referrer_currency}_${ref.buyer_currency}`).query(`SELECT rate FROM ExchangeRates WHERE currency_pair = @revPair`);
-                    if (revRes.recordset.length > 0) finalCommission = finalCommission / revRes.recordset[0].rate;
+                    const revRes = await client.query(`SELECT rate FROM ExchangeRates WHERE currency_pair = $1`, [`${ref.referrer_currency}_${ref.buyer_currency}`]);
+                    if (revRes.rows.length > 0) finalCommission = finalCommission / parseFloat(revRes.rows[0].rate);
                 }
             }
 
-            const commReq = new sql.Request(transaction);
-            await commReq
-                .input('refId', sql.Int, ref.user_id).input('comm', sql.Decimal(18,2), finalCommission)
-                .input('tTitle', sql.NVarChar, `รายได้ ${purchasePercent}% หวยไทย จากทีมงาน (${ref.buyer_username})`)
-                .query(`
-                    UPDATE Wallets SET balance = balance + @comm WHERE user_id = @refId;
-                    UPDATE Users SET total_purchase_comm = ISNULL(total_purchase_comm, 0) + @comm WHERE user_id = @refId;
-                    INSERT INTO Transactions (user_id, transaction_type, title, amount, status, created_at)
-                    VALUES (@refId, 'Affiliate Purchase', @tTitle, @comm, 'Completed', GETDATE());
-                `);
+            const tTitle = `รายได้ ${purchasePercent}% หวยไทย จากทีมงาน (${ref.buyer_username})`;
+            
+            await client.query(`
+                UPDATE Wallets SET balance = balance + $1 WHERE user_id = $2;
+                UPDATE Users SET total_purchase_comm = COALESCE(total_purchase_comm, 0) + $1 WHERE user_id = $2;
+                INSERT INTO Transactions (user_id, transaction_type, title, amount, status, created_at)
+                VALUES ($2, 'Affiliate Purchase', $3, $1, 'Completed', CURRENT_TIMESTAMP);
+            `, [finalCommission, ref.user_id, tTitle]);
         }
 
-        await transaction.commit();
+        await client.query('COMMIT');
         res.status(200).json({ success: true, message: 'ชำระเงินหวยไทยสำเร็จ', order_id: orderId });
 
     } catch (error) {
-        await transaction.rollback();
+        await client.query('ROLLBACK');
         res.status(400).json({ success: false, message: error.message || 'เกิดข้อผิดพลาดในการชำระเงิน' });
+    } finally {
+        client.release();
     }
 });
 // ==========================================
 // 🌟 API หวยไทย จบ
 // ==========================================
 
-
-
-
 // ==========================================
-// 🌟 API หวยไทย    จบ
-// // ==========================================
-
-// ==========================================
-// 🌟 API หวยเวียดนาม เริ่ม
-// // ==========================================
-
-// ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🇻🇳 API: ระบบ AI ค้นหาเลขหวยเวียดนาม (Risk Management)
 // ==========================================
 app.post('/api/admin/suggest-draw', async (req, res) => {
     const { targetPercent } = req.body;
     try {
-        const pool = await sql.connect(dbConfig);
-        
         // ดึงเรทแลกเปลี่ยน และอัตราจ่าย
-        const exReq = await pool.request().query(`SELECT rate FROM ExchangeRates WHERE currency_pair = 'THB_LAK'`);
-        const lakRate = exReq.recordset.length > 0 ? exReq.recordset[0].rate : 620;
+        const exReq = await pgPool.query(`SELECT rate FROM ExchangeRates WHERE currency_pair = 'THB_LAK'`);
+        const lakRate = exReq.rows.length > 0 ? parseFloat(exReq.rows[0].rate) : 620;
 
-        const ratesReq = await pool.request().query(`SELECT lottery_type, multiplier FROM Lottery_Prize_Rates`);
+        const ratesReq = await pgPool.query(`SELECT lottery_type, multiplier FROM Lottery_Prize_Rates`);
         const prizeRates = {};
-        ratesReq.recordset.forEach(r => prizeRates[r.lottery_type] = r.multiplier);
+        ratesReq.rows.forEach(r => prizeRates[r.lottery_type] = parseFloat(r.multiplier));
 
         // ดึงโพยหวยเวียดนามที่ยังไม่ได้ตรวจ
-        const ordersReq = await pool.request().query(`
+        const ordersReq = await pgPool.query(`
             SELECT i.lottery_type, i.selected_number, i.price, o.currency_code
             FROM Lottery_Order_Items i
             JOIN Lottery_Orders o ON i.order_id = o.order_id
-            WHERE o.status = N'รอผลตรวจ' AND i.status = N'รอผลตรวจ'
+            WHERE o.status = 'รอผลตรวจ' AND i.status = 'รอผลตรวจ'
         `);
-        const items = ordersReq.recordset;
+        const items = ordersReq.rows;
 
         let totalSalesTHB = 0;
         let boughtNumbers = []; 
         items.forEach(item => {
-            let thbPrice = (item.currency_code === 'LAK' || item.currency_code === '₭') ? (item.price / lakRate) : item.price;
+            let thbPrice = (item.currency_code === 'LAK' || item.currency_code === '₭') ? (item.price / lakRate) : parseFloat(item.price);
             totalSalesTHB += thbPrice;
             boughtNumbers.push(item);
         });
@@ -3745,7 +3470,7 @@ app.post('/api/admin/suggest-draw', async (req, res) => {
             let tempAnalysis = { '6': { count: 0, payout: 0 }, '4': { count: 0, payout: 0 }, '3': { count: 0, payout: 0 }, '2': { count: 0, payout: 0 } };
 
             for (let item of items) {
-                let thbPrice = (item.currency_code === 'LAK' || item.currency_code === '₭') ? (item.price / lakRate) : item.price;
+                let thbPrice = (item.currency_code === 'LAK' || item.currency_code === '₭') ? (item.price / lakRate) : parseFloat(item.price);
                 let isWin = false;
                 let anlzType = item.lottery_type;
                 
@@ -3806,138 +3531,143 @@ app.post('/api/admin/suggest-draw', async (req, res) => {
 let lastAutoDrawDate = '';
 
 // ==========================================
-// 🇻🇳 2. API: ยืนยันผล จ่ายรางวัล และโอนเงิน (หวยเวียดนาม - แยก THB/LAK)
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
+// 🇻🇳 2. API: ยืนยันผล จ่ายรางวัล และโอนเงิน (หวยเวียดนาม)
 // ==========================================
 app.post('/api/admin/execute-draw', async (req, res) => {
     const { number6 } = req.body;
+    const client = await pgPool.connect(); // 🌟 เปิดใช้งาน Transaction
+
     try {
-        const pool = await sql.connect(dbConfig);
-        const transaction = new sql.Transaction(pool);
-        await transaction.begin();
+        await client.query('BEGIN');
 
-        try {
-            const top_6 = number6;
-            const top_4 = top_6.slice(-4);
-            const top_3 = top_6.slice(-3);
-            const top_2 = top_6.slice(-2);
-            const num8 = Math.floor(10000000 + Math.random() * 90000000).toString(); 
-            const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Bangkok' });
+        const top_6 = number6;
+        const top_4 = top_6.slice(-4);
+        const top_3 = top_6.slice(-3);
+        const top_2 = top_6.slice(-2);
+        const num8 = Math.floor(10000000 + Math.random() * 90000000).toString(); 
+        const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Bangkok' });
 
-            // 1. บันทึกผลลง Draw_Results
-            await transaction.request()
-                .input('dDate', sql.Date, today).input('p8', sql.VarChar, num8)
-                .input('p6', sql.VarChar, top_6).input('p4', sql.VarChar, top_4)
-                .input('p3', sql.VarChar, top_3).input('p2', sql.VarChar, top_2)
-                .query(`
-                    IF NOT EXISTS (SELECT 1 FROM Draw_Results WHERE draw_date = @dDate)
-                        INSERT INTO Draw_Results (draw_date, prize_8, prize_6, prize_4, prize_3, prize_2) 
-                        VALUES (@dDate, @p8, @p6, @p4, @p3, @p2);
-                    ELSE
-                        UPDATE Draw_Results SET prize_8 = @p8, prize_6 = @p6, prize_4 = @p4, prize_3 = @p3, prize_2 = @p2 WHERE draw_date = @dDate;
-                `);
-
-            const commReq = await transaction.request().query("SELECT TOP 1 win_percent FROM Commission_Settings");
-            const commPercent = commReq.recordset.length > 0 ? commReq.recordset[0].win_percent : 0;
-
-            // 2. ตรวจบิลและตั้งค่าเงินรางวัล (คูณเรท)
-            await transaction.request().query(`
-                UPDATE i SET 
-                    status = CASE 
-                        WHEN (i.lottery_type = N'2 ล่าง' AND i.selected_number = '${top_2}') OR
-                             (i.lottery_type = '2' AND i.selected_number = '${top_2}') OR
-                             (i.lottery_type = '3' AND i.selected_number = '${top_3}') OR
-                             (i.lottery_type = '4' AND i.selected_number = '${top_4}') OR
-                             (i.lottery_type = '6' AND i.selected_number = '${top_6}') OR
-                             (i.lottery_type = '8' AND i.selected_number = '${num8}') THEN N'ถูกรางวัล'
-                        ELSE N'ไม่ถูกรางวัล'
-                    END,
-                    prize_amount = CASE
-                        WHEN (i.lottery_type = N'2 ล่าง' AND i.selected_number = '${top_2}') OR
-                             (i.lottery_type = '2' AND i.selected_number = '${top_2}') OR
-                             (i.lottery_type = '3' AND i.selected_number = '${top_3}') OR
-                             (i.lottery_type = '4' AND i.selected_number = '${top_4}') OR
-                             (i.lottery_type = '6' AND i.selected_number = '${top_6}') OR
-                             (i.lottery_type = '8' AND i.selected_number = '${num8}') 
-                        THEN i.price * ISNULL((SELECT TOP 1 multiplier FROM Lottery_Prize_Rates WHERE lottery_type = i.lottery_type), 0)
-                        ELSE 0
-                    END
-                FROM Lottery_Order_Items i JOIN Lottery_Orders o ON i.order_id = o.order_id
-                WHERE (o.draw_date = '${today}' OR CAST(o.created_at AS DATE) = '${today}') AND i.status = N'รอผลตรวจ';
-            `);
-
-            // 3. 💰 โอนเงินลูกค้า (แยกกระเป๋า THB / LAK อย่างเด็ดขาด!)
-            await transaction.request().query(`
-                UPDATE w SET 
-                    balance_thb = ISNULL(w.balance_thb, 0) + ISNULL(t_thb.TotalPrizeTHB, 0),
-                    balance_lak = ISNULL(w.balance_lak, 0) + ISNULL(t_lak.TotalPrizeLAK, 0)
-                FROM Wallets w
-                LEFT JOIN (
-                    SELECT o.user_id, SUM(i.prize_amount) as TotalPrizeTHB
-                    FROM Lottery_Order_Items i JOIN Lottery_Orders o ON i.order_id = o.order_id 
-                    WHERE i.status = N'ถูกรางวัล' AND o.status = N'รอผลตรวจ' AND o.currency_code = 'THB' GROUP BY o.user_id
-                ) t_thb ON w.user_id = t_thb.user_id
-                LEFT JOIN (
-                    SELECT o.user_id, SUM(i.prize_amount) as TotalPrizeLAK
-                    FROM Lottery_Order_Items i JOIN Lottery_Orders o ON i.order_id = o.order_id 
-                    WHERE i.status = N'ถูกรางวัล' AND o.status = N'รอผลตรวจ' AND (o.currency_code = 'LAK' OR o.currency_code = N'₭') GROUP BY o.user_id
-                ) t_lak ON w.user_id = t_lak.user_id
-                WHERE t_thb.user_id IS NOT NULL OR t_lak.user_id IS NOT NULL;
-
-                -- บันทึกประวัติ (แยก THB/LAK ชัดเจน)
-                INSERT INTO Transactions (user_id, amount, currency_code, transaction_type, status, note, created_at)
-                SELECT o.user_id, SUM(i.prize_amount), o.currency_code, 'deposit', 'Completed', N'ถูกรางวัลหวยเวียดนาม', GETDATE()
-                FROM Lottery_Order_Items i JOIN Lottery_Orders o ON i.order_id = o.order_id 
-                WHERE i.status = N'ถูกรางวัล' AND o.status = N'รอผลตรวจ' 
-                GROUP BY o.user_id, o.currency_code;
-            `);
-
-            // 4. 💸 จ่ายค่าคอมผู้แนะนำ (แยกกระเป๋า THB / LAK เช่นกัน!)
-            if (commPercent > 0) {
-                await transaction.request().query(`
-                    UPDATE w SET 
-                        balance_thb = ISNULL(w.balance_thb, 0) + ISNULL(c_thb.CommTHB, 0),
-                        balance_lak = ISNULL(w.balance_lak, 0) + ISNULL(c_lak.CommLAK, 0)
-                    FROM Wallets w
-                    LEFT JOIN (
-                        SELECT r.referrer_id, SUM(i.prize_amount) * (${commPercent} / 100.0) as CommTHB
-                        FROM Lottery_Order_Items i JOIN Lottery_Orders o ON i.order_id = o.order_id JOIN User_Referrals r ON o.user_id = r.user_id
-                        WHERE i.status = N'ถูกรางวัล' AND o.status = N'รอผลตรวจ' AND o.currency_code = 'THB' GROUP BY r.referrer_id HAVING SUM(i.prize_amount) > 0
-                    ) c_thb ON w.user_id = c_thb.referrer_id
-                    LEFT JOIN (
-                        SELECT r.referrer_id, SUM(i.prize_amount) * (${commPercent} / 100.0) as CommLAK
-                        FROM Lottery_Order_Items i JOIN Lottery_Orders o ON i.order_id = o.order_id JOIN User_Referrals r ON o.user_id = r.user_id
-                        WHERE i.status = N'ถูกรางวัล' AND o.status = N'รอผลตรวจ' AND (o.currency_code = 'LAK' OR o.currency_code = N'₭') GROUP BY r.referrer_id HAVING SUM(i.prize_amount) > 0
-                    ) c_lak ON w.user_id = c_lak.referrer_id
-                    WHERE c_thb.referrer_id IS NOT NULL OR c_lak.referrer_id IS NOT NULL;
-
-                    -- บันทึกประวัติค่าคอมให้ผู้แนะนำ
-                    INSERT INTO Transactions (user_id, amount, currency_code, transaction_type, status, note, created_at)
-                    SELECT r.referrer_id, SUM(i.prize_amount) * (${commPercent} / 100.0), o.currency_code, 'commission', 'Completed', N'ค่าคอมฯ ลูกทีมถูกรางวัล (' + u.username + ')', GETDATE()
-                    FROM Lottery_Order_Items i JOIN Lottery_Orders o ON i.order_id = o.order_id 
-                    JOIN User_Referrals r ON o.user_id = r.user_id JOIN Users u ON o.user_id = u.user_id
-                    WHERE i.status = N'ถูกรางวัล' AND o.status = N'รอผลตรวจ' 
-                    GROUP BY r.referrer_id, o.currency_code, u.username HAVING SUM(i.prize_amount) > 0;
-                `);
-            }
-
-            // 5. ปิดบิลแม่
-            await transaction.request().query(`
-                UPDATE Lottery_Orders 
-                SET status = N'ตรวจผลแล้ว', draw_date = '${today}' 
-                WHERE (draw_date = '${today}' OR CAST(created_at AS DATE) = '${today}') AND status = N'รอผลตรวจ';
-            `);
-
-            await transaction.commit();
-            res.json({ success: true, message: `✅ ออกรางวัลด้วยเลข ${top_6} สำเร็จ! \n💰 จ่ายเงินลูกค้า และผู้แนะนำเรียบร้อยแล้ว!` });
-        } catch (innerErr) { 
-            await transaction.rollback(); 
-            throw innerErr; 
+        // 1. บันทึกผลลง Draw_Results
+        const checkExist = await client.query("SELECT 1 FROM Draw_Results WHERE draw_date = CAST($1 AS DATE)", [today]);
+        if (checkExist.rows.length === 0) {
+            await client.query(`
+                INSERT INTO Draw_Results (draw_date, prize_8, prize_6, prize_4, prize_3, prize_2) 
+                VALUES (CAST($1 AS DATE), $2, $3, $4, $5, $6)
+            `, [today, num8, top_6, top_4, top_3, top_2]);
+        } else {
+            await client.query(`
+                UPDATE Draw_Results 
+                SET prize_8 = $2, prize_6 = $3, prize_4 = $4, prize_3 = $5, prize_2 = $6 
+                WHERE draw_date = CAST($1 AS DATE)
+            `, [today, num8, top_6, top_4, top_3, top_2]);
         }
+
+        const commReq = await client.query("SELECT win_percent FROM Commission_Settings LIMIT 1");
+        const commPercent = commReq.rows.length > 0 ? parseFloat(commReq.rows[0].win_percent) : 0;
+
+        // 2. ตรวจบิลและตั้งค่าเงินรางวัล (คูณเรท)
+        await client.query(`
+            UPDATE Lottery_Order_Items i SET 
+                status = CASE 
+                    WHEN (i.lottery_type = '2 ล่าง' AND i.selected_number = $1) OR
+                         (i.lottery_type = '2' AND i.selected_number = $1) OR
+                         (i.lottery_type = '3' AND i.selected_number = $2) OR
+                         (i.lottery_type = '4' AND i.selected_number = $3) OR
+                         (i.lottery_type = '6' AND i.selected_number = $4) OR
+                         (i.lottery_type = '8' AND i.selected_number = $5) THEN 'ถูกรางวัล'
+                    ELSE 'ไม่ถูกรางวัล'
+                END,
+                prize_amount = CASE
+                    WHEN (i.lottery_type = '2 ล่าง' AND i.selected_number = $1) OR
+                         (i.lottery_type = '2' AND i.selected_number = $1) OR
+                         (i.lottery_type = '3' AND i.selected_number = $2) OR
+                         (i.lottery_type = '4' AND i.selected_number = $3) OR
+                         (i.lottery_type = '6' AND i.selected_number = $4) OR
+                         (i.lottery_type = '8' AND i.selected_number = $5) 
+                    THEN i.price * COALESCE((SELECT multiplier FROM Lottery_Prize_Rates WHERE CAST(lottery_type AS VARCHAR) = CAST(i.lottery_type AS VARCHAR) LIMIT 1), 0)
+                    ELSE 0
+                END
+            FROM Lottery_Orders o
+            WHERE i.order_id = o.order_id AND (o.draw_date = CAST($6 AS DATE) OR CAST(o.created_at AS DATE) = CAST($6 AS DATE)) AND i.status = 'รอผลตรวจ';
+        `, [top_2, top_3, top_4, top_6, num8, today]);
+
+        // 3. 💰 โอนเงินลูกค้า (รวมกระเป๋าตามโครงสร้างฐานข้อมูลใหม่ ให้โค้ดสั้นและไวขึ้น!)
+        await client.query(`
+            UPDATE Wallets w SET 
+                balance = COALESCE(w.balance, 0) + COALESCE(t.TotalPrize, 0)
+            FROM (
+                SELECT o.user_id, SUM(i.prize_amount) as TotalPrize
+                FROM Lottery_Order_Items i 
+                JOIN Lottery_Orders o ON i.order_id = o.order_id 
+                WHERE i.status = 'ถูกรางวัล' AND o.status = 'รอผลตรวจ' 
+                GROUP BY o.user_id
+            ) t
+            WHERE w.user_id = t.user_id;
+        `);
+
+        // บันทึกประวัติ
+        await client.query(`
+            INSERT INTO Transactions (user_id, amount, currency_code, transaction_type, status, title, created_at)
+            SELECT o.user_id, SUM(i.prize_amount), o.currency_code, 'deposit', 'Completed', 'ถูกรางวัลหวยเวียดนาม', CURRENT_TIMESTAMP
+            FROM Lottery_Order_Items i 
+            JOIN Lottery_Orders o ON i.order_id = o.order_id 
+            WHERE i.status = 'ถูกรางวัล' AND o.status = 'รอผลตรวจ' 
+            GROUP BY o.user_id, o.currency_code;
+        `);
+
+        // 4. 💸 จ่ายค่าคอมผู้แนะนำ
+        if (commPercent > 0) {
+            await client.query(`
+                UPDATE Wallets w SET 
+                    balance = COALESCE(w.balance, 0) + COALESCE(c.CommAmount, 0)
+                FROM (
+                    SELECT r.referrer_id, SUM(i.prize_amount) * ($1 / 100.0) as CommAmount
+                    FROM Lottery_Order_Items i 
+                    JOIN Lottery_Orders o ON i.order_id = o.order_id 
+                    JOIN User_Referrals r ON o.user_id = r.user_id
+                    WHERE i.status = 'ถูกรางวัล' AND o.status = 'รอผลตรวจ' 
+                    GROUP BY r.referrer_id 
+                    HAVING SUM(i.prize_amount) > 0
+                ) c
+                WHERE w.user_id = c.referrer_id;
+            `, [commPercent]);
+
+            // บันทึกประวัติค่าคอมให้ผู้แนะนำ
+            await client.query(`
+                INSERT INTO Transactions (user_id, amount, currency_code, transaction_type, status, title, created_at)
+                SELECT r.referrer_id, SUM(i.prize_amount) * ($1 / 100.0), o.currency_code, 'commission', 'Completed', 'ค่าคอมฯ ลูกทีมถูกรางวัล (' || u.username || ')', CURRENT_TIMESTAMP
+                FROM Lottery_Order_Items i 
+                JOIN Lottery_Orders o ON i.order_id = o.order_id 
+                JOIN User_Referrals r ON o.user_id = r.user_id 
+                JOIN Users u ON o.user_id = u.user_id
+                WHERE i.status = 'ถูกรางวัล' AND o.status = 'รอผลตรวจ' 
+                GROUP BY r.referrer_id, o.currency_code, u.username 
+                HAVING SUM(i.prize_amount) > 0;
+            `, [commPercent]);
+        }
+
+        // 5. ปิดบิลแม่
+        await client.query(`
+            UPDATE Lottery_Orders 
+            SET status = 'ตรวจผลแล้ว', draw_date = CAST($1 AS DATE) 
+            WHERE (draw_date = CAST($1 AS DATE) OR CAST(created_at AS DATE) = CAST($1 AS DATE)) AND status = 'รอผลตรวจ';
+        `, [today]);
+
+        await client.query('COMMIT');
+        res.json({ success: true, message: `✅ ออกรางวัลด้วยเลข ${top_6} สำเร็จ! \n💰 จ่ายเงินลูกค้า และผู้แนะนำเรียบร้อยแล้ว!` });
+
     } catch (err) { 
+        await client.query('ROLLBACK');
         console.error("Execute Draw Error:", err);
         res.status(500).json({ success: false, message: `Database Error: ${err.message}` }); 
+    } finally {
+        client.release();
     }
 });
+// 🌟 นำตัวแปรนี้ไปวางไว้บนสุดของไฟล์ server.js (หรือเหนือบรรทัด setInterval)
+// เพื่อให้หุ่นยนต์จำว่าวันนี้ออกผลไปแล้วหรือยัง
+let lastAutoDrawDate = '';
 
 // ==========================================
 // 🤖 3. Worker: หุ่นยนต์ออกรางวัลอัตโนมัติ (แก้บั๊ก Database)
@@ -3950,7 +3680,7 @@ setInterval(async () => {
         // ดึงวันที่ปัจจุบัน (YYYY-MM-DD) โซนไทย
         const todayDate = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Bangkok' }).format(new Date());
 
-        const API_URL = 'https://api.salapi.company'; 
+        const API_URL = 'https://api.salapi.company'; // ถ้าเทสในเครื่องเปลี่ยนเป็น http://localhost:PORT
 
         const settingsRes = await fetch(`${API_URL}/api/admin/settings`);
         if (!settingsRes.ok) return;
@@ -3958,7 +3688,8 @@ setInterval(async () => {
         const settingsData = await settingsRes.json();
         const settings = settingsData.data;
 
-        if (!settings || !settings.is_auto_draw) return; 
+        // 🌟 ดักจับสถานะ is_auto_draw ให้รองรับทั้งแบบ String และ Boolean จาก Postgres
+        if (!settings || !settings.is_auto_draw || settings.is_auto_draw === '0' || settings.is_auto_draw === false) return; 
 
         const drawTime = settings.draw_time ? settings.draw_time.substring(0, 5) : ''; 
 
@@ -4007,10 +3738,7 @@ setInterval(async () => {
 
 
 // ==========================================
-// 🌟 API จบ API หวยเวียดนาม
-// // ==========================================
-
-// ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🌟 API สุ่มเลขแนะนำ (AI V21: Auto-Detect Round ID แก้บั๊กหุ่นยนต์ลืมส่งรอบ)
 // ==========================================
 app.post('/api/admin/yeeki/suggest-draw', async (req, res) => {
@@ -4019,41 +3747,39 @@ app.post('/api/admin/yeeki/suggest-draw', async (req, res) => {
     let round_id = req.body.round_id !== undefined ? req.body.round_id : req.body.roundId;
 
     try {
-        const pool = await sql.connect(dbConfig);
-
         // 🌟 จุดแก้ปัญหา: ถ้าไม่มี round_id ส่งมา ให้ไปค้นหารอบล่าสุดที่รอออกผลเอง
         if (!round_id) {
-            const activeRoundReq = await pool.request().query(`
-                SELECT TOP 1 round_id, round_number FROM Yeeki_Rounds 
+            const activeRoundReq = await pgPool.query(`
+                SELECT round_id, round_number FROM Yeeki_Rounds 
                 WHERE status = 'Closed' OR status = 'Pending' 
                 ORDER BY round_number ASC
+                LIMIT 1
             `);
-            if (activeRoundReq.recordset.length > 0) {
-                round_id = activeRoundReq.recordset[0].round_id;
-                console.log(`🤖 [AI] หุ่นยนต์ไม่ได้ส่งรอบมา ดึงรอบอัตโนมัติ: รอบที่ ${activeRoundReq.recordset[0].round_number}`);
+            if (activeRoundReq.rows.length > 0) {
+                round_id = activeRoundReq.rows[0].round_id;
+                console.log(`🤖 [AI] หุ่นยนต์ไม่ได้ส่งรอบมา ดึงรอบอัตโนมัติ: รอบที่ ${activeRoundReq.rows[0].round_number}`);
             } else {
                 return res.json({ success: false, message: 'ไม่มีรอบที่รอออกผล' });
             }
         }
 
         // 1. ดึงบิลทั้งหมดของรอบนั้นมา (ตอนนี้ AI จะมองเห็นบิลลูกค้าแล้ว!)
-        const ordersReq = await pool.request()
-            .input('roundId', sql.Int, round_id)
-            .query(`
-                SELECT i.lottery_type, i.selected_number, i.price, o.currency_code
-                FROM Yeeki_Order_Items i
-                JOIN Yeeki_Orders o ON i.order_id = o.order_id
-                WHERE o.round_id = @roundId
-            `);
-        const orders = ordersReq.recordset;
+        const ordersReq = await pgPool.query(`
+            SELECT i.lottery_type, i.selected_number, i.price, o.currency_code
+            FROM Yeeki_Order_Items i
+            JOIN Yeeki_Orders o ON i.order_id = o.order_id
+            WHERE o.round_id = $1
+        `, [round_id]);
+        
+        const orders = ordersReq.rows;
 
         // 2. ดึงเรทเงินและอัตราจ่าย
-        const exReq = await pool.request().query(`SELECT rate FROM ExchangeRates WHERE currency_pair = 'THB_LAK'`);
-        const lakRate = exReq.recordset[0]?.rate || 620;
+        const exReq = await pgPool.query(`SELECT rate FROM ExchangeRates WHERE currency_pair = 'THB_LAK'`);
+        const lakRate = exReq.rows[0]?.rate ? parseFloat(exReq.rows[0].rate) : 620;
 
-        const ratesReq = await pool.request().query(`SELECT lottery_type, multiplier FROM Yeeki_Prize_Rates`);
+        const ratesReq = await pgPool.query(`SELECT lottery_type, multiplier FROM Yeeki_Prize_Rates`);
         const prizeRates = {};
-        ratesReq.recordset.forEach(r => prizeRates[r.lottery_type] = r.multiplier);
+        ratesReq.rows.forEach(r => prizeRates[r.lottery_type] = parseFloat(r.multiplier));
 
         let totalSalesTHB = 0;
         
@@ -4061,7 +3787,7 @@ app.post('/api/admin/yeeki/suggest-draw', async (req, res) => {
         let bets = { t6: {}, t4: {}, t3: {}, tTode: {}, t2: {}, tRun: {}, b2: {}, bRun: {}, s8: {} };
 
         orders.forEach(o => {
-            let thbPrice = (o.currency_code === 'LAK' || o.currency_code === '₭') ? (o.price / lakRate) : o.price;
+            let thbPrice = (o.currency_code === 'LAK' || o.currency_code === '₭') ? (parseFloat(o.price) / lakRate) : parseFloat(o.price);
             totalSalesTHB += thbPrice;
             
             let payoutTHB = thbPrice * (prizeRates[o.lottery_type] || 0);
@@ -4191,136 +3917,127 @@ app.post('/api/admin/yeeki/suggest-draw', async (req, res) => {
         res.status(500).json({ success: false, message: err.message });
     }
 });
-
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 3. API: ประกาศผลและตรวจบิลจริง (Execute Draw) - Manual โดย Admin
 // ==========================================
 app.post('/api/admin/execute-yeeki-draw', async (req, res) => {
     // 🌟 รับมาแค่ 8 ตัว (Super) กับ 2 ตัวล่าง (ระบบหลังบ้านจะหั่นเลขอื่นๆ ออกมาเอง)
     const { round_id, super_number, bottom_2 } = req.body; 
-    let pool;
+    const client = await pgPool.connect(); // 🌟 เปิด Transaction
+    
     try {
-        pool = await sql.connect(dbConfig);
-        const transaction = new sql.Transaction(pool);
-        await transaction.begin();
+        await client.query('BEGIN');
 
-        try {
-            // 🌟 ให้ระบบหั่นเลขเอง เพื่อให้มั่นใจว่าเลขทุกตัว (6, 4, 3, 2 บน) สัมพันธ์กับเลข 8 ตัวแน่นอน
-            const top_6 = super_number.slice(-6);
-            const top_4 = super_number.slice(-4);
-            const top_3 = super_number.slice(-3);
-            const top_2 = super_number.slice(-2);
+        // 🌟 ให้ระบบหั่นเลขเอง เพื่อให้มั่นใจว่าเลขทุกตัว (6, 4, 3, 2 บน) สัมพันธ์กับเลข 8 ตัวแน่นอน
+        const top_6 = super_number.slice(-6);
+        const top_4 = super_number.slice(-4);
+        const top_3 = super_number.slice(-3);
+        const top_2 = super_number.slice(-2);
 
-            // 🌟 แก้ไข: บันทึก result_6_top ลง Database ด้วย
-            await transaction.request()
-                .input('roundId', sql.Int, round_id)
-                .input('res8', sql.VarChar(8), super_number)
-                .input('res6', sql.VarChar(6), top_6) // 👈 เพิ่มตรงนี้
-                .input('res4', sql.VarChar(4), top_4) 
-                .input('res3', sql.VarChar(3), top_3)
-                .input('res2bot', sql.VarChar(2), bottom_2)
-                .query(`
-                    UPDATE Yeeki_Rounds 
-                    SET 
-                        result_8_super = @res8, 
-                        result_6_top = @res6, /* 👈 เพิ่มตรงนี้ */
-                        result_4_top = @res4, 
-                        result_3_top = @res3, 
-                        result_2_bottom = @res2bot, 
-                        status = 'Completed' 
-                    WHERE round_id = @roundId AND category != 'THAI'
-                `);
+        // 🌟 บันทึกผลลง Database
+        await client.query(`
+            UPDATE Yeeki_Rounds 
+            SET 
+                result_8_super = $1, 
+                result_6_top = $2, 
+                result_4_top = $3, 
+                result_3_top = $4, 
+                result_2_bottom = $5, 
+                status = 'Completed' 
+            WHERE round_id = $6 AND category != 'THAI'
+        `, [super_number, top_6, top_4, top_3, bottom_2, round_id]);
 
-            const ratesReq = await transaction.request().query(`SELECT lottery_type, multiplier FROM Yeeki_Prize_Rates`);
-            const prizeRates = {};
-            ratesReq.recordset.forEach(r => prizeRates[r.lottery_type] = r.multiplier);
+        const ratesReq = await client.query(`SELECT lottery_type, multiplier FROM Yeeki_Prize_Rates`);
+        const prizeRates = {};
+        ratesReq.rows.forEach(r => prizeRates[r.lottery_type] = parseFloat(r.multiplier));
 
-            const itemsReq = await transaction.request().input('roundId', sql.Int, round_id).query(`
-                SELECT i.item_id, i.order_id, i.lottery_type, i.selected_number, i.price, o.user_id, o.currency_code
-                FROM Yeeki_Order_Items i
-                JOIN Yeeki_Orders o ON i.order_id = o.order_id
-                WHERE o.round_id = @roundId AND i.status = N'รอผลตรวจ'
-            `);
-            const items = itemsReq.recordset;
+        const itemsReq = await client.query(`
+            SELECT i.item_id, i.order_id, i.lottery_type, i.selected_number, i.price, o.user_id, o.currency_code
+            FROM Yeeki_Order_Items i
+            JOIN Yeeki_Orders o ON i.order_id = o.order_id
+            WHERE o.round_id = $1 AND i.status = 'รอผลตรวจ'
+        `, [round_id]);
+        const items = itemsReq.rows;
 
-            for (let item of items) {
-                let isWin = false;
-                const type = item.lottery_type;
-                const num = item.selected_number;
+        for (let item of items) {
+            let isWin = false;
+            const type = item.lottery_type;
+            const num = item.selected_number;
 
-                // 🌟 ตรวจสอบการถูกรางวัล โดยอ้างอิงจากเลขที่หั่นมาจาก 8 ตัว
-                if (type === '8 ตัว (Super)' && num === super_number) isWin = true;
-                else if (type === '6 ตัว' && num === top_6) isWin = true; 
-                else if (type === '4 ตัวท้าย' && num === top_4) isWin = true;
-                else if (type === '3 ตัวบน' && num === top_3) isWin = true;
-                else if (type === '3 ตัวโต๊ด') {
-                    if (top_3.split('').sort().join('') === num.split('').sort().join('')) isWin = true;
-                }
-                else if (type === '2 ตัวบน' && num === top_2) isWin = true;
-                else if (type === '2 ตัวล่าง' && num === bottom_2) isWin = true;
-                else if (type === 'วิ่งบน' && top_3.includes(num)) isWin = true;
-                else if (type === 'วิ่งล่าง' && bottom_2.includes(num)) isWin = true;
-
-                if (isWin) {
-                    const prizeAmount = item.price * (prizeRates[type] || 0);
-                    
-                    // 1. อัปเดตสถานะบิลว่าถูกรางวัล
-                    await transaction.request().input('itemId', sql.Int, item.item_id).input('prizeAmt', sql.Decimal(18,2), prizeAmount)
-                        .query(`UPDATE Yeeki_Order_Items SET status = N'ชนะ', prize_amount = @prizeAmt WHERE item_id = @itemId`);
-                    
-                    // 2. เติมเงินเข้ากระเป๋า
-                    await transaction.request().input('uid', sql.Int, item.user_id).input('prize', sql.Decimal(18,2), prizeAmount)
-                        .query(`UPDATE Users SET wallet_balance = wallet_balance + @prize WHERE user_id = @uid`);
-                    
-                    // 3. สร้างประวัติ (Transaction) ให้ไปโชว์ที่หน้าแดชบอร์ด
-                    await transaction.request()
-                        .input('uid', sql.Int, item.user_id)
-                        .input('prize', sql.Decimal(18,2), prizeAmount)
-                        .input('title', sql.NVarChar(255), `ถูกรางวัล ${type} (${num}) รอบที่ ${round_id}`)
-                        .query(`INSERT INTO Transactions (user_id, amount, transaction_type, title, status) VALUES (@uid, @prize, 'PRIZE_WIN', @title, 'Completed')`);
-                } else {
-                    await transaction.request().input('itemId', sql.Int, item.item_id)
-                        .query(`UPDATE Yeeki_Order_Items SET status = N'แพ้' WHERE item_id = @itemId`);
-                }
+            // 🌟 ตรวจสอบการถูกรางวัล โดยอ้างอิงจากเลขที่หั่นมาจาก 8 ตัว
+            if (type === '8 ตัว (Super)' && num === super_number) isWin = true;
+            else if (type === '6 ตัว' && num === top_6) isWin = true; 
+            else if (type === '4 ตัวท้าย' && num === top_4) isWin = true;
+            else if (type === '3 ตัวบน' && num === top_3) isWin = true;
+            else if (type === '3 ตัวโต๊ด') {
+                if (top_3.split('').sort().join('') === num.split('').sort().join('')) isWin = true;
             }
-            await transaction.commit();
-            res.json({ success: true, message: "ประกาศผลและโอนเงินรางวัลเสร็จสิ้น!" });
-        } catch (innerErr) { await transaction.rollback(); throw innerErr; }
-    } catch (err) { res.status(500).json({ success: false, message: `Database Error: ${err.message}` }); }
+            else if (type === '2 ตัวบน' && num === top_2) isWin = true;
+            else if (type === '2 ตัวล่าง' && num === bottom_2) isWin = true;
+            else if (type === 'วิ่งบน' && top_3.includes(num)) isWin = true;
+            else if (type === 'วิ่งล่าง' && bottom_2.includes(num)) isWin = true;
+
+            if (isWin) {
+                const prizeAmount = parseFloat(item.price) * (prizeRates[type] || 0);
+                
+                // 1. อัปเดตสถานะบิลว่าถูกรางวัล
+                await client.query(`UPDATE Yeeki_Order_Items SET status = 'ชนะ', prize_amount = $1 WHERE item_id = $2`, [prizeAmount, item.item_id]);
+                
+                // 2. เติมเงินเข้ากระเป๋า (🌟 อัปเดตทั้ง Users และ Wallets เพื่อความชัวร์ไม่ให้ระบบไหนบัค)
+                await client.query(`UPDATE Users SET wallet_balance = COALESCE(wallet_balance, 0) + $1 WHERE user_id = $2`, [prizeAmount, item.user_id]);
+                await client.query(`UPDATE Wallets SET balance = COALESCE(balance, 0) + $1 WHERE user_id = $2`, [prizeAmount, item.user_id]);
+                
+                // 3. สร้างประวัติ (Transaction) ให้ไปโชว์ที่หน้าแดชบอร์ด
+                await client.query(`
+                    INSERT INTO Transactions (user_id, amount, transaction_type, title, status, created_at) 
+                    VALUES ($1, $2, 'PRIZE_WIN', $3, 'Completed', CURRENT_TIMESTAMP)
+                `, [item.user_id, prizeAmount, `ถูกรางวัล ${type} (${num}) รอบที่ ${round_id}`]);
+            } else {
+                await client.query(`UPDATE Yeeki_Order_Items SET status = 'แพ้', prize_amount = 0 WHERE item_id = $1`, [item.item_id]);
+            }
+        }
+        await client.query('COMMIT');
+        res.json({ success: true, message: "ประกาศผลและโอนเงินรางวัลเสร็จสิ้น!" });
+    } catch (innerErr) { 
+        await client.query('ROLLBACK'); 
+        console.error("Execute Yeeki Draw Error:", innerErr);
+        res.status(500).json({ success: false, message: `Database Error: ${innerErr.message}` }); 
+    } finally {
+        client.release();
+    }
 });
 
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🤖 หุ่นยนต์ออกรางวัลอัตโนมัติ 24 ชม. (Auto-Draw Worker)
 // ==========================================
 // หุ่นยนต์จะตื่นมาทำงานทุกๆ 30 วินาที
 setInterval(async () => {
     try {
-        const pool = await sql.connect(dbConfig);
-        
-        const pendingRounds = await pool.request().query(`
+        // 🌟 ดึงรอบที่เลยเวลาปิดรับแล้ว และยังไม่ได้ออกผล (ใช้เวลา Asia/Bangkok ของ Postgres)
+        const pendingRounds = await pgPool.query(`
             SELECT round_id, round_number 
             FROM Yeeki_Rounds 
-            WHERE draw_time <= DATEADD(hour, 7, GETUTCDATE()) 
+            WHERE draw_time <= CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Bangkok' 
             AND status != 'Completed'
         `);
 
-        if (pendingRounds.recordset.length === 0) return;
+        if (pendingRounds.rows.length === 0) return;
 
         const target_percent = 50; 
         const EXCHANGE_RATE = 620;
 
-        for (let round of pendingRounds.recordset) {
+        for (let round of pendingRounds.rows) {
             console.log(`🤖 [AUTO] หุ่นยนต์กำลังออกรางวัลรอบที่ ${round.round_number} อัตโนมัติ...`);
             
-            const ordersReq = await pool.request()
-                .input('rid', sql.Int, round.round_id)
-                .query(`
-                    SELECT oi.item_id, oi.order_id, oi.lottery_type, oi.selected_number, oi.price, o.user_id, o.currency_code
-                    FROM Yeeki_Order_Items oi
-                    JOIN Yeeki_Orders o ON oi.order_id = o.order_id
-                    WHERE o.round_id = @rid AND oi.status = N'รอผลตรวจ'
-                `);
-            const items = ordersReq.recordset;
+            const ordersReq = await pgPool.query(`
+                SELECT oi.item_id, oi.order_id, oi.lottery_type, oi.selected_number, oi.price, o.user_id, o.currency_code
+                FROM Yeeki_Order_Items oi
+                JOIN Yeeki_Orders o ON oi.order_id = o.order_id
+                WHERE o.round_id = $1 AND oi.status = 'รอผลตรวจ'
+            `, [round.round_id]);
+            const items = ordersReq.rows;
 
             let super_number = String(Math.floor(Math.random() * 100000000)).padStart(8, '0');
             let top_number = String(Math.floor(Math.random() * 10000)).padStart(4, '0');
@@ -4329,7 +4046,7 @@ setInterval(async () => {
             const rates = { '8 ตัว (Super)': 1000000, '6 ตัว': 400000, '4 ตัวท้าย': 6000, '3 ตัวบน': 900, '3 ตัวโต๊ด': 150, '2 ตัวบน': 90, '2 ตัวล่าง': 90, 'วิ่งบน': 3.2, 'วิ่งล่าง': 4.2 };
 
             if (items.length > 0) {
-                let totalSalesTHB = items.reduce((sum, item) => sum + ((item.currency_code === 'LAK' || item.currency_code === '₭') ? (item.price / EXCHANGE_RATE) : item.price), 0);
+                let totalSalesTHB = items.reduce((sum, item) => sum + ((item.currency_code === 'LAK' || item.currency_code === '₭') ? (parseFloat(item.price) / EXCHANGE_RATE) : parseFloat(item.price)), 0);
                 const maxPayoutTHB = totalSalesTHB * (target_percent / 100);
                 let minPayout = Infinity;
                 let bestSet = { super_8: super_number, top_4: top_number, bottom_2: bottom_number };
@@ -4343,12 +4060,12 @@ setInterval(async () => {
 
                     let currentPayoutTHB = 0;
                     for (let item of items) {
-                        let priceTHB = (item.currency_code === 'LAK' || item.currency_code === '₭') ? (item.price / EXCHANGE_RATE) : item.price;
+                        let priceTHB = (item.currency_code === 'LAK' || item.currency_code === '₭') ? (parseFloat(item.price) / EXCHANGE_RATE) : parseFloat(item.price);
                         let isWin = false; let num = item.selected_number;
                         
                         switch (item.lottery_type) {
                             case '8 ตัว (Super)': if (num === s8) isWin = true; break;
-                            case '6 ตัว': if (num === s8.slice(-6)) isWin = true; break; // 👈 แก้ไข: เพิ่มเช็ค 6 ตัวให้บอทจำลอง
+                            case '6 ตัว': if (num === s8.slice(-6)) isWin = true; break; 
                             case '4 ตัวท้าย': if (num === t4) isWin = true; break;
                             case '3 ตัวบน': if (num === t3) isWin = true; break;
                             case '3 ตัวโต๊ด': if (num.split('').sort().join('') === sT3) isWin = true; break; 
@@ -4365,33 +4082,26 @@ setInterval(async () => {
                 super_number = bestSet.super_8; top_number = bestSet.top_4; bottom_number = bestSet.bottom_2;
             }
 
-            const transaction = new sql.Transaction(pool);
-            await transaction.begin();
+            const client = await pgPool.connect();
             try {
-                // 🌟 ให้หุ่นยนต์หั่นเลข 6 ตัวออกมาเตรียมไว้ด้วย
+                await client.query('BEGIN');
+                
                 let top6 = super_number.slice(-6);
                 let top3 = top_number.slice(-3); 
                 let top2 = top_number.slice(-2);
 
-                // 🌟 แก้ไข: สั่งบอทให้บันทึก result_6_top ลง Database ด้วย
-                await transaction.request()
-                    .input('rid', sql.Int, round.round_id)
-                    .input('s8', sql.VarChar, super_number)
-                    .input('t6', sql.VarChar, top6) // 👈 เพิ่ม input
-                    .input('t4', sql.VarChar, top_number)
-                    .input('t3', sql.VarChar, top3)
-                    .input('b2', sql.VarChar, bottom_number)
-                    .query(`
-                        UPDATE Yeeki_Rounds 
-                        SET result_8_super = @s8, result_6_top = @t6, result_4_top = @t4, result_3_top = @t3, result_2_bottom = @b2, status = 'Completed' 
-                        WHERE round_id = @rid
-                    `);
+                // บันทึกผลรอบ
+                await client.query(`
+                    UPDATE Yeeki_Rounds 
+                    SET result_8_super = $1, result_6_top = $2, result_4_top = $3, result_3_top = $4, result_2_bottom = $5, status = 'Completed' 
+                    WHERE round_id = $6
+                `, [super_number, top6, top_number, top3, bottom_number, round.round_id]);
 
                 for (let item of items) {
                     let isWin = false; let num = item.selected_number;
                     switch (item.lottery_type) {
                         case '8 ตัว (Super)': if (num === super_number) isWin = true; break;
-                        case '6 ตัว': if (num === top6) isWin = true; break; // 👈 แก้ไข: เพิ่มเงื่อนไขแจกเงินรางวัล 6 ตัว
+                        case '6 ตัว': if (num === top6) isWin = true; break; 
                         case '4 ตัวท้าย': if (num === top_number) isWin = true; break;
                         case '3 ตัวบน': if (num === top3) isWin = true; break;
                         case '3 ตัวโต๊ด': if (num.split('').sort().join('') === top3.split('').sort().join('')) isWin = true; break;
@@ -4402,32 +4112,31 @@ setInterval(async () => {
                     }
 
                     if (isWin) {
-                        let prize = item.price * (rates[item.lottery_type] || 0);
+                        let prize = parseFloat(item.price) * (rates[item.lottery_type] || 0);
                         
-                        await transaction.request().input('itemId', sql.Int, item.item_id).input('prize', sql.Decimal(18,2), prize)
-                            .query(`UPDATE Yeeki_Order_Items SET status = 'Win', prize_amount = @prize WHERE item_id = @itemId`);
+                        await client.query(`UPDATE Yeeki_Order_Items SET status = 'Win', prize_amount = $1 WHERE item_id = $2`, [prize, item.item_id]);
                         
-                        await transaction.request().input('uid', sql.Int, item.user_id).input('prizeAmount', sql.Decimal(18,2), prize)
-                            .query(`UPDATE Users SET wallet_balance = wallet_balance + @prizeAmount WHERE user_id = @uid`);
-                            
-                        await transaction.request()
-                            .input('uid', sql.Int, item.user_id)
-                            .input('prizeAmount', sql.Decimal(18,2), prize)
-                            .input('title', sql.NVarChar(255), `ถูกรางวัล ${item.lottery_type} (${num}) รอบที่ ${round.round_number}`)
-                            .query(`INSERT INTO Transactions (user_id, amount, transaction_type, title, status) VALUES (@uid, @prizeAmount, 'PRIZE_WIN', @title, 'Completed')`);
+                        // เติมเงิน
+                        await client.query(`UPDATE Users SET wallet_balance = COALESCE(wallet_balance, 0) + $1 WHERE user_id = $2`, [prize, item.user_id]);
+                        await client.query(`UPDATE Wallets SET balance = COALESCE(balance, 0) + $1 WHERE user_id = $2`, [prize, item.user_id]);
 
+                        await client.query(`
+                            INSERT INTO Transactions (user_id, amount, transaction_type, title, status, created_at) 
+                            VALUES ($1, $2, 'PRIZE_WIN', $3, 'Completed', CURRENT_TIMESTAMP)
+                        `, [item.user_id, prize, `ถูกรางวัล ${item.lottery_type} (${num}) รอบที่ ${round.round_number}`]);
                     } else {
-                        await transaction.request().input('itemId', sql.Int, item.item_id)
-                            .query(`UPDATE Yeeki_Order_Items SET status = 'Lose', prize_amount = 0 WHERE item_id = @itemId`);
+                        await client.query(`UPDATE Yeeki_Order_Items SET status = 'Lose', prize_amount = 0 WHERE item_id = $1`, [item.item_id]);
                     }
                 }
                 
-                await transaction.request().input('rid', sql.Int, round.round_id).query(`UPDATE Yeeki_Orders SET status = 'Completed' WHERE round_id = @rid`);
-                await transaction.commit();
+                await client.query(`UPDATE Yeeki_Orders SET status = 'Completed' WHERE round_id = $1`, [round.round_id]);
+                await client.query('COMMIT');
                 console.log(`✅ [AUTO] จ่ายเงินและสร้างประวัติรอบที่ ${round.round_number} สำเร็จแล้วแบบไร้รอยต่อ!`);
             } catch (innerErr) {
-                await transaction.rollback();
+                await client.query('ROLLBACK');
                 console.error(`❌ [AUTO] พังตอนแจกเงินรอบ ${round.round_number}:`, innerErr);
+            } finally {
+                client.release();
             }
         }
     } catch (err) {
@@ -4435,57 +4144,53 @@ setInterval(async () => {
     }
 }, 30000);
 
-
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🌟 API 2: ค้นหาคนซื้อจากเลข (ด้านล่างสุด)
 // ==========================================
 app.post('/api/admin/search-buyers', async (req, res) => {
     const { number } = req.body;
     try {
-        const pool = await sql.connect(dbConfig);
-        
         // ดึงเรทแลกเปลี่ยนปัจจุบัน
-        const rateRes = await pool.request().query("SELECT rate FROM ExchangeRates WHERE currency_pair = 'THB_LAK'");
-        const exchangeRate = rateRes.recordset.length > 0 ? rateRes.recordset[0].rate : 500.0;
+        const rateRes = await pgPool.query("SELECT rate FROM ExchangeRates WHERE currency_pair = 'THB_LAK'");
+        const exchangeRate = rateRes.rows.length > 0 ? parseFloat(rateRes.rows[0].rate) : 500.0;
 
-        const result = await pool.request()
-            .input('num', sql.VarChar, number)
-            .query(`
-                DECLARE @OpenTime TIME = (SELECT TOP 1 open_time FROM System_Settings);
-                DECLARE @CloseTime TIME = (SELECT TOP 1 close_time FROM System_Settings);
-                DECLARE @ThaiNow DATETIME = DATEADD(HOUR, 7, GETUTCDATE());
-                DECLARE @CurrentDate DATE = CAST(@ThaiNow AS DATE);
-                DECLARE @StartDateTime DATETIME;
-                DECLARE @EndDateTime DATETIME;
+        // ดึงเวลาเปิด-ปิด ของระบบมาเช็ค
+        const settingsRes = await pgPool.query("SELECT open_time, close_time FROM System_Settings LIMIT 1");
+        if (settingsRes.rows.length === 0) return res.status(500).json({ success: false, message: 'ไม่พบการตั้งค่าเวลา' });
+        
+        const openTime = settingsRes.rows[0].open_time;
+        const closeTime = settingsRes.rows[0].close_time;
 
-                IF @OpenTime > @CloseTime
-                BEGIN
-                    SET @StartDateTime = CAST(DATEADD(DAY, -1, @CurrentDate) AS DATETIME) + CAST(@OpenTime AS DATETIME);
-                    SET @EndDateTime = CAST(@CurrentDate AS DATETIME) + CAST(@CloseTime AS DATETIME);
-                END
-                ELSE
-                BEGIN
-                    SET @StartDateTime = CAST(@CurrentDate AS DATETIME) + CAST(@OpenTime AS DATETIME);
-                    SET @EndDateTime = CAST(@CurrentDate AS DATETIME) + CAST(@CloseTime AS DATETIME);
-                END
-
+        const result = await pgPool.query(`
+                WITH TimeCalc AS (
+                    SELECT 
+                        CASE 
+                            WHEN CAST($2 AS TIME) > CAST($3 AS TIME) 
+                            THEN CAST(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Bangkok' - INTERVAL '1 day' AS DATE) + CAST($2 AS TIME)
+                            ELSE CAST(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Bangkok' AS DATE) + CAST($2 AS TIME)
+                        END as "StartDateTime",
+                        CAST(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Bangkok' AS DATE) + CAST($3 AS TIME) as "EndDateTime"
+                )
                 SELECT 
                     u.username, o.currency_code, i.price, CAST(i.lottery_type AS VARCHAR) as lottery_type, i.selected_number, o.created_at,
                     (i.price * r.multiplier) as estimated_prize,
                     CASE 
-                        WHEN o.currency_code = 'LAK' THEN (i.price * r.multiplier) / ${exchangeRate} 
+                        WHEN o.currency_code = 'LAK' THEN (i.price * r.multiplier) / $4 
                         ELSE (i.price * r.multiplier) 
                     END as estimated_prize_thb
                 FROM Lottery_Order_Items i
                 JOIN Lottery_Orders o ON i.order_id = o.order_id
                 JOIN Users u ON o.user_id = u.user_id
-                LEFT JOIN Lottery_Prize_Rates r ON CAST(i.lottery_type AS INT) = CAST(r.lottery_type AS INT)
-                WHERE i.selected_number = @num
-                  AND o.created_at >= @StartDateTime 
-                  AND o.created_at <= @EndDateTime
+                LEFT JOIN Lottery_Prize_Rates r ON CAST(i.lottery_type AS VARCHAR) = CAST(r.lottery_type AS VARCHAR)
+                CROSS JOIN TimeCalc tc
+                WHERE i.selected_number = $1
+                  AND o.created_at >= tc."StartDateTime" 
+                  AND o.created_at <= tc."EndDateTime"
                 ORDER BY i.price DESC
-            `);
-        res.json({ success: true, buyers: result.recordset });
+            `, [number, openTime, closeTime, exchangeRate]
+        );
+        res.json({ success: true, buyers: result.rows });
     } catch (err) { 
         console.error(err);
         res.status(500).json({ success: false }); 
@@ -4493,38 +4198,34 @@ app.post('/api/admin/search-buyers', async (req, res) => {
 });
 
 
-
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🌟 API 1: จำลองคนถูกรางวัล (แสดงใน Modal)
 // ==========================================
 app.post('/api/admin/simulate-winners', async (req, res) => {
     const { number, lottery_type } = req.body;
     try {
-        const pool = await sql.connect(dbConfig);
-        
         // ดึงเรทแลกเปลี่ยนปัจจุบัน
-        const rateRes = await pool.request().query("SELECT rate FROM ExchangeRates WHERE currency_pair = 'THB_LAK'");
-        const exchangeRate = rateRes.recordset.length > 0 ? rateRes.recordset[0].rate : 500.0;
+        const rateRes = await pgPool.query("SELECT rate FROM ExchangeRates WHERE currency_pair = 'THB_LAK'");
+        const exchangeRate = rateRes.rows.length > 0 ? parseFloat(rateRes.rows[0].rate) : 500.0;
 
-        const result = await pool.request()
-            .input('num', sql.VarChar, number)
-            .input('type', sql.VarChar, lottery_type)
-            .query(`
+        const result = await pgPool.query(`
                 SELECT 
                     u.username, o.currency_code, i.price, CAST(i.lottery_type AS VARCHAR) as lottery_type, i.selected_number,
                     (i.price * r.multiplier) as estimated_prize,
                     CASE 
-                        WHEN o.currency_code = 'LAK' THEN (i.price * r.multiplier) / ${exchangeRate} 
+                        WHEN o.currency_code = 'LAK' THEN (i.price * r.multiplier) / $1 
                         ELSE (i.price * r.multiplier) 
                     END as estimated_prize_thb
                 FROM Lottery_Order_Items i
                 JOIN Lottery_Orders o ON i.order_id = o.order_id
                 JOIN Users u ON o.user_id = u.user_id
-                LEFT JOIN Lottery_Prize_Rates r ON CAST(i.lottery_type AS INT) = CAST(r.lottery_type AS INT)
-                WHERE o.status = N'รอผลตรวจ' AND i.status = N'รอผลตรวจ'
-                  AND i.lottery_type = @type AND i.selected_number = @num
-            `);
-        res.json({ success: true, users: result.recordset });
+                LEFT JOIN Lottery_Prize_Rates r ON CAST(i.lottery_type AS VARCHAR) = CAST(r.lottery_type AS VARCHAR)
+                WHERE o.status = 'รอผลตรวจ' AND i.status = 'รอผลตรวจ'
+                  AND CAST(i.lottery_type AS VARCHAR) = $2 AND i.selected_number = $3
+            `, [exchangeRate, lottery_type, number]
+        );
+        res.json({ success: true, users: result.rows });
     } catch (err) {
         console.error(err);
         res.status(500).json({ success: false });
@@ -4533,17 +4234,17 @@ app.post('/api/admin/simulate-winners', async (req, res) => {
 
 
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🌟 API: จัดการตั้งค่า % Commission
 // ==========================================
 
 // 1. ดึงข้อมูลการตั้งค่า Commission ปัจจุบัน
 app.get('/api/admin/commission-settings', async (req, res) => {
     try {
-        const pool = await sql.connect(dbConfig);
-        const result = await pool.request().query('SELECT * FROM Commission_Settings WHERE id = 1');
+        const result = await pgPool.query('SELECT * FROM Commission_Settings WHERE id = 1');
         
-        if (result.recordset.length > 0) {
-            res.json({ success: true, data: result.recordset[0] });
+        if (result.rows.length > 0) {
+            res.json({ success: true, data: result.rows[0] });
         } else {
             res.json({ success: false, message: 'ไม่พบข้อมูลตั้งค่า' });
         }
@@ -4557,19 +4258,15 @@ app.get('/api/admin/commission-settings', async (req, res) => {
 app.put('/api/admin/commission-settings', async (req, res) => {
     const { purchase_percent, win_percent, daily_bonus_percent } = req.body;
     try {
-        const pool = await sql.connect(dbConfig);
-        await pool.request()
-            .input('purchase', sql.Decimal(18,2), purchase_percent)
-            .input('win', sql.Decimal(18,2), win_percent)
-            .input('bonus', sql.Decimal(18,2), daily_bonus_percent)
-            .query(`
+        await pgPool.query(`
                 UPDATE Commission_Settings 
-                SET purchase_percent = @purchase, 
-                    win_percent = @win, 
-                    daily_bonus_percent = @bonus,
-                    updated_at = GETDATE()
+                SET purchase_percent = $1, 
+                    win_percent = $2, 
+                    daily_bonus_percent = $3,
+                    updated_at = CURRENT_TIMESTAMP
                 WHERE id = 1
-            `);
+            `, [purchase_percent, win_percent, daily_bonus_percent]
+        );
             
         res.json({ success: true, message: 'อัปเดตอัตรา Commission สำเร็จ' });
     } catch (err) {
@@ -4579,50 +4276,50 @@ app.put('/api/admin/commission-settings', async (req, res) => {
 });
 
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🌟 API: ดึงข้อมูลหน้าทีม (ส่งค่า % จาก Admin ไปให้หน้าบ้านแสดงผล)
 // ==========================================
 app.get('/api/my-team/:uid', async (req, res) => {
     try {
-        const pool = await sql.connect(dbConfig);
         const userId = req.params.uid;
         
         // 1. ดึงชื่อและสกุลเงินตัวเอง (ผู้แนะนำ)
-        const userRes = await pool.request().input('userId', sql.Int, userId).query('SELECT username, currency_code FROM Users WHERE user_id = @userId');
-        if (userRes.recordset.length === 0) return res.json({ success: false, message: 'User not found' });
-        const myUsername = userRes.recordset[0].username.trim();
-        const myCurrency = userRes.recordset[0].currency_code || 'THB';
+        const userRes = await pgPool.query('SELECT username, currency_code FROM Users WHERE user_id = $1', [userId]);
+        if (userRes.rows.length === 0) return res.json({ success: false, message: 'User not found' });
+        const myUsername = userRes.rows[0].username.trim();
+        const myCurrency = userRes.rows[0].currency_code || 'THB';
 
         // 2. ดึงข้อมูลลูกทีม
-        const teamRes = await pool.request().input('myUsername', sql.NVarChar, myUsername).query(`
+        const teamRes = await pgPool.query(`
             SELECT 
-                user_id, username, created_at, is_active, ISNULL(currency_code, 'THB') as currency_code,
-                ISNULL(total_purchase_comm, 0) as total_purchase_comm, 
-                ISNULL(total_win_comm, 0) as total_win_comm 
-            FROM Users WHERE referrer_username = @myUsername
-        `);
+                user_id, username, created_at, is_active, COALESCE(currency_code, 'THB') as currency_code,
+                COALESCE(total_purchase_comm, 0) as total_purchase_comm, 
+                COALESCE(total_win_comm, 0) as total_win_comm 
+            FROM Users WHERE referrer_username = $1
+        `, [myUsername]);
 
         // 3. ดึงประวัติการเงินทั้งหมดของเรา
-        const transRes = await pool.request().input('userId', sql.Int, userId).query(`
-            SELECT amount, title, created_at FROM Transactions WHERE user_id = @userId
-        `);
+        const transRes = await pgPool.query(`
+            SELECT amount, title, created_at FROM Transactions WHERE user_id = $1
+        `, [userId]);
         
         // 🌟 4. ดึงเรทการตั้งค่าทั้งหมด (เพื่อส่งไปแสดงผล % ที่หน้าบ้านให้ตรงกับที่ Admin ตั้ง)
-        const setRes = await pool.request().query('SELECT TOP 1 purchase_percent, win_percent, daily_bonus_percent FROM Commission_Settings');
-        const commSettings = setRes.recordset.length > 0 ? setRes.recordset[0] : { purchase_percent: 2, win_percent: 2, daily_bonus_percent: 1 };
+        const setRes = await pgPool.query('SELECT purchase_percent, win_percent, daily_bonus_percent FROM Commission_Settings LIMIT 1');
+        const commSettings = setRes.rows.length > 0 ? setRes.rows[0] : { purchase_percent: 2, win_percent: 2, daily_bonus_percent: 1 };
 
         // 5. ดึงตารางอัตราแลกเปลี่ยนทั้งหมด
-        const exRes = await pool.request().query('SELECT currency_pair, rate FROM ExchangeRates');
+        const exRes = await pgPool.query('SELECT currency_pair, rate FROM ExchangeRates');
         const exchangeRates = {};
-        exRes.recordset.forEach(r => {
-            exchangeRates[r.currency_pair] = r.rate;
+        exRes.rows.forEach(r => {
+            exchangeRates[r.currency_pair] = parseFloat(r.rate); // 🌟 แปลงเรทเป็นตัวเลขกันเหนียวเผื่อ DB คืนมาเป็น String
         });
 
         res.json({
             success: true,
             myUsername: myUsername,
             myCurrency: myCurrency,
-            teamMembers: teamRes.recordset,
-            transactions: transRes.recordset,
+            teamMembers: teamRes.rows,
+            transactions: transRes.rows,
             bonusPercent: commSettings.daily_bonus_percent, // ใช้คำนวณ
             commSettings: commSettings, // 🌟 ส่งข้อมูลเรททั้งหมดไปโชว์ที่หน้าจอ
             exchangeRates: exchangeRates
@@ -4632,35 +4329,33 @@ app.get('/api/my-team/:uid', async (req, res) => {
         res.status(500).json({ success: false });
     }
 });
-
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🌟 API: รายงานโอนเงินรางวัลและสรุปกำไร (Prize Transfer Report)
 // ==========================================
 app.post('/api/admin/prize-report', async (req, res) => {
     const { startDate, endDate, country } = req.body;
     try {
-        const pool = await sql.connect(dbConfig);
-        
         // 1. ดึงเรทแลกเปลี่ยนปัจจุบัน (เพื่อใช้แปลง LAK เป็น THB สำหรับสรุปยอด)
-        const rateRes = await pool.request().query("SELECT rate FROM ExchangeRates WHERE currency_pair = 'THB_LAK'");
-        const exchangeRate = rateRes.recordset.length > 0 ? rateRes.recordset[0].rate : 500.0;
+        const rateRes = await pgPool.query("SELECT rate FROM ExchangeRates WHERE currency_pair = 'THB_LAK'");
+        const exchangeRate = rateRes.rows.length > 0 ? parseFloat(rateRes.rows[0].rate) : 500.0;
 
         // 2. Query ดึงข้อมูลสรุปของ "เดือนปัจจุบัน" (สะสม)
         const monthlyQuery = `
             SELECT 
-                ISNULL(SUM(CASE WHEN o.currency_code = 'LAK' THEN o.total_amount / ${exchangeRate} ELSE o.total_amount END), 0) as monthly_sales,
-                ISNULL((
-                    SELECT SUM(CASE WHEN o2.currency_code = 'LAK' THEN i2.prize_amount / ${exchangeRate} ELSE i2.prize_amount END)
+                COALESCE(SUM(CASE WHEN o.currency_code = 'LAK' THEN o.total_amount / $1 ELSE o.total_amount END), 0) as monthly_sales,
+                COALESCE((
+                    SELECT SUM(CASE WHEN o2.currency_code = 'LAK' THEN i2.prize_amount / $1 ELSE i2.prize_amount END)
                     FROM Lottery_Order_Items i2 
                     JOIN Lottery_Orders o2 ON i2.order_id = o2.order_id
-                    WHERE i2.status = N'ถูกรางวัล' AND MONTH(o2.created_at) = MONTH(GETDATE()) AND YEAR(o2.created_at) = YEAR(GETDATE())
+                    WHERE i2.status = 'ถูกรางวัล' AND EXTRACT(MONTH FROM o2.created_at) = EXTRACT(MONTH FROM CURRENT_TIMESTAMP) AND EXTRACT(YEAR FROM o2.created_at) = EXTRACT(YEAR FROM CURRENT_TIMESTAMP)
                 ), 0) as monthly_prizes
             FROM Lottery_Orders o
-            WHERE MONTH(o.created_at) = MONTH(GETDATE()) AND YEAR(o.created_at) = YEAR(GETDATE());
+            WHERE EXTRACT(MONTH FROM o.created_at) = EXTRACT(MONTH FROM CURRENT_TIMESTAMP) AND EXTRACT(YEAR FROM o.created_at) = EXTRACT(YEAR FROM CURRENT_TIMESTAMP);
         `;
-        const monthlyRes = await pool.request().query(monthlyQuery);
-        const monthlySales = monthlyRes.recordset[0].monthly_sales;
-        const monthlyProfit = monthlySales - monthlyRes.recordset[0].monthly_prizes;
+        const monthlyRes = await pgPool.query(monthlyQuery, [exchangeRate]);
+        const monthlySales = monthlyRes.rows[0].monthly_sales;
+        const monthlyProfit = monthlySales - monthlyRes.rows[0].monthly_prizes;
 
         // 3. Query ดึงข้อมูล "ตามช่วงเวลาและประเทศที่เลือก"
         let countryCondition = "";
@@ -4669,25 +4364,22 @@ app.post('/api/admin/prize-report', async (req, res) => {
 
         const filterSummaryQuery = `
             SELECT 
-                ISNULL(SUM(CASE WHEN o.currency_code = 'LAK' THEN o.total_amount / ${exchangeRate} ELSE o.total_amount END), 0) as period_sales,
-                ISNULL((
-                    SELECT SUM(CASE WHEN o2.currency_code = 'LAK' THEN i2.prize_amount / ${exchangeRate} ELSE i2.prize_amount END)
+                COALESCE(SUM(CASE WHEN o.currency_code = 'LAK' THEN o.total_amount / $1 ELSE o.total_amount END), 0) as period_sales,
+                COALESCE((
+                    SELECT SUM(CASE WHEN o2.currency_code = 'LAK' THEN i2.prize_amount / $1 ELSE i2.prize_amount END)
                     FROM Lottery_Order_Items i2 
                     JOIN Lottery_Orders o2 ON i2.order_id = o2.order_id
                     JOIN Users u2 ON o2.user_id = u2.user_id
-                    WHERE i2.status = N'ถูกรางวัล' AND CAST(o2.created_at AS DATE) BETWEEN @StartDate AND @EndDate ${countryCondition.replace(/u\./g, 'u2.')}
+                    WHERE i2.status = 'ถูกรางวัล' AND CAST(o2.created_at AS DATE) BETWEEN CAST($2 AS DATE) AND CAST($3 AS DATE) ${countryCondition.replace(/u\./g, 'u2.')}
                 ), 0) as period_prizes
             FROM Lottery_Orders o
             JOIN Users u ON o.user_id = u.user_id
-            WHERE CAST(o.created_at AS DATE) BETWEEN @StartDate AND @EndDate ${countryCondition};
+            WHERE CAST(o.created_at AS DATE) BETWEEN CAST($2 AS DATE) AND CAST($3 AS DATE) ${countryCondition};
         `;
-        const summaryRes = await pool.request()
-            .input('StartDate', sql.Date, startDate)
-            .input('EndDate', sql.Date, endDate)
-            .query(filterSummaryQuery);
+        const summaryRes = await pgPool.query(filterSummaryQuery, [exchangeRate, startDate, endDate]);
         
-        const periodSales = summaryRes.recordset[0].period_sales;
-        const periodPrizes = summaryRes.recordset[0].period_prizes;
+        const periodSales = summaryRes.rows[0].period_sales;
+        const periodPrizes = summaryRes.rows[0].period_prizes;
         const periodProfit = periodSales - periodPrizes;
 
         // 4. Query ดึงรายชื่อ "ผู้ถูกรางวัล" ตามเงื่อนไข
@@ -4695,25 +4387,22 @@ app.post('/api/admin/prize-report', async (req, res) => {
             SELECT 
                 u.username, u.country, o.currency_code, 
                 i.lottery_type, i.selected_number, i.price, i.prize_amount, o.created_at,
-                CASE WHEN o.currency_code = 'LAK' THEN i.prize_amount / ${exchangeRate} ELSE i.prize_amount END as prize_thb
+                CASE WHEN o.currency_code = 'LAK' THEN i.prize_amount / $1 ELSE i.prize_amount END as prize_thb
             FROM Lottery_Order_Items i
             JOIN Lottery_Orders o ON i.order_id = o.order_id
             JOIN Users u ON o.user_id = u.user_id
-            WHERE i.status = N'ถูกรางวัล' 
-            AND CAST(o.created_at AS DATE) BETWEEN @StartDate AND @EndDate
+            WHERE i.status = 'ถูกรางวัล' 
+            AND CAST(o.created_at AS DATE) BETWEEN CAST($2 AS DATE) AND CAST($3 AS DATE)
             ${countryCondition}
             ORDER BY o.created_at DESC;
         `;
-        const winnersRes = await pool.request()
-            .input('StartDate', sql.Date, startDate)
-            .input('EndDate', sql.Date, endDate)
-            .query(winnersQuery);
+        const winnersRes = await pgPool.query(winnersQuery, [exchangeRate, startDate, endDate]);
 
         res.json({
             success: true,
             monthly: { sales: monthlySales, profit: monthlyProfit },
             period: { sales: periodSales, prizes: periodPrizes, profit: periodProfit },
-            winners: winnersRes.recordset
+            winners: winnersRes.rows
         });
 
     } catch (err) {
@@ -4724,19 +4413,19 @@ app.post('/api/admin/prize-report', async (req, res) => {
 
 
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🛡️ API: ระบบจัดการ IP เฝ้าระวัง
 // ==========================================
 
 // ดึงรายการ IP ที่ถูกบล็อกหรือเฝ้าระวัง
 app.get('/api/admin/malicious-ips', async (req, res) => {
     try {
-        const pool = await sql.connect(dbConfig);
-        const result = await pool.request().query(`
+        const result = await pgPool.query(`
             SELECT id, ip_address, reason, is_blocked, created_at 
             FROM Blocked_IPs 
             ORDER BY created_at DESC
         `);
-        res.json({ success: true, ips: result.recordset });
+        res.json({ success: true, ips: result.rows });
     } catch (err) {
         console.error(err);
         res.status(500).json({ success: false, message: 'Server Error' });
@@ -4747,29 +4436,28 @@ app.get('/api/admin/malicious-ips', async (req, res) => {
 app.post('/api/admin/toggle-block-ip', async (req, res) => {
     const { ip_address, is_blocked, reason } = req.body;
     try {
-        const pool = await sql.connect(dbConfig);
-        
         if (is_blocked) {
             // สั่งบล็อก Manual
-            await pool.request()
-                .input('ip', sql.VarChar, ip_address)
-                .input('reason', sql.NVarChar, reason || 'Manual Block')
-                .query(`
-                    IF EXISTS (SELECT 1 FROM Blocked_IPs WHERE ip_address = @ip)
-                        UPDATE Blocked_IPs SET is_blocked = 1, reason = @reason, updated_at = GETDATE() WHERE ip_address = @ip;
-                    ELSE
-                        INSERT INTO Blocked_IPs (ip_address, reason, is_blocked) VALUES (@ip, @reason, 1);
-                `);
+            const checkReq = await pgPool.query(`SELECT 1 FROM Blocked_IPs WHERE ip_address = $1`, [ip_address]);
+            
+            if (checkReq.rows.length > 0) {
+                await pgPool.query(`
+                    UPDATE Blocked_IPs 
+                    SET is_blocked = '1', reason = $1, updated_at = CURRENT_TIMESTAMP 
+                    WHERE ip_address = $2
+                `, [reason || 'Manual Block', ip_address]);
+            } else {
+                await pgPool.query(`
+                    INSERT INTO Blocked_IPs (ip_address, reason, is_blocked) 
+                    VALUES ($1, $2, '1')
+                `, [ip_address, reason || 'Manual Block']);
+            }
         } else {
             // สั่งปลดบล็อก
-            await pool.request()
-                .input('ip', sql.VarChar, ip_address)
-                .query(`UPDATE Blocked_IPs SET is_blocked = 0, updated_at = GETDATE() WHERE ip_address = @ip`);
+            await pgPool.query(`UPDATE Blocked_IPs SET is_blocked = '0', updated_at = CURRENT_TIMESTAMP WHERE ip_address = $1`, [ip_address]);
             
             // ล้างประวัติการ Login ผิดพลาดให้ด้วย
-            await pool.request()
-                .input('ip', sql.VarChar, ip_address)
-                .query(`DELETE FROM Login_Failed_Attempts WHERE ip_address = @ip`);
+            await pgPool.query(`DELETE FROM Login_Failed_Attempts WHERE ip_address = $1`, [ip_address]);
         }
         res.json({ success: true });
     } catch (err) {
@@ -4779,22 +4467,22 @@ app.post('/api/admin/toggle-block-ip', async (req, res) => {
 });
 
 // ==========================================
-// 🏢 API: ระบบจัดการข้อมูลองค์กร (HRM Master Data)  เริ่มต้น
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
+// 🏢 API: ระบบจัดการข้อมูลองค์กร (HRM Master Data)
 // ==========================================
 
 // 1. ดึงข้อมูลทั้งหมด (Branches, Departments, Positions)
 app.get('/api/hrm/master-data', async (req, res) => {
     try {
-        const pool = await sql.connect(dbConfig);
-        const branchRes = await pool.request().query('SELECT * FROM Emp_Branches');
-        const deptRes = await pool.request().query('SELECT * FROM Emp_Departments');
-        const posRes = await pool.request().query('SELECT * FROM Emp_Positions');
+        const branchRes = await pgPool.query('SELECT * FROM Emp_Branches');
+        const deptRes = await pgPool.query('SELECT * FROM Emp_Departments');
+        const posRes = await pgPool.query('SELECT * FROM Emp_Positions');
 
         res.json({
             success: true,
-            branches: branchRes.recordset,
-            departments: deptRes.recordset,
-            positions: posRes.recordset
+            branches: branchRes.rows,
+            departments: deptRes.rows,
+            positions: posRes.rows
         });
     } catch (err) {
         console.error(err);
@@ -4803,31 +4491,29 @@ app.get('/api/hrm/master-data', async (req, res) => {
 });
 
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🏢 API: จัดการข้อมูล สาขา (เพิ่ม/อัปเดต) + Auto Gen รหัส
 // ==========================================
 app.post('/api/hrm/branch', async (req, res) => {
     let { branch_code, branch_name, country_code } = req.body;
     try {
-        const pool = await sql.connect(dbConfig);
-        
         // 🌟 ถ้าไม่มี branch_code ส่งมา (แปลว่าสร้างสาขาใหม่) ให้ Auto-Gen รหัส
         if (!branch_code) {
-            const countRes = await pool.request().query('SELECT COUNT(*) as cnt FROM Emp_Branches');
-            const nextNum = (countRes.recordset[0].cnt + 1).toString().padStart(2, '0');
+            const countRes = await pgPool.query('SELECT CAST(COUNT(*) AS INTEGER) as cnt FROM Emp_Branches');
+            const nextNum = (countRes.rows[0].cnt + 1).toString().padStart(2, '0');
             branch_code = `B${nextNum}`; // ผลลัพธ์ เช่น B01, B02
             
-            await pool.request()
-                .input('code', sql.VarChar, branch_code)
-                .input('name', sql.NVarChar, branch_name)
-                .input('country', sql.VarChar, country_code)
-                .query(`INSERT INTO Emp_Branches (branch_code, branch_name, country_code) VALUES (@code, @name, @country)`);
+            await pgPool.query(`
+                INSERT INTO Emp_Branches (branch_code, branch_name, country_code) 
+                VALUES ($1, $2, $3)
+            `, [branch_code, branch_name, country_code]);
         } else {
             // 🌟 ถ้ามีรหัสมา แปลว่าอัปเดตข้อมูลสาขาเดิม
-            await pool.request()
-                .input('code', sql.VarChar, branch_code)
-                .input('name', sql.NVarChar, branch_name)
-                .input('country', sql.VarChar, country_code)
-                .query(`UPDATE Emp_Branches SET branch_name = @name, country_code = @country WHERE branch_code = @code`);
+            await pgPool.query(`
+                UPDATE Emp_Branches 
+                SET branch_name = $1, country_code = $2 
+                WHERE branch_code = $3
+            `, [branch_name, country_code, branch_code]);
         }
         res.json({ success: true, new_code: branch_code });
     } catch (err) {
@@ -4835,30 +4521,31 @@ app.post('/api/hrm/branch', async (req, res) => {
         res.status(500).json({ success: false, message: 'SQL Error: ' + err.message });
     }
 });
+
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🏢 API: จัดการข้อมูล แผนก (เพิ่ม/อัปเดต) + Auto Gen รหัส
 // ==========================================
 app.post('/api/hrm/department', async (req, res) => {
     let { dept_code, dept_name } = req.body;
     try {
-        const pool = await sql.connect(dbConfig);
-        
         // 🌟 ถ้าไม่มี dept_code ส่งมา (แปลว่าสร้างใหม่) ให้ Auto-Gen
         if (!dept_code) {
-            const countRes = await pool.request().query('SELECT COUNT(*) as cnt FROM Emp_Departments');
-            const nextNum = (countRes.recordset[0].cnt + 1).toString().padStart(2, '0');
+            const countRes = await pgPool.query('SELECT CAST(COUNT(*) AS INTEGER) as cnt FROM Emp_Departments');
+            const nextNum = (countRes.rows[0].cnt + 1).toString().padStart(2, '0');
             dept_code = `D${nextNum}`; // ผลลัพธ์ เช่น D01, D02
             
-            await pool.request()
-                .input('code', sql.VarChar, dept_code)
-                .input('name', sql.NVarChar, dept_name)
-                .query(`INSERT INTO Emp_Departments (dept_code, dept_name) VALUES (@code, @name)`);
+            await pgPool.query(`
+                INSERT INTO Emp_Departments (dept_code, dept_name) 
+                VALUES ($1, $2)
+            `, [dept_code, dept_name]);
         } else {
             // 🌟 ถ้ามีรหัสมา แปลว่าอัปเดต
-            await pool.request()
-                .input('code', sql.VarChar, dept_code)
-                .input('name', sql.NVarChar, dept_name)
-                .query(`UPDATE Emp_Departments SET dept_name = @name WHERE dept_code = @code`);
+            await pgPool.query(`
+                UPDATE Emp_Departments 
+                SET dept_name = $1 
+                WHERE dept_code = $2
+            `, [dept_name, dept_code]);
         }
         res.json({ success: true, new_code: dept_code });
     } catch (err) {
@@ -4866,44 +4553,38 @@ app.post('/api/hrm/department', async (req, res) => {
         res.status(500).json({ success: false, message: 'SQL Error: ' + err.message });
     }
 });
-
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🏢 API: จัดการข้อมูล ตำแหน่ง (เพิ่ม/อัปเดต) + Auto Gen รหัส + Job Responsibilities
 // ==========================================
 app.post('/api/hrm/position', async (req, res) => {
     let { position_code, position_name, dept_code, base_salary, job_responsibilities } = req.body;
     try {
-        const pool = await sql.connect(dbConfig);
         const baseSal = parseFloat(base_salary) || 0;
         const jobResp = job_responsibilities || ''; // 🌟 รับค่าความรับผิดชอบมาด้วย
 
         if (!position_code) {
             // สร้างใหม่
-            const lastPos = await pool.request().input('dept', sql.VarChar, dept_code).query(`SELECT TOP 1 position_code FROM Emp_Positions WHERE dept_code = @dept ORDER BY position_code DESC`);
+            const lastPos = await pgPool.query(`SELECT position_code FROM Emp_Positions WHERE dept_code = $1 ORDER BY position_code DESC LIMIT 1`, [dept_code]);
             let nextNum = 1;
-            if (lastPos.recordset.length > 0) {
-                const lastCode = lastPos.recordset[0].position_code;
+            if (lastPos.rows.length > 0) {
+                const lastCode = lastPos.rows[0].position_code;
                 const parts = lastCode.split('-P');
                 if(parts.length === 2) nextNum = parseInt(parts[1], 10) + 1;
             }
             position_code = `${dept_code}-P${nextNum.toString().padStart(2, '0')}`;
             
-            await pool.request()
-                .input('code', sql.VarChar, position_code)
-                .input('name', sql.NVarChar, position_name)
-                .input('dept', sql.VarChar, dept_code)
-                .input('base', sql.Decimal(18,2), baseSal)
-                .input('resp', sql.NVarChar, jobResp) // 🌟 บันทึกความรับผิดชอบ
-                .query(`INSERT INTO Emp_Positions (position_code, position_name, dept_code, base_salary, job_responsibilities) VALUES (@code, @name, @dept, @base, @resp)`);
+            await pgPool.query(`
+                INSERT INTO Emp_Positions (position_code, position_name, dept_code, base_salary, job_responsibilities) 
+                VALUES ($1, $2, $3, $4, $5)
+            `, [position_code, position_name, dept_code, baseSal, jobResp]);
         } else {
             // อัปเดต
-            await pool.request()
-                .input('code', sql.VarChar, position_code)
-                .input('name', sql.NVarChar, position_name)
-                .input('dept', sql.VarChar, dept_code)
-                .input('base', sql.Decimal(18,2), baseSal)
-                .input('resp', sql.NVarChar, jobResp) // 🌟 บันทึกความรับผิดชอบ
-                .query(`UPDATE Emp_Positions SET position_name = @name, dept_code = @dept, base_salary = @base, job_responsibilities = @resp WHERE position_code = @code`);
+            await pgPool.query(`
+                UPDATE Emp_Positions 
+                SET position_name = $1, dept_code = $2, base_salary = $3, job_responsibilities = $4 
+                WHERE position_code = $5
+            `, [position_name, dept_code, baseSal, jobResp, position_code]);
         }
         res.json({ success: true, new_code: position_code });
     } catch (err) {
@@ -4914,6 +4595,7 @@ app.post('/api/hrm/position', async (req, res) => {
 
 
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🧑‍💼 API: สำหรับลูกค้ายื่นใบสมัครงาน (ฟอร์มชุดใหญ่จัดเต็ม!)
 // ==========================================
 app.post('/api/hrm/apply-job', async (req, res) => {
@@ -4929,42 +4611,30 @@ app.post('/api/hrm/apply-job', async (req, res) => {
     }
 
     try {
-        const pool = await sql.connect(dbConfig);
-        
         // 1. เช็คว่าเคยยื่นสมัครไปยัง?
-        const checkExist = await pool.request().input('username', sql.VarChar, username).query(`SELECT emp_code FROM Employees WHERE username = @username AND status = 'Pending'`);
-        if(checkExist.recordset.length > 0) return res.status(400).json({ success: false, message: 'คุณได้ยื่นใบสมัครไปแล้ว กรุณารอการติดต่อกลับครับ' });
+        const checkExist = await pgPool.query(`SELECT emp_code FROM Employees WHERE username = $1 AND status = 'Pending'`, [username]);
+        if(checkExist.rows.length > 0) return res.status(400).json({ success: false, message: 'คุณได้ยื่นใบสมัครไปแล้ว กรุณารอการติดต่อกลับครับ' });
 
         // 2. สร้างรหัสใบสมัคร
         const dateStr = new Date().toISOString().slice(0,10).replace(/-/g,'');
-        const countRes = await pool.request().query(`SELECT COUNT(emp_code) as cnt FROM Employees`);
-        const nextId = (countRes.recordset[0].cnt + 1).toString().padStart(4, '0');
+        const countRes = await pgPool.query(`SELECT CAST(COUNT(emp_code) AS INTEGER) as cnt FROM Employees`);
+        const nextId = (countRes.rows[0].cnt + 1).toString().padStart(4, '0');
         const emp_code = `APP-${dateStr}-${nextId}`;
 
         // 3. บันทึกลงตาราง (รวมฟิลด์ใหม่ๆ ทั้งหมด)
-        await pool.request()
-            .input('emp_code', sql.VarChar, emp_code)
-            .input('username', sql.VarChar, username)
-            .input('firstname', sql.NVarChar, firstname)
-            .input('lastname', sql.NVarChar, lastname || '')
-            .input('branch', sql.VarChar, branch_code)
-            .input('position', sql.VarChar, position_code)
-            .input('emp_type', sql.VarChar, employment_type)
-            .input('expected', sql.Decimal(18,2), parseFloat(expected_salary) || 0)
-            .input('skills', sql.NVarChar, special_skills || '')
-            .input('why', sql.NVarChar, why_hire_you || '')
-            .input('edu_pic', sql.NVarChar, education_doc_url || '') // เก็บรูปวุฒิ
-            .input('prof_pic', sql.NVarChar, profile_pic_url || '') // เก็บรูปถ่าย
-            .query(`
-                INSERT INTO Employees (
-                    emp_code, username, password_hash, firstname, lastname, branch_code, position_code, employment_type, status, created_at,
-                    expected_salary, special_skills, why_hire_you, education_doc_url, profile_pic_url
-                )
-                VALUES (
-                    @emp_code, @username, 'USE_MAIN_LOGIN', @firstname, @lastname, @branch, @position, @emp_type, 'Pending', GETDATE(),
-                    @expected, @skills, @why, @edu_pic, @prof_pic
-                )
-            `);
+        await pgPool.query(`
+            INSERT INTO Employees (
+                emp_code, username, password_hash, firstname, lastname, branch_code, position_code, employment_type, status, created_at,
+                expected_salary, special_skills, why_hire_you, education_doc_url, profile_pic_url
+            )
+            VALUES (
+                $1, $2, 'USE_MAIN_LOGIN', $3, $4, $5, $6, $7, 'Pending', CURRENT_TIMESTAMP,
+                $8, $9, $10, $11, $12
+            )
+        `, [
+            emp_code, username, firstname, lastname || '', branch_code, position_code, employment_type, 
+            parseFloat(expected_salary) || 0, special_skills || '', why_hire_you || '', education_doc_url || '', profile_pic_url || ''
+        ]);
             
         res.json({ success: true, message: 'ส่งใบสมัครเรียบร้อยแล้ว!' });
     } catch (err) {
@@ -4974,14 +4644,13 @@ app.post('/api/hrm/apply-job', async (req, res) => {
 });
 
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🧑‍💼 API: Admin ดึงรายชื่อผู้สมัครงานทั้งหมด (ดึงเฉพาะคนที่สถานะยังเป็น Pending)
 // ==========================================
 app.get('/api/hrm/applicants', async (req, res) => {
     try {
-        const pool = await sql.connect(dbConfig);
-        
         // ดึงข้อมูลผู้สมัคร พร้อมดึงชื่อตำแหน่งและชื่อแผนกมาโชว์ด้วย
-        const result = await pool.request().query(`
+        const result = await pgPool.query(`
             SELECT 
                 e.emp_code, e.username, e.firstname, e.lastname, e.employment_type, 
                 e.status, e.created_at, e.expected_salary, e.special_skills, e.why_hire_you,
@@ -4996,7 +4665,7 @@ app.get('/api/hrm/applicants', async (req, res) => {
         `);
 
         // จัดกลุ่มข้อมูลตาม "รหัสตำแหน่ง" (position_code) ให้ง่ายต่อการทำ Tabs หน้าเว็บ
-        const groupedByPosition = result.recordset.reduce((acc, applicant) => {
+        const groupedByPosition = result.rows.reduce((acc, applicant) => {
             const posCode = applicant.position_code || 'Unknown';
             if (!acc[posCode]) {
                 acc[posCode] = {
@@ -5017,49 +4686,36 @@ app.get('/api/hrm/applicants', async (req, res) => {
 });
 
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🧑‍💼 API: Admin อัปเดตสถานะใบสมัคร (ผ่าน/ไม่ผ่าน) + ส่งแจ้งเตือน (แก้บั๊ก id)
 // ==========================================
 app.post('/api/hrm/applicants/update-status', async (req, res) => {
     const { emp_code, status, reply_message } = req.body;
     try {
-        const pool = await sql.connect(dbConfig);
-        
         // 1. ดึง username ของผู้สมัครคนนี้ออกมาก่อน
-        const empRes = await pool.request()
-            .input('code', sql.VarChar, emp_code)
-            .query(`SELECT username FROM Employees WHERE emp_code = @code`);
+        const empRes = await pgPool.query(`SELECT username FROM Employees WHERE emp_code = $1`, [emp_code]);
             
-        if (empRes.recordset.length === 0) {
+        if (empRes.rows.length === 0) {
              return res.status(404).json({ success: false, message: 'ไม่พบข้อมูลผู้สมัคร' });
         }
         
-        const applicantUsername = empRes.recordset[0].username;
+        const applicantUsername = empRes.rows[0].username;
 
         // 2. อัปเดตสถานะในตาราง Employees
-        await pool.request()
-            .input('status', sql.VarChar, status)
-            .input('code', sql.VarChar, emp_code)
-            .query(`UPDATE Employees SET status = @status WHERE emp_code = @code`);
+        await pgPool.query(`UPDATE Employees SET status = $1 WHERE emp_code = $2`, [status, emp_code]);
             
         // 3. บันทึกข้อความตอบกลับลงระบบ Notification
-        // 🌟 แก้ไขเป็น SELECT * เพื่อป้องกัน Error Invalid Column Name 'id'
-        const userRes = await pool.request()
-            .input('uname', sql.VarChar, applicantUsername)
-            .query(`SELECT * FROM users WHERE username = @uname`); 
+        const userRes = await pgPool.query(`SELECT * FROM users WHERE username = $1`, [applicantUsername]); 
 
-        if (userRes.recordset.length > 0) {
-            // 🌟 ดึงค่า user_id จาก recordset
-            const userId = userRes.recordset[0].user_id; 
+        if (userRes.rows.length > 0) {
+            // 🌟 ดึงค่า user_id จาก rows
+            const userId = userRes.rows[0].user_id; 
             const notifTitle = status === 'Approved' ? '🎉 ยินดีด้วย! ใบสมัครผ่านการคัดเลือก' : 'แจ้งผลการสมัครงาน';
             
-            await pool.request()
-                .input('user_id', sql.Int, userId)
-                .input('title', sql.NVarChar, notifTitle)
-                .input('message', sql.NVarChar, reply_message)
-                .query(`
-                    INSERT INTO Notifications (user_id, title, message, is_read, created_at) 
-                    VALUES (@user_id, @title, @message, 0, GETDATE())
-                `);
+            await pgPool.query(`
+                INSERT INTO Notifications (user_id, title, message, is_read, created_at) 
+                VALUES ($1, $2, $3, '0', CURRENT_TIMESTAMP)
+            `, [userId, notifTitle, reply_message]);
         } else {
              console.log("⚠️ หา User ไม่เจอสำหรับ Username:", applicantUsername);
         }
@@ -5070,21 +4726,22 @@ app.post('/api/hrm/applicants/update-status', async (req, res) => {
         res.status(500).json({ success: false, message: 'SQL Error: ' + err.message });
     }
 });
+
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 📣 API: ดึงข้อมูลโฆษณา (ให้หน้า PreLogin หรือ JobApplication เรียกใช้)
 // ==========================================
 app.get('/api/hrm/job-ad', async (req, res) => {
     try {
-        const pool = await sql.connect(dbConfig);
-        const result = await pool.request().query(`
+        const result = await pgPool.query(`
             SELECT * FROM Job_Ads_Settings 
-            WHERE id = 1 AND is_active = 1
-            AND (start_time IS NULL OR start_time <= DATEADD(hour, 7, GETUTCDATE()))
-            AND (end_time IS NULL OR end_time >= DATEADD(hour, 7, GETUTCDATE()))
+            WHERE id = 1 AND is_active = '1'
+            AND (start_time IS NULL OR start_time <= CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Bangkok')
+            AND (end_time IS NULL OR end_time >= CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Bangkok')
         `);
         
-        if(result.recordset.length > 0) {
-            const ad = result.recordset[0];
+        if(result.rows.length > 0) {
+            const ad = result.rows[0];
             
             // 🌟 1. ดึงตำแหน่งที่อนุญาตให้สมัคร
             let allowedPos = [];
@@ -5095,15 +4752,15 @@ app.get('/api/hrm/job-ad', async (req, res) => {
             // 🌟 2. ดึงรายละเอียดของตำแหน่งเหล่านั้นส่งไปด้วย
             let activePositions = [];
             if (allowedPos.length > 0) {
-                // สร้าง IN clause เช่น 'D01-P01','D02-P02'
+                // สร้าง IN clause เช่น 'D01-P01','D02-P02' (คงโครงสร้างเดิมเพื่อให้โค้ดหน้าบ้านทำงานได้ 100%)
                 const inClause = allowedPos.map(p => `'${p}'`).join(',');
-                const posRes = await pool.request().query(`
+                const posRes = await pgPool.query(`
                     SELECT p.position_code, p.position_name, p.dept_code, p.base_salary, p.job_responsibilities, d.dept_name
                     FROM Emp_Positions p
                     LEFT JOIN Emp_Departments d ON p.dept_code = d.dept_code
                     WHERE p.position_code IN (${inClause})
                 `);
-                activePositions = posRes.recordset;
+                activePositions = posRes.rows;
             }
 
             res.json({ success: true, ad: ad, activePositions: activePositions });
@@ -5115,47 +4772,42 @@ app.get('/api/hrm/job-ad', async (req, res) => {
         res.status(500).json({ success: false });
     }
 });
-
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 📣 API: อัปเดตโฆษณา (แอดมินกดบันทึกจากหลังบ้าน)
 // ==========================================
 app.post('/api/hrm/job-ad', async (req, res) => {
     const { is_active, ad_title, ad_description, start_time, end_time, allowed_positions } = req.body;
     try {
-        const pool = await sql.connect(dbConfig);
         // แปลง Array เป็น String คั่นด้วยจุลภาค เช่น "D01-P01,D02-P01"
         const posString = Array.isArray(allowed_positions) ? allowed_positions.join(',') : '';
 
-        await pool.request()
-            .input('is_active', sql.Bit, is_active ? 1 : 0)
-            .input('title', sql.NVarChar, ad_title)
-            .input('desc', sql.NVarChar, ad_description)
-            .input('start', sql.DateTime, start_time || null)
-            .input('end', sql.DateTime, end_time || null)
-            .input('pos', sql.NVarChar, posString) // 🌟 บันทึกตำแหน่งที่อนุญาต
-            .query(`
+        await pgPool.query(`
                 UPDATE Job_Ads_Settings 
-                SET is_active = @is_active, ad_title = @title, ad_description = @desc, 
-                    start_time = @start, end_time = @end, allowed_positions = @pos
+                SET is_active = $1, ad_title = $2, ad_description = $3, 
+                    start_time = $4, end_time = $5, allowed_positions = $6
                 WHERE id = 1
-            `);
+            `, [is_active ? '1' : '0', ad_title, ad_description, start_time || null, end_time || null, posString]
+        );
+            
         res.json({ success: true });
     } catch (err) {
         console.error(err);
         res.status(500).json({ success: false });
     }
 });
+
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 📣 API: ดึงข้อมูลโฆษณาทั้งหมด (สำหรับหน้า Admin)
 // ==========================================
 app.get('/api/hrm/job-ad/admin', async (req, res) => {
     try {
-        const pool = await sql.connect(dbConfig);
         // ดึงมาทั้งหมด เรียงจากใหม่ไปเก่า
-        const result = await pool.request().query(`
+        const result = await pgPool.query(`
             SELECT * FROM Job_Ads_Settings ORDER BY id DESC
         `);
-        res.json({ success: true, ads: result.recordset });
+        res.json({ success: true, ads: result.rows });
     } catch (err) {
         console.error(err);
         res.status(500).json({ success: false });
@@ -5163,43 +4815,30 @@ app.get('/api/hrm/job-ad/admin', async (req, res) => {
 });
 
 // ==========================================
-// 📣 API: เพิ่ม / แก้ไข โฆษณา
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
+// 📣 API: เพิ่ม / แก้ไข โฆษณา (ทับซ้อนกับตัวบนตามโค้ดต้นฉบับ)
 // ==========================================
 app.post('/api/hrm/job-ad', async (req, res) => {
     const { id, is_active, ad_title, ad_description, start_time, end_time, allowed_positions } = req.body;
     try {
-        const pool = await sql.connect(dbConfig);
         const posString = Array.isArray(allowed_positions) ? allowed_positions.join(',') : '';
 
         if (id) {
             // 🌟 ถ้าส่ง ID มาแปลว่า "แก้ไขของเดิม"
-            await pool.request()
-                .input('id', sql.Int, id)
-                .input('is_active', sql.Bit, is_active ? 1 : 0)
-                .input('title', sql.NVarChar, ad_title)
-                .input('desc', sql.NVarChar, ad_description)
-                .input('start', sql.DateTime, start_time || null)
-                .input('end', sql.DateTime, end_time || null)
-                .input('pos', sql.NVarChar, posString)
-                .query(`
+            await pgPool.query(`
                     UPDATE Job_Ads_Settings 
-                    SET is_active = @is_active, ad_title = @title, ad_description = @desc, 
-                        start_time = @start, end_time = @end, allowed_positions = @pos
-                    WHERE id = @id
-                `);
+                    SET is_active = $1, ad_title = $2, ad_description = $3, 
+                        start_time = $4, end_time = $5, allowed_positions = $6
+                    WHERE id = $7
+                `, [is_active ? '1' : '0', ad_title, ad_description, start_time || null, end_time || null, posString, id]
+            );
         } else {
             // 🌟 ถ้าไม่มี ID แปลว่า "สร้างโพสต์ใหม่"
-            await pool.request()
-                .input('is_active', sql.Bit, is_active ? 1 : 0)
-                .input('title', sql.NVarChar, ad_title)
-                .input('desc', sql.NVarChar, ad_description)
-                .input('start', sql.DateTime, start_time || null)
-                .input('end', sql.DateTime, end_time || null)
-                .input('pos', sql.NVarChar, posString)
-                .query(`
+            await pgPool.query(`
                     INSERT INTO Job_Ads_Settings (is_active, ad_title, ad_description, start_time, end_time, allowed_positions) 
-                    VALUES (@is_active, @title, @desc, @start, @end, @pos)
-                `);
+                    VALUES ($1, $2, $3, $4, $5, $6)
+                `, [is_active ? '1' : '0', ad_title, ad_description, start_time || null, end_time || null, posString]
+            );
         }
         res.json({ success: true });
     } catch (err) {
@@ -5210,43 +4849,42 @@ app.post('/api/hrm/job-ad', async (req, res) => {
 // ==========================================
 // 🌟 สิ้นสุด  HRM 
 // ==========================================
+
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🌟 2. ดึงข้อมูล 24 รอบของวันนี้ (ทั้งหน้าบ้านและหลังบ้านใช้ร่วมกัน)
 // ==========================================
 app.get('/api/yeeki/rounds', async (req, res) => {
     try {
-        const pool = await sql.connect(dbConfig); 
-        
         // 🌟 ดึงข้อมูลรอบของวันนี้ (อิงเวลาไทย) และแปลงเวลาให้ JavaScript ฝั่ง Frontend อ่านได้เป๊ะๆ
-        const result = await pool.request().query(`
+        const result = await pgPool.query(`
             SELECT 
                 round_id, 
                 round_number,
-                CONVERT(varchar, open_time, 120) as open_time,
-                CONVERT(varchar, close_time, 120) as close_time,
-                CONVERT(varchar, draw_time, 120) as draw_time,
+                to_char(open_time, 'YYYY-MM-DD HH24:MI:SS') as open_time,
+                to_char(close_time, 'YYYY-MM-DD HH24:MI:SS') as close_time,
+                to_char(draw_time, 'YYYY-MM-DD HH24:MI:SS') as draw_time,
                 status
             FROM Yeeki_Rounds 
-            WHERE CAST(draw_date AS DATE) = CAST(DATEADD(hour, 7, GETUTCDATE()) AS DATE) 
+            WHERE CAST(draw_date AS DATE) = CAST(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Bangkok' AS DATE) 
             ORDER BY round_number ASC
         `);
         
-        res.json({ success: true, rounds: result.recordset });
+        res.json({ success: true, rounds: result.rows });
     } catch (err) {
         console.error("Error fetching Yeeki rounds:", err);
         res.status(500).json({ success: false, message: err.message });
     }
 });
 
-
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 2. ดึงอัตราการจ่าย (หวยยี่กี)
 // ==========================================
 app.get('/api/yeeki/prize-rates', async (req, res) => {
     try {
-        const pool = await sql.connect(dbConfig); 
-        const result = await pool.request().query('SELECT lottery_type, multiplier FROM Yeeki_Prize_Rates');
-        res.json({ success: true, rates: result.recordset });
+        const result = await pgPool.query('SELECT lottery_type, multiplier FROM Yeeki_Prize_Rates');
+        res.json({ success: true, rates: result.rows });
     } catch (err) {
         console.error("Error fetching prize rates:", err);
         res.status(500).json({ success: false, message: err.message });
@@ -5254,15 +4892,15 @@ app.get('/api/yeeki/prize-rates', async (req, res) => {
 });
 
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 3. ดึงยอดแจ็คพอต 8 ตัวสะสม (หวยยี่กี)
 // ==========================================
 app.get('/api/yeeki/jackpot', async (req, res) => {
     try {
-        const pool = await sql.connect(dbConfig); 
-        const result = await pool.request().query('SELECT TOP 1 * FROM Super_Yeeki_Jackpot ORDER BY id DESC');
+        const result = await pgPool.query('SELECT * FROM Super_Yeeki_Jackpot ORDER BY id DESC LIMIT 1');
         
-        if (result.recordset.length > 0) {
-             res.json({ success: true, jackpot: { current_amount: result.recordset[0].amount, currency_code: 'LAK' } });
+        if (result.rows.length > 0) {
+             res.json({ success: true, jackpot: { current_amount: result.rows[0].amount, currency_code: 'LAK' } });
         } else {
              res.json({ success: true, jackpot: { current_amount: 10000000, currency_code: 'LAK' } });
         }
@@ -5272,31 +4910,29 @@ app.get('/api/yeeki/jackpot', async (req, res) => {
     }
 });
 
-
-
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🌟 รายงานยอดขายหวยยี่กี (Admin Sales Report - โชว์การ์ด 12 รอบถัดไปเสมอ)
 // ==========================================
 app.get('/api/admin/yeeki/sales-report', async (req, res) => {
     try {
-        const pool = await sql.connect(dbConfig);
-        
         // 1. ดึง 12 รอบถัดไป (ข้ามวันได้) มาทำการ์ด
-        const roundsResult = await pool.request().query(`
-            SELECT TOP 12
+        const roundsResult = await pgPool.query(`
+            SELECT 
                 round_id, round_number, 
-                CONVERT(varchar, open_time, 120) as open_time_str, 
-                CONVERT(varchar, close_time, 120) as close_time_str, 
-                CONVERT(varchar, draw_time, 120) as draw_time_str,
+                to_char(open_time, 'YYYY-MM-DD HH24:MI:SS') as open_time_str, 
+                to_char(close_time, 'YYYY-MM-DD HH24:MI:SS') as close_time_str, 
+                to_char(draw_time, 'YYYY-MM-DD HH24:MI:SS') as draw_time_str,
                 status as db_status,
                 result_8_super, result_4_top, result_2_bottom
             FROM Yeeki_Rounds
-            WHERE draw_time >= DATEADD(hour, 7, GETUTCDATE())
+            WHERE draw_time >= CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Bangkok'
             ORDER BY draw_date ASC, round_number ASC
+            LIMIT 12
         `);
         
         // 2. ดึงบิลทั้งหมดเฉพาะที่อยู่ใน 12 รอบนี้
-        const ordersResult = await pool.request().query(`
+        const ordersResult = await pgPool.query(`
             SELECT 
                 o.round_id, u.username, oi.lottery_type as type, oi.selected_number as number,
                 oi.price, o.currency_code as currency, oi.status
@@ -5304,20 +4940,21 @@ app.get('/api/admin/yeeki/sales-report', async (req, res) => {
             JOIN Yeeki_Order_Items oi ON o.order_id = oi.order_id
             JOIN Users u ON o.user_id = u.user_id
             WHERE o.round_id IN (
-                SELECT TOP 12 round_id
+                SELECT round_id
                 FROM Yeeki_Rounds
-                WHERE draw_time >= DATEADD(hour, 7, GETUTCDATE())
+                WHERE draw_time >= CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Bangkok'
                 ORDER BY draw_date ASC, round_number ASC
+                LIMIT 12
             )
             ORDER BY o.created_at DESC
         `);
         
-        const allOrders = ordersResult.recordset;
+        const allOrders = ordersResult.rows;
         let overallTotal = { thb: 0, lak: 0 };
         let activeRoundTotal = { thb: 0, lak: 0 };
         const jsNow = new Date(); 
         
-        const rounds = roundsResult.recordset.map(r => {
+        const rounds = roundsResult.rows.map(r => {
             const roundOrders = allOrders.filter(o => o.round_id === r.round_id);
             let total_thb = 0; let total_lak = 0;
             
@@ -5364,123 +5001,89 @@ app.get('/api/admin/yeeki/sales-report', async (req, res) => {
 });
 
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🌟 API สำหรับการซื้อหวยยี่กี (แก้ไขชื่อคอลัมน์เป็น title)
 // ==========================================
 app.post('/api/yeeki/buy', async (req, res) => {
     const { user_id, cart, total_price, currency, note, lottery_category } = req.body;
-    let pool;
+    const client = await pgPool.connect(); // ใช้ Transaction
     
     try {
         if (!user_id || !cart || cart.length === 0) {
             return res.status(400).json({ success: false, message: "ข้อมูลการสั่งซื้อไม่ครบถ้วน" });
         }
 
-        pool = await sql.connect(dbConfig);
-        
         // 1. ดึงข้อมูลผู้ซื้อ 
-        const userCheck = await pool.request()
-            .input('uid', sql.Int, user_id)
-            .query(`SELECT username, wallet_balance, referrer_username FROM Users WHERE user_id = @uid`);
+        const userCheck = await client.query(`SELECT username, wallet_balance, referrer_username FROM Users WHERE user_id = $1`, [user_id]);
             
-        if (userCheck.recordset.length === 0) {
+        if (userCheck.rows.length === 0) {
             return res.status(404).json({ success: false, message: "ไม่พบข้อมูลผู้ใช้" });
         }
         
-        const buyer = userCheck.recordset[0];
-        const currentBalance = buyer.wallet_balance || 0;
+        const buyer = userCheck.rows[0];
+        const currentBalance = parseFloat(buyer.wallet_balance) || 0;
         
-        if (currentBalance < total_price) {
+        if (currentBalance < parseFloat(total_price)) {
             return res.status(400).json({ success: false, message: "ยอดเงินในกระเป๋าไม่เพียงพอ" });
         }
 
-        const transaction = new sql.Transaction(pool);
-        await transaction.begin();
+        await client.query('BEGIN');
 
         try {
             // 2. หักเงินผู้ซื้อ
-            await transaction.request()
-                .input('price', sql.Decimal(18,2), total_price)
-                .input('uid', sql.Int, user_id)
-                .query(`UPDATE Users SET wallet_balance = wallet_balance - @price WHERE user_id = @uid`);
+            await client.query(`UPDATE Users SET wallet_balance = COALESCE(wallet_balance, 0) - $1 WHERE user_id = $2`, [total_price, user_id]);
 
             // 3. สร้างประวัติ Transaction ผู้ซื้อ (เปลี่ยน description เป็น title)
-            await transaction.request()
-                .input('uid', sql.Int, user_id)
-                .input('amount', sql.Decimal(18,2), -total_price)
-                .input('type', sql.VarChar(50), 'BUY_YEEKI')
-                .input('title', sql.NVarChar(255), `แทงหวยยี่กี รอบที่ ${cart[0].round_number}`) // เปลี่ยนชื่อตัวแปรให้ตรง
-                .query(`
-                    INSERT INTO Transactions (user_id, amount, transaction_type, title, status) -- เปลี่ยนคอลัมน์เป็น title
-                    VALUES (@uid, @amount, @type, @title, 'Completed')
-                `);
+            await client.query(`
+                INSERT INTO Transactions (user_id, amount, transaction_type, title, status, created_at)
+                VALUES ($1, $2, $3, $4, 'Completed', CURRENT_TIMESTAMP)
+            `, [user_id, -parseFloat(total_price), 'BUY_YEEKI', `แทงหวยยี่กี รอบที่ ${cart[0].round_number}`]);
 
             // 4. บันทึกบิลหลักลง Yeeki_Orders
             const mainRoundId = cart[0].round_id;
-            const insertOrderReq = await transaction.request()
-                .input('user_id', sql.Int, user_id)
-                .input('round_id', sql.Int, mainRoundId)
-                .input('total_amount', sql.Decimal(18,2), total_price)
-                .input('currency', sql.VarChar(10), currency)
-                .input('note', sql.NVarChar(255), note || '')
-                .input('status', sql.VarChar(50), 'Completed')
-                .query(`
-                    INSERT INTO Yeeki_Orders (user_id, round_id, total_amount, currency_code, status, order_note)
-                    OUTPUT INSERTED.order_id
-                    VALUES (@user_id, @round_id, @total_amount, @currency, @status, @note)
-                `);
+            const insertOrderReq = await client.query(`
+                INSERT INTO Yeeki_Orders (user_id, round_id, total_amount, currency_code, status, order_note, created_at)
+                VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP)
+                RETURNING order_id
+            `, [user_id, mainRoundId, total_price, currency, 'Completed', note || '']);
 
-            const newOrderId = insertOrderReq.recordset[0].order_id;
+            const newOrderId = insertOrderReq.rows[0].order_id;
 
             // 5. บันทึกรายการย่อยทีละตัว
             for (let item of cart) {
-                await transaction.request()
-                    .input('order_id', sql.Int, newOrderId)
-                    .input('ltype', sql.NVarChar(50), item.type)
-                    .input('number', sql.VarChar(20), item.number)
-                    .input('price', sql.Decimal(18,2), item.price)
-                    .query(`
-                        INSERT INTO Yeeki_Order_Items (order_id, lottery_type, selected_number, price, status)
-                        VALUES (@order_id, @ltype, @number, @price, N'รอผลตรวจ')
-                    `);
+                await client.query(`
+                    INSERT INTO Yeeki_Order_Items (order_id, lottery_type, selected_number, price, status)
+                    VALUES ($1, $2, $3, $4, 'รอผลตรวจ')
+                `, [newOrderId, item.type, item.number, item.price]);
             }
 
             // 6. 💰 ระบบแจกค่าคอมมิชชั่น 5% ให้ผู้แนะนำ
             if (buyer.referrer_username) {
                 // 6.1 เอาชื่อผู้แนะนำ ไปค้นหา user_id ในตาราง Users ก่อน
-                const refCheck = await transaction.request()
-                    .input('refUsername', sql.VarChar(50), buyer.referrer_username)
-                    .query(`SELECT user_id FROM Users WHERE username = @refUsername`);
+                const refCheck = await client.query(`SELECT user_id FROM Users WHERE username = $1`, [buyer.referrer_username]);
 
                 // ถ้าเจอตัวผู้แนะนำในระบบ ค่อยจ่ายเงิน
-                if (refCheck.recordset.length > 0) {
-                    const referrerUserId = refCheck.recordset[0].user_id;
+                if (refCheck.rows.length > 0) {
+                    const referrerUserId = refCheck.rows[0].user_id;
                     const commissionRate = 0.05; // เรท 5%
-                    const commissionAmount = total_price * commissionRate;
+                    const commissionAmount = parseFloat(total_price) * commissionRate;
 
                     // 6.2 อัปเดตกระเป๋าเงินของผู้แนะนำ (บวกเงินเพิ่ม)
-                    await transaction.request()
-                        .input('commAmount', sql.Decimal(18,2), commissionAmount)
-                        .input('refUserId', sql.Int, referrerUserId)
-                        .query(`UPDATE Users SET wallet_balance = wallet_balance + @commAmount WHERE user_id = @refUserId`);
+                    await client.query(`UPDATE Users SET wallet_balance = COALESCE(wallet_balance, 0) + $1 WHERE user_id = $2`, [commissionAmount, referrerUserId]);
 
                     // 6.3 สร้างประวัติ Transaction รายได้ให้ "ผู้แนะนำ" (เปลี่ยน description เป็น title)
-                    await transaction.request()
-                        .input('refUserId', sql.Int, referrerUserId)
-                        .input('commAmount', sql.Decimal(18,2), commissionAmount)
-                        .input('commType', sql.VarChar(50), 'COMMISSION_5')
-                        .input('commTitle', sql.NVarChar(255), `รายได้ 5% จากทีมงาน (${buyer.username})`) // เปลี่ยนชื่อตัวแปรให้ตรง
-                        .query(`
-                            INSERT INTO Transactions (user_id, amount, transaction_type, title, status) -- เปลี่ยนคอลัมน์เป็น title
-                            VALUES (@refUserId, @commAmount, @commType, @commTitle, 'Completed')
-                        `);
+                    await client.query(`
+                        INSERT INTO Transactions (user_id, amount, transaction_type, title, status, created_at)
+                        VALUES ($1, $2, $3, $4, 'Completed', CURRENT_TIMESTAMP)
+                    `, [referrerUserId, commissionAmount, 'COMMISSION_5', `รายได้ 5% จากทีมงาน (${buyer.username})`]);
                 }
             }
 
-            await transaction.commit();
+            await client.query('COMMIT');
             res.json({ success: true, message: "สั่งซื้อสำเร็จ", order_id: newOrderId });
 
         } catch (innerErr) {
-            await transaction.rollback();
+            await client.query('ROLLBACK');
             throw innerErr;
         }
 
@@ -5490,18 +5093,20 @@ app.post('/api/yeeki/buy', async (req, res) => {
             success: false, 
             message: `ฐานข้อมูลขัดข้อง (Database Error): ${err.message}` 
         });
+    } finally {
+        client.release();
     }
 });
 
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🌟 1. ดึง/อัปเดต การตั้งค่าหวยยี่กีออโต้
 // ==========================================
 app.get('/api/yeeki/settings', async (req, res) => {
     try {
-        const pool = await sql.connect(dbConfig);
-        const result = await pool.request().query('SELECT TOP 1 is_auto_draw, auto_draw_percent FROM Yeeki_Settings');
-        if (result.recordset.length > 0) {
-            res.json({ success: true, data: result.recordset[0] });
+        const result = await pgPool.query('SELECT is_auto_draw, auto_draw_percent FROM Yeeki_Settings LIMIT 1');
+        if (result.rows.length > 0) {
+            res.json({ success: true, data: result.rows[0] });
         } else {
             res.json({ success: true, data: { is_auto_draw: false, auto_draw_percent: 50 } });
         }
@@ -5514,11 +5119,7 @@ app.get('/api/yeeki/settings', async (req, res) => {
 app.post('/api/yeeki/settings', async (req, res) => {
     try {
         const { is_auto_draw, auto_draw_percent } = req.body;
-        const pool = await sql.connect(dbConfig);
-        await pool.request()
-            .input('is_auto', sql.Bit, is_auto_draw ? 1 : 0)
-            .input('percent', sql.Int, auto_draw_percent || 50)
-            .query('UPDATE Yeeki_Settings SET is_auto_draw = @is_auto, auto_draw_percent = @percent');
+        await pgPool.query('UPDATE Yeeki_Settings SET is_auto_draw = $1, auto_draw_percent = $2', [is_auto_draw ? '1' : '0', auto_draw_percent || 50]);
         res.json({ success: true, message: 'บันทึกการตั้งค่าสำเร็จ' });
     } catch (err) {
         console.error("Error saving Yeeki settings:", err);
@@ -5526,46 +5127,48 @@ app.post('/api/yeeki/settings', async (req, res) => {
     }
 });
 
+// ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 1. ดึงประวัติการออกรางวัล (เพื่อให้ตารางหน้าแรกโชว์ผลย้อนหลัง)
+// ==========================================
 app.get('/api/admin/yeeki-draw-history', async (req, res) => {
     try {
         const { date } = req.query;
-        const pool = await sql.connect(dbConfig);
         
         // ดึงรอบล่าสุดที่ออกผลแล้วของวันนี้
-        const historyReq = await pool.request()
-            .input('date', sql.VarChar, date)
-            .query(`SELECT TOP 1 * FROM Yeeki_Rounds WHERE CAST(draw_date AS DATE) = CAST(@date AS DATE) AND status = 'Completed' ORDER BY round_number DESC`);
+        const historyReq = await pgPool.query(`
+            SELECT * FROM Yeeki_Rounds 
+            WHERE CAST(draw_date AS DATE) = CAST($1 AS DATE) AND status = 'Completed' 
+            ORDER BY round_number DESC LIMIT 1
+        `, [date]);
             
         // ดึงรายชื่อคนถูกรางวัลของวันนี้
-        const winnersReq = await pool.request()
-            .input('date', sql.VarChar, date)
-            .query(`
-                SELECT u.username, o.round_id as round_number, oi.lottery_type, oi.selected_number, oi.price, oi.prize_amount, o.currency_code
-                FROM Yeeki_Order_Items oi
-                JOIN Yeeki_Orders o ON oi.order_id = o.order_id
-                JOIN Users u ON o.user_id = u.user_id
-                WHERE CAST(o.created_at AS DATE) = CAST(@date AS DATE) AND oi.status = 'Win'
-                ORDER BY o.round_id DESC
-            `);
+        const winnersReq = await pgPool.query(`
+            SELECT u.username, o.round_id as round_number, oi.lottery_type, oi.selected_number, oi.price, oi.prize_amount, o.currency_code
+            FROM Yeeki_Order_Items oi
+            JOIN Yeeki_Orders o ON oi.order_id = o.order_id
+            JOIN Users u ON o.user_id = u.user_id
+            WHERE CAST(o.created_at AS DATE) = CAST($1 AS DATE) AND oi.status = 'Win'
+            ORDER BY o.round_id DESC
+        `, [date]);
             
-        res.json({ success: true, results: historyReq.recordset[0] || null, winners: winnersReq.recordset });
+        res.json({ success: true, results: historyReq.rows[0] || null, winners: winnersReq.rows });
     } catch (err) {
         res.status(500).json({ success: false, message: err.message });
     }
 });
 
 // ==========================================
-// 🌟 API ประกาศผลและตรวจรางวัล (Execute Draw)
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
+// 🌟 API ประกาศผลและตรวจรางวัล (Execute Draw) (มีซ้ำกันกับชุดแรก เอาตามโค้ดต้นฉบับล่าสุดนี้)
 // ==========================================
 app.post('/api/admin/execute-yeeki-draw', async (req, res) => {
     // 💡 เปลี่ยนมารับค่า top_6
     const { round_id, super_number, top_6 } = req.body;
-    let pool;
+    const client = await pgPool.connect(); // ใช้ Transaction
+    
     try {
-        pool = await sql.connect(dbConfig);
-        const transaction = new sql.Transaction(pool);
-        await transaction.begin();
+        await client.query('BEGIN');
 
         try {
             // 💡 แตกเลข
@@ -5575,38 +5178,28 @@ app.post('/api/admin/execute-yeeki-draw', async (req, res) => {
             const bottom_2 = top_6.slice(2, 4);
 
             // 1. อัปเดตผลรางวัลลงตาราง
-            await transaction.request()
-                .input('roundId', sql.Int, round_id)
-                .input('res8', sql.VarChar(8), super_number)
-                // 💡 เก็บ 6 ตัวไว้ในคอลัมน์ไหน? สมมติเก็บ 4 ตัวไว้เหมือนเดิม แต่เราสามารถตรวจสอบย้อนหลังได้จาก order
-                // ถ้าคุณพี่มีคอลัมน์ result_6 ก็เพิ่มตรงนี้ได้ครับ แต่เพื่อความชัวร์ผมเก็บแค่ 4 ตัวตามฐานข้อมูลเดิมก่อน
-                .input('res4', sql.VarChar(4), top_4) 
-                .input('res3', sql.VarChar(3), top_3)
-                .input('res2bot', sql.VarChar(2), bottom_2)
-                .query(`
-                    UPDATE Yeeki_Rounds 
-                    SET result_8_super = @res8, 
-                        result_4_top = @res4, 
-                        result_3_top = @res3, 
-                        result_2_bottom = @res2bot,
-                        status = 'Completed' 
-                    WHERE round_id = @roundId
-                `);
+            await client.query(`
+                UPDATE Yeeki_Rounds 
+                SET result_8_super = $1, 
+                    result_4_top = $2, 
+                    result_3_top = $3, 
+                    result_2_bottom = $4,
+                    status = 'Completed' 
+                WHERE round_id = $5
+            `, [super_number, top_4, top_3, bottom_2, round_id]);
 
-            const ratesReq = await transaction.request().query(`SELECT lottery_type, multiplier FROM Yeeki_Prize_Rates`);
+            const ratesReq = await client.query(`SELECT lottery_type, multiplier FROM Yeeki_Prize_Rates`);
             const prizeRates = {};
-            ratesReq.recordset.forEach(r => prizeRates[r.lottery_type] = r.multiplier);
+            ratesReq.rows.forEach(r => prizeRates[r.lottery_type] = parseFloat(r.multiplier));
 
-            const itemsReq = await transaction.request()
-                .input('roundId', sql.Int, round_id)
-                .query(`
-                    SELECT i.item_id, i.order_id, i.lottery_type, i.selected_number, i.price, o.user_id, o.currency_code
-                    FROM Yeeki_Order_Items i
-                    JOIN Yeeki_Orders o ON i.order_id = o.order_id
-                    WHERE o.round_id = @roundId AND i.status = N'รอผลตรวจ'
-                `);
+            const itemsReq = await client.query(`
+                SELECT i.item_id, i.order_id, i.lottery_type, i.selected_number, i.price, o.user_id, o.currency_code
+                FROM Yeeki_Order_Items i
+                JOIN Yeeki_Orders o ON i.order_id = o.order_id
+                WHERE o.round_id = $1 AND i.status = 'รอผลตรวจ'
+            `, [round_id]);
 
-            const items = itemsReq.recordset;
+            const items = itemsReq.rows;
 
             for (let item of items) {
                 let isWin = false;
@@ -5629,48 +5222,38 @@ app.post('/api/admin/execute-yeeki-draw', async (req, res) => {
                 else if (type === 'วิ่งล่าง' && bottom_2.includes(num)) isWin = true;
 
                 if (isWin) {
-                    const prizeAmount = item.price * (prizeRates[type] || 0);
+                    const prizeAmount = parseFloat(item.price) * (prizeRates[type] || 0);
 
-                    await transaction.request()
-                        .input('itemId', sql.Int, item.item_id)
-                        .input('prizeAmt', sql.Decimal(18,2), prizeAmount)
-                        .query(`UPDATE Yeeki_Order_Items SET status = N'ชนะ', prize_amount = @prizeAmt WHERE item_id = @itemId`);
+                    await client.query(`UPDATE Yeeki_Order_Items SET status = 'ชนะ', prize_amount = $1 WHERE item_id = $2`, [prizeAmount, item.item_id]);
 
-                    await transaction.request()
-                        .input('uid', sql.Int, item.user_id)
-                        .input('prize', sql.Decimal(18,2), prizeAmount)
-                        .query(`UPDATE Users SET wallet_balance = wallet_balance + @prize WHERE user_id = @uid`);
+                    await client.query(`UPDATE Users SET wallet_balance = COALESCE(wallet_balance, 0) + $1 WHERE user_id = $2`, [prizeAmount, item.user_id]);
 
-                    await transaction.request()
-                        .input('uid', sql.Int, item.user_id)
-                        .input('prize', sql.Decimal(18,2), prizeAmount)
-                        .input('title', sql.NVarChar(255), `ถูกรางวัล ${type} (${num}) รอบที่ ${round_id}`)
-                        .query(`
-                            INSERT INTO Transactions (user_id, amount, transaction_type, title, status)
-                            VALUES (@uid, @prize, 'PRIZE_WIN', @title, 'Completed')
-                        `);
+                    await client.query(`
+                        INSERT INTO Transactions (user_id, amount, transaction_type, title, status, created_at)
+                        VALUES ($1, $2, 'PRIZE_WIN', $3, 'Completed', CURRENT_TIMESTAMP)
+                    `, [item.user_id, prizeAmount, `ถูกรางวัล ${type} (${num}) รอบที่ ${round_id}`]);
                 } else {
-                    await transaction.request()
-                        .input('itemId', sql.Int, item.item_id)
-                        .query(`UPDATE Yeeki_Order_Items SET status = N'แพ้' WHERE item_id = @itemId`);
+                    await client.query(`UPDATE Yeeki_Order_Items SET status = 'แพ้' WHERE item_id = $1`, [item.item_id]);
                 }
             }
 
-            await transaction.commit();
+            await client.query('COMMIT');
             res.json({ success: true, message: "ประกาศผลและโอนเงินรางวัลเสร็จสิ้น!" });
 
         } catch (innerErr) {
-            await transaction.rollback();
+            await client.query('ROLLBACK');
             throw innerErr;
         }
 
     } catch (err) {
         console.error("Execute Draw error:", err);
         res.status(500).json({ success: false, message: `Database Error: ${err.message}` });
+    } finally {
+        client.release();
     }
 });
-
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🌟 API ค้นหาประวัติการซื้อ (ล็อคเป้า "เฉพาะรอบที่เลือกเท่านั้น" + แม่นยำ 100%)
 // ==========================================
 app.post('/api/admin/search-yeeki-buyers', async (req, res) => {
@@ -5682,14 +5265,12 @@ app.post('/api/admin/search-yeeki-buyers', async (req, res) => {
     }
 
     try {
-        const pool = await sql.connect(dbConfig);
-
-        const ratesReq = await pool.request().query(`SELECT lottery_type, multiplier FROM Yeeki_Prize_Rates`);
+        const ratesReq = await pgPool.query(`SELECT lottery_type, multiplier FROM Yeeki_Prize_Rates`);
         const prizeRates = {};
-        ratesReq.recordset.forEach(r => prizeRates[r.lottery_type] = r.multiplier);
+        ratesReq.rows.forEach(r => prizeRates[r.lottery_type] = parseFloat(r.multiplier));
 
-        const exReq = await pool.request().query(`SELECT rate FROM ExchangeRates WHERE currency_pair = 'THB_LAK'`);
-        const lakRate = exReq.recordset[0]?.rate || 620;
+        const exReq = await pgPool.query(`SELECT rate FROM ExchangeRates WHERE currency_pair = 'THB_LAK'`);
+        const lakRate = exReq.rows[0]?.rate ? parseFloat(exReq.rows[0].rate) : 620;
 
         // 🔴 แก้ SQL: เปลี่ยนจากหาทั้งวัน (r.draw_date) เป็นหาเฉพาะรอบเป๊ะๆ (r.round_id)
         const query = `
@@ -5704,19 +5285,17 @@ app.post('/api/admin/search-yeeki-buyers', async (req, res) => {
             JOIN Yeeki_Orders o ON i.order_id = o.order_id
             JOIN Yeeki_Rounds r ON o.round_id = r.round_id
             JOIN Users u ON o.user_id = u.user_id
-            WHERE r.round_id = @roundId 
-              AND i.selected_number = @number
+            WHERE r.round_id = $1 
+              AND i.selected_number = $2
             ORDER BY r.round_number ASC
         `;
 
-        const result = await pool.request()
-            .input('roundId', sql.Int, round_id) // ใส่ round_id เข้าไปค้นหา
-            .input('number', sql.NVarChar(50), number.trim())
-            .query(query);
+        const result = await pgPool.query(query, [round_id, number.trim()]);
 
-        const buyers = result.recordset.map(w => {
+        const buyers = result.rows.map(w => {
             const multiplier = prizeRates[w.lottery_type] || 0;
-            const prize = w.price * multiplier;
+            const priceVal = parseFloat(w.price);
+            const prize = priceVal * multiplier;
             let prizeTHB = 0;
 
             if (w.currency_code === 'LAK' || w.currency_code === '₭') {
@@ -5739,7 +5318,10 @@ app.post('/api/admin/search-yeeki-buyers', async (req, res) => {
     }
 });
 
+// ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 4. API จำลองการตั้งค่า (Settings & Prize Rates เพื่อป้องกันหน้าเว็บ Error ตอนโหลด)
+// ==========================================
 app.get('/api/yeeki/settings', (req, res) => {
     // ปัจจุบันส่งค่า Default ไปก่อน ถ้ามีตารางตั้งค่าในอนาคตค่อยมาแก้ตรงนี้ครับ
     res.json({ success: true, data: { is_auto_draw: true, auto_draw_percent: 25 } });
@@ -5747,16 +5329,16 @@ app.get('/api/yeeki/settings', (req, res) => {
 app.post('/api/yeeki/settings', (req, res) => res.json({ success: true }));
 
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🌟 API ดึงอัตราจ่าย (GET) - ดึงจาก Database จริง
 // ==========================================
 app.get('/api/yeeki/prize-rates', async (req, res) => {
     try {
-        const pool = await sql.connect(dbConfig);
-        const result = await pool.request().query(`
+        const result = await pgPool.query(`
             SELECT lottery_type, multiplier 
             FROM Yeeki_Prize_Rates
         `);
-        res.json({ success: true, rates: result.recordset });
+        res.json({ success: true, rates: result.rows });
     } catch (err) {
         console.error('Error fetching prize rates:', err);
         res.status(500).json({ success: false, message: 'Database error' });
@@ -5764,9 +5346,11 @@ app.get('/api/yeeki/prize-rates', async (req, res) => {
 });
 
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🌟 API บันทึกอัตราจ่าย (POST) - เวอร์ชันครอบจักรวาล รองรับทั้ง Array และ Object
 // ==========================================
 app.post('/api/yeeki/prize-rates', async (req, res) => {
+    const client = await pgPool.connect(); // ใช้ Transaction เผื่อ Update หลายแถว
     try {
         const { rates } = req.body; 
         
@@ -5774,8 +5358,8 @@ app.post('/api/yeeki/prize-rates', async (req, res) => {
             return res.status(400).json({ success: false, message: 'ไม่มีข้อมูลอัตราจ่ายส่งมา' });
         }
 
-        const pool = await sql.connect(dbConfig);
         let totalUpdated = 0;
+        await client.query('BEGIN');
 
         // 🟢 ตรวจสอบว่าหน้าเว็บส่งมาเป็น Array (แบบตาราง) ใช่หรือไม่
         if (Array.isArray(rates)) {
@@ -5784,15 +5368,12 @@ app.post('/api/yeeki/prize-rates', async (req, res) => {
                 const numericMultiplier = Number(item.multiplier);
 
                 if (type && !isNaN(numericMultiplier)) {
-                    const result = await pool.request()
-                        .input('type', sql.NVarChar(100), type.trim())
-                        .input('multiplier', sql.Decimal(18, 2), numericMultiplier)
-                        .query(`
-                            UPDATE Yeeki_Prize_Rates 
-                            SET multiplier = @multiplier, updated_at = GETUTCDATE() 
-                            WHERE lottery_type = @type
-                        `);
-                    totalUpdated += result.rowsAffected[0] || 0;
+                    const result = await client.query(`
+                        UPDATE Yeeki_Prize_Rates 
+                        SET multiplier = $1, updated_at = CURRENT_TIMESTAMP AT TIME ZONE 'UTC' 
+                        WHERE lottery_type = $2
+                    `, [numericMultiplier, type.trim()]);
+                    totalUpdated += result.rowCount || 0;
                 }
             }
         } 
@@ -5802,28 +5383,32 @@ app.post('/api/yeeki/prize-rates', async (req, res) => {
                 const numericMultiplier = Number(multiplier);
 
                 if (!isNaN(numericMultiplier)) {
-                    const result = await pool.request()
-                        .input('type', sql.NVarChar(100), type.trim())
-                        .input('multiplier', sql.Decimal(18, 2), numericMultiplier)
-                        .query(`
-                            UPDATE Yeeki_Prize_Rates 
-                            SET multiplier = @multiplier, updated_at = GETUTCDATE() 
-                            WHERE lottery_type = @type
-                        `);
-                    totalUpdated += result.rowsAffected[0] || 0;
+                    const result = await client.query(`
+                        UPDATE Yeeki_Prize_Rates 
+                        SET multiplier = $1, updated_at = CURRENT_TIMESTAMP AT TIME ZONE 'UTC' 
+                        WHERE lottery_type = $2
+                    `, [numericMultiplier, type.trim()]);
+                    totalUpdated += result.rowCount || 0;
                 }
             }
         }
         
+        await client.query('COMMIT');
         console.log(`✅ อัปเดตอัตราจ่ายลง Database สำเร็จทั้งหมด: ${totalUpdated} แถว`);
         res.json({ success: true, message: 'บันทึกอัตราจ่ายสำเร็จ' });
     } catch (err) {
+        await client.query('ROLLBACK');
         console.error('❌ Error updating prize rates:', err);
         res.status(500).json({ success: false, message: err.message });
+    } finally {
+        client.release();
     }
 });
 
 
+// ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
+// ==========================================
 app.get('/api/admin/exchange-rates', (req, res) => {
     res.json({ success: true, rates: [{ currency_pair: 'THB_LAK', rate: 620 }] });
 });
@@ -5831,55 +5416,45 @@ app.post('/api/admin/exchange-rates', (req, res) => res.json({ success: true }))
 
 
 // ==========================================
-// 🌟 API ประกาศผลและตรวจรางวัลยี่กี (Execute Draw)
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
+// 🌟 API ประกาศผลและตรวจรางวัลยี่กี (Execute Draw) - ยึดตามเวอร์ชันล่าสุดที่คุณวิทยาส่งมา
 // ==========================================
 app.post('/api/admin/execute-yeeki-draw', async (req, res) => {
     const { round_id, super_number, top_number, bottom_number } = req.body;
-    let pool;
+    const client = await pgPool.connect(); // ใช้ Transaction
 
     try {
-        pool = await sql.connect(dbConfig);
-        const transaction = new sql.Transaction(pool);
-        await transaction.begin();
+        await client.query('BEGIN');
 
         try {
             // 1. อัปเดตผลรางวัลลงตาราง Yeeki_Rounds
             const result3Top = top_number.slice(-3);
             const result2Top = top_number.slice(-2);
 
-            await transaction.request()
-                .input('roundId', sql.Int, round_id)
-                .input('res8', sql.VarChar(8), super_number)
-                .input('res4', sql.VarChar(4), top_number)
-                .input('res3', sql.VarChar(3), result3Top)
-                .input('res2top', sql.VarChar(2), result2Top)
-                .input('res2bot', sql.VarChar(2), bottom_number)
-                .query(`
-                    UPDATE Yeeki_Rounds 
-                    SET result_8_super = @res8, 
-                        result_4_top = @res4, 
-                        result_3_top = @res3, 
-                        result_2_bottom = @res2bot,
-                        status = 'Completed' 
-                    WHERE round_id = @roundId
-                `);
+            await client.query(`
+                UPDATE Yeeki_Rounds 
+                SET result_8_super = $1, 
+                    result_4_top = $2, 
+                    result_3_top = $3, 
+                    result_2_bottom = $4,
+                    status = 'Completed' 
+                WHERE round_id = $5
+            `, [super_number, top_number, result3Top, bottom_number, round_id]);
 
             // 2. ดึงอัตราการจ่าย (Multiplier) ทั้งหมด
-            const ratesReq = await transaction.request().query(`SELECT lottery_type, multiplier FROM Yeeki_Prize_Rates`);
+            const ratesReq = await client.query(`SELECT lottery_type, multiplier FROM Yeeki_Prize_Rates`);
             const prizeRates = {};
-            ratesReq.recordset.forEach(r => prizeRates[r.lottery_type] = r.multiplier);
+            ratesReq.rows.forEach(r => prizeRates[r.lottery_type] = parseFloat(r.multiplier));
 
             // 3. ดึงรายการบิลที่รอตรวจของรอบนี้
-            const itemsReq = await transaction.request()
-                .input('roundId', sql.Int, round_id)
-                .query(`
-                    SELECT i.item_id, i.order_id, i.lottery_type, i.selected_number, i.price, o.user_id, o.currency_code
-                    FROM Yeeki_Order_Items i
-                    JOIN Yeeki_Orders o ON i.order_id = o.order_id
-                    WHERE o.round_id = @roundId AND i.status = N'รอผลตรวจ'
-                `);
+            const itemsReq = await client.query(`
+                SELECT i.item_id, i.order_id, i.lottery_type, i.selected_number, i.price, o.user_id, o.currency_code
+                FROM Yeeki_Order_Items i
+                JOIN Yeeki_Orders o ON i.order_id = o.order_id
+                WHERE o.round_id = $1 AND i.status = 'รอผลตรวจ'
+            `, [round_id]);
 
-            const items = itemsReq.recordset;
+            const items = itemsReq.rows;
 
             // 4. ลูปตรวจบิลทีละใบแบบเจาะลึก
             for (let item of items) {
@@ -5905,104 +5480,90 @@ app.post('/api/admin/execute-yeeki-draw', async (req, res) => {
 
                 if (isWin) {
                     const multiplier = prizeRates[type] || 0;
-                    const prizeAmount = item.price * multiplier;
+                    const prizeAmount = parseFloat(item.price) * multiplier;
 
                     // 4.1 อัปเดตสถานะบิลย่อยเป็น "ชนะ"
-                    await transaction.request()
-                        .input('itemId', sql.Int, item.item_id)
-                        .input('prizeAmt', sql.Decimal(18,2), prizeAmount)
-                        .query(`UPDATE Yeeki_Order_Items SET status = N'ชนะ', prize_amount = @prizeAmt WHERE item_id = @itemId`);
+                    await client.query(`UPDATE Yeeki_Order_Items SET status = 'ชนะ', prize_amount = $1 WHERE item_id = $2`, [prizeAmount, item.item_id]);
 
-                    // 4.2 โอนเงินเข้า Wallet ผู้ชนะ
-                    await transaction.request()
-                        .input('uid', sql.Int, item.user_id)
-                        .input('prize', sql.Decimal(18,2), prizeAmount)
-                        .query(`UPDATE Users SET wallet_balance = wallet_balance + @prize WHERE user_id = @uid`);
+                    // 4.2 โอนเงินเข้า Wallet ผู้ชนะ (ไม่อัปเดต Wallets เพราะคุณวิทยาให้ยึด Logic เดิมที่อัปเดตแค่ Users)
+                    await client.query(`UPDATE Users SET wallet_balance = COALESCE(wallet_balance, 0) + $1 WHERE user_id = $2`, [prizeAmount, item.user_id]);
 
                     // 4.3 สร้างประวัติเงินเข้า (Transactions) -> แก้ใช้คอลัมน์ title แล้ว
-                    await transaction.request()
-                        .input('uid', sql.Int, item.user_id)
-                        .input('prize', sql.Decimal(18,2), prizeAmount)
-                        .input('title', sql.NVarChar(255), `ถูกรางวัล ${type} (${num}) รอบที่ ${round_id}`)
-                        .query(`
-                            INSERT INTO Transactions (user_id, amount, transaction_type, title, status)
-                            VALUES (@uid, @prize, 'PRIZE_WIN', @title, 'Completed')
-                        `);
+                    await client.query(`
+                        INSERT INTO Transactions (user_id, amount, transaction_type, title, status, created_at)
+                        VALUES ($1, $2, 'PRIZE_WIN', $3, 'Completed', CURRENT_TIMESTAMP)
+                    `, [item.user_id, prizeAmount, `ถูกรางวัล ${type} (${num}) รอบที่ ${round_id}`]);
                 } else {
                     // 4.4 ถ้าไม่ถูกรางวัล อัปเดตเป็น "แพ้"
-                    await transaction.request()
-                        .input('itemId', sql.Int, item.item_id)
-                        .query(`UPDATE Yeeki_Order_Items SET status = N'แพ้' WHERE item_id = @itemId`);
+                    await client.query(`UPDATE Yeeki_Order_Items SET status = 'แพ้' WHERE item_id = $1`, [item.item_id]);
                 }
             }
 
-            await transaction.commit();
+            await client.query('COMMIT');
             res.json({ success: true, message: "ประกาศผลและโอนเงินรางวัลเสร็จสิ้น!" });
 
         } catch (innerErr) {
-            await transaction.rollback();
+            await client.query('ROLLBACK');
             throw innerErr;
         }
 
     } catch (err) {
         console.error("Execute Draw error:", err);
         res.status(500).json({ success: false, message: `Database Error: ${err.message}` });
+    } finally {
+        client.release();
     }
 });
-
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🌟 2. ดึงข้อมูล 24 รอบของวันนี้ (ทั้งหน้าบ้านและหลังบ้านใช้ร่วมกัน)
 // ==========================================
 app.get('/api/yeeki/rounds', async (req, res) => {
     try {
-        const pool = await sql.connect(dbConfig); 
-        
         // 🌟 ดึงข้อมูลรอบของวันนี้ (อิงเวลาไทย) และ กรองเฉพาะหวยยี่กี (category = 'YEEKI' หรือ NULL) ห้ามดึงหวยไทยมา
-        const result = await pool.request().query(`
+        const result = await pgPool.query(`
             SELECT 
                 round_id, 
                 round_number,
-                CONVERT(varchar, open_time, 120) as open_time,
-                CONVERT(varchar, close_time, 120) as close_time,
-                CONVERT(varchar, draw_time, 120) as draw_time,
+                to_char(open_time, 'YYYY-MM-DD HH24:MI:SS') as open_time,
+                to_char(close_time, 'YYYY-MM-DD HH24:MI:SS') as close_time,
+                to_char(draw_time, 'YYYY-MM-DD HH24:MI:SS') as draw_time,
                 status
             FROM Yeeki_Rounds 
-            WHERE CAST(draw_date AS DATE) = CAST(DATEADD(hour, 7, GETUTCDATE()) AS DATE) 
+            WHERE CAST(draw_date AS DATE) = CAST(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Bangkok' AS DATE) 
             AND (category = 'YEEKI' OR category IS NULL)
             ORDER BY round_number ASC
         `);
         
-        res.json({ success: true, rounds: result.recordset });
+        res.json({ success: true, rounds: result.rows });
     } catch (err) {
         console.error("Error fetching Yeeki rounds:", err);
         res.status(500).json({ success: false, message: err.message });
     }
-});                                                                                                                               
+});                                                                                             
 
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🌟 API ฝั่งหลังบ้าน (Admin) ดึงข้อมูลรอบตาม "วันที่เลือก" บนปฏิทิน
 // ==========================================
 app.get('/api/admin/yeeki-rounds', async (req, res) => {
     try {
         const { date } = req.query; // รับค่า YYYY-MM-DD จากปฏิทิน
-        const pool = await sql.connect(dbConfig); 
-        const result = await pool.request()
-            .input('draw_date_str', sql.VarChar, date) 
-            .query(`
-                SELECT 
-                    round_id, 
-                    round_number,
-                    CONVERT(varchar, open_time, 120) as open_time,
-                    CONVERT(varchar, close_time, 120) as close_time,
-                    CONVERT(varchar, draw_time, 120) as draw_time,
-                    status
-                FROM Yeeki_Rounds 
-                WHERE CAST(draw_date AS DATE) = CAST(@draw_date_str AS DATE) 
-                AND (category = 'YEEKI' OR category IS NULL)
-                ORDER BY round_number ASC
-            `);
+        const result = await pgPool.query(`
+            SELECT 
+                round_id, 
+                round_number,
+                to_char(open_time, 'YYYY-MM-DD HH24:MI:SS') as open_time,
+                to_char(close_time, 'YYYY-MM-DD HH24:MI:SS') as close_time,
+                to_char(draw_time, 'YYYY-MM-DD HH24:MI:SS') as draw_time,
+                status
+            FROM Yeeki_Rounds 
+            WHERE CAST(draw_date AS DATE) = CAST($1 AS DATE) 
+            AND (category = 'YEEKI' OR category IS NULL)
+            ORDER BY round_number ASC
+        `, [date]);
         
-        res.json({ success: true, rounds: result.recordset });
+        res.json({ success: true, rounds: result.rows });
     } catch (err) {
         console.error("Error admin fetch rounds:", err);
         res.status(500).json({ success: false, message: err.message });
@@ -6010,49 +5571,38 @@ app.get('/api/admin/yeeki-rounds', async (req, res) => {
 });
 
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🌟 3. อัปเดตตารางรอบ 24 รอบรวดเดียว (POST Bulk)
 // ==========================================
 app.post('/api/admin/yeeki-rounds/bulk', async (req, res) => {
     try {
         const { date, rounds } = req.body;
         
-        const pool = await sql.connect(dbConfig); 
-        
         for (const round of rounds) {
             const openTime = `${date} ${round.open_time}:00`;
             const closeTime = `${date} ${round.close_time}:00`;
             const drawTime = `${date} ${round.draw_time}:00`;
 
-            const check = await pool.request()
-                .input('draw_date_str', sql.VarChar, date)
-                .input('round_number', sql.Int, round.round_number)
-                .query(`
-                    SELECT round_id FROM Yeeki_Rounds 
-                    WHERE CAST(draw_date AS DATE) = CAST(@draw_date_str AS DATE) 
-                    AND round_number = @round_number 
-                    AND (category = 'YEEKI' OR category IS NULL)
-                `);
+            const check = await pgPool.query(`
+                SELECT round_id FROM Yeeki_Rounds 
+                WHERE CAST(draw_date AS DATE) = CAST($1 AS DATE) 
+                AND round_number = $2 
+                AND (category = 'YEEKI' OR category IS NULL)
+            `, [date, round.round_number]);
             
-            if (check.recordset.length > 0) {
+            if (check.rows.length > 0) {
                 // มีแล้ว -> Update
-                await pool.request()
-                    .input('id', sql.Int, check.recordset[0].round_id)
-                    .input('open', sql.DateTime, openTime)
-                    .input('close', sql.DateTime, closeTime)
-                    .input('draw', sql.DateTime, drawTime)
-                    .query(`UPDATE Yeeki_Rounds SET open_time = @open, close_time = @close, draw_time = @draw WHERE round_id = @id`);
+                await pgPool.query(`
+                    UPDATE Yeeki_Rounds 
+                    SET open_time = CAST($1 AS TIMESTAMP), close_time = CAST($2 AS TIMESTAMP), draw_time = CAST($3 AS TIMESTAMP) 
+                    WHERE round_id = $4
+                `, [openTime, closeTime, drawTime, check.rows[0].round_id]);
             } else {
                 // ยังไม่มี -> Insert (ตั้งค่าบังคับให้เป็น YEEKI ไปเลย)
-                await pool.request()
-                    .input('date_str', sql.VarChar, date)
-                    .input('num', sql.Int, round.round_number)
-                    .input('open', sql.DateTime, openTime)
-                    .input('close', sql.DateTime, closeTime)
-                    .input('draw', sql.DateTime, drawTime)
-                    .input('status', sql.VarChar, 'Pending')
-                    .input('category', sql.VarChar, 'YEEKI') // 🌟 เติมหมวดหมู่ให้ชัดเจนตอนสร้าง
-                    .query(`INSERT INTO Yeeki_Rounds (draw_date, round_number, open_time, close_time, draw_time, status, category) 
-                            VALUES (CAST(@date_str AS DATE), @num, @open, @close, @draw, @status, @category)`);
+                await pgPool.query(`
+                    INSERT INTO Yeeki_Rounds (draw_date, round_number, open_time, close_time, draw_time, status, category) 
+                    VALUES (CAST($1 AS DATE), $2, CAST($3 AS TIMESTAMP), CAST($4 AS TIMESTAMP), CAST($5 AS TIMESTAMP), $6, $7)
+                `, [date, round.round_number, openTime, closeTime, drawTime, 'Pending', 'YEEKI']);
             }
         }
         res.json({ success: true, message: "บันทึกข้อมูลตารางเวลาสำเร็จ!" });
@@ -6063,6 +5613,7 @@ app.post('/api/admin/yeeki-rounds/bulk', async (req, res) => {
 });
 
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🌟 4. อัปเดตทีละแถว จากการกดปุ่มแก้ไข (PUT)
 // ==========================================
 app.put('/api/admin/yeeki-rounds/:id', async (req, res) => {
@@ -6074,14 +5625,11 @@ app.put('/api/admin/yeeki-rounds/:id', async (req, res) => {
         const closeTime = `${draw_date} ${close_time}:00`;
         const drawTime = `${draw_date} ${draw_time}:00`;
 
-        const pool = await sql.connect(dbConfig);
-        
-        await pool.request()
-            .input('id', sql.Int, id)
-            .input('open', sql.DateTime, openTime)
-            .input('close', sql.DateTime, closeTime)
-            .input('draw', sql.DateTime, drawTime)
-            .query(`UPDATE Yeeki_Rounds SET open_time = @open, close_time = @close, draw_time = @draw WHERE round_id = @id`);
+        await pgPool.query(`
+            UPDATE Yeeki_Rounds 
+            SET open_time = CAST($1 AS TIMESTAMP), close_time = CAST($2 AS TIMESTAMP), draw_time = CAST($3 AS TIMESTAMP) 
+            WHERE round_id = $4
+        `, [openTime, closeTime, drawTime, id]);
             
         res.json({ success: true });
     } catch (err) {
@@ -6091,25 +5639,23 @@ app.put('/api/admin/yeeki-rounds/:id', async (req, res) => {
 });
 
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🌟 3. หัวใจอัจฉริยะ: ระบบแนะนำเลขเด็ด (ให้ระบบได้กำไรตามเป้า)
 // ==========================================
 app.post('/api/admin/suggest-yeeki-draw', async (req, res) => {
     try {
         const { targetPercent, round_id } = req.body;
-        const pool = await sql.connect(dbConfig);
 
         // 1. ดึงยอดซื้อทั้งหมดในรอบนี้
-        const ordersRes = await pool.request()
-            .input('roundId', sql.Int, round_id)
-            .query(`
-                SELECT oi.lottery_type, oi.selected_number, oi.price, pr.multiplier
-                FROM Yeeki_Order_Items oi
-                JOIN Yeeki_Orders o ON oi.order_id = o.order_id
-                JOIN Yeeki_Prize_Rates pr ON oi.lottery_type = pr.lottery_type
-                WHERE o.round_id = @roundId AND oi.status = N'รอผลตรวจ'
-            `);
+        const ordersRes = await pgPool.query(`
+            SELECT oi.lottery_type, oi.selected_number, oi.price, pr.multiplier
+            FROM Yeeki_Order_Items oi
+            JOIN Yeeki_Orders o ON oi.order_id = o.order_id
+            JOIN Yeeki_Prize_Rates pr ON CAST(oi.lottery_type AS VARCHAR) = CAST(pr.lottery_type AS VARCHAR)
+            WHERE o.round_id = $1 AND oi.status = 'รอผลตรวจ'
+        `, [round_id]);
         
-        const orders = ordersRes.recordset;
+        const orders = ordersRes.rows;
 
         // คำนวณยอดขายรวม
         const totalSales = orders.reduce((sum, item) => sum + Number(item.price), 0);
@@ -6214,33 +5760,31 @@ app.post('/api/admin/suggest-yeeki-draw', async (req, res) => {
         res.status(500).json({ success: false, message: err.message });
     }
 });
-
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 2. API: จำลองผลตรวจรางวัล (Analyze Draw)
 // ==========================================
 app.post('/api/admin/analyze-yeeki-draw', async (req, res) => {
     const { round_id, super_number, top_6, bottom_2 } = req.body; 
-    let pool;
     try {
-        pool = await sql.connect(dbConfig);
-        const exReq = await pool.request().query("SELECT rate FROM Exchange_Rates WHERE currency_pair = 'THB_LAK'");
-        const lakRate = exReq.recordset.length > 0 ? exReq.recordset[0].rate : 620;
+        const exReq = await pgPool.query("SELECT rate FROM ExchangeRates WHERE currency_pair = 'THB_LAK'");
+        const lakRate = exReq.rows.length > 0 ? parseFloat(exReq.rows[0].rate) : 620;
 
         const top_4 = top_6.slice(-4);
         const top_3 = top_6.slice(-3);
         const top_2 = top_6.slice(-2);
 
-        const itemsReq = await pool.request().input('roundId', sql.Int, round_id).query(`
+        const itemsReq = await pgPool.query(`
             SELECT i.lottery_type, i.selected_number, i.price, o.currency_code
             FROM Yeeki_Order_Items i
             JOIN Yeeki_Orders o ON i.order_id = o.order_id
-            WHERE o.round_id = @roundId AND i.status = N'รอผลตรวจ'
-        `);
-        const orders = itemsReq.recordset;
+            WHERE o.round_id = $1 AND i.status = 'รอผลตรวจ'
+        `, [round_id]);
+        const orders = itemsReq.rows;
 
-        const ratesReq = await pool.request().query(`SELECT lottery_type, multiplier FROM Yeeki_Prize_Rates`);
+        const ratesReq = await pgPool.query(`SELECT lottery_type, multiplier FROM Yeeki_Prize_Rates`);
         const prizeRates = {};
-        ratesReq.recordset.forEach(r => prizeRates[r.lottery_type] = r.multiplier);
+        ratesReq.rows.forEach(r => prizeRates[r.lottery_type] = parseFloat(r.multiplier));
 
         const analysis = {};
         ['8 ตัว (Super)', '6 ตัว', '4 ตัวท้าย', '3 ตัวบน', '3 ตัวโต๊ด', '2 ตัวบน', '2 ตัวล่าง', 'วิ่งบน', 'วิ่งล่าง'].forEach(t => 
@@ -6252,8 +5796,9 @@ app.post('/api/admin/analyze-yeeki-draw', async (req, res) => {
         for (let order of orders) {
             let isWin = false;
             const num = order.selected_number;
+            const orderPrice = parseFloat(order.price);
             
-            totalSalesTHB += order.currency_code === 'LAK' ? (order.price / lakRate) : order.price;
+            totalSalesTHB += order.currency_code === 'LAK' ? (orderPrice / lakRate) : orderPrice;
 
             if (order.lottery_type === '8 ตัว (Super)' && num === super_number) isWin = true;
             else if (order.lottery_type === '6 ตัว' && num === top_6) isWin = true;
@@ -6268,59 +5813,55 @@ app.post('/api/admin/analyze-yeeki-draw', async (req, res) => {
             else if (order.lottery_type === 'วิ่งล่าง' && bottom_2.includes(num)) isWin = true;
 
             if (isWin) {
-                const payout = order.price * (prizeRates[order.lottery_type] || 0);
+                const payout = orderPrice * (prizeRates[order.lottery_type] || 0);
                 const payoutTHB = order.currency_code === 'LAK' ? (payout / lakRate) : payout;
                 analysis[order.lottery_type].winner_count += 1;
                 analysis[order.lottery_type].total_payout_thb += payoutTHB;
             }
         }
         res.json({ success: true, totalSalesTHB, analysis: Object.values(analysis) });
-    } catch (err) { res.status(500).json({ success: false, message: err.message }); }
+    } catch (err) { 
+        console.error("Analyze draw error:", err);
+        res.status(500).json({ success: false, message: err.message }); 
+    }
 });
 
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🌟 API ดึงผลรางวัล ยอดขาย และบิลทั้งหมดเจาะจงตามรอบ
 // ==========================================
 app.get('/api/admin/yeeki-round-detail', async (req, res) => {
     const { round_id } = req.query;
     try {
-        const pool = await sql.connect(dbConfig);
-        
         // 1. ดึงผลการออกรางวัลของรอบนี้
-        const roundReq = await pool.request()
-            .input('roundId', sql.Int, round_id)
-            .query(`SELECT * FROM Yeeki_Rounds WHERE round_id = @roundId`);
+        const roundReq = await pgPool.query(`SELECT * FROM Yeeki_Rounds WHERE round_id = $1`, [round_id]);
             
         // 2. 💡 ดึง "บิลทั้งหมด" ของรอบนี้ (ไม่ต้องสนสถานะ เพื่อให้หน้าเว็บไปตรวจเอง)
-        const allOrdersReq = await pool.request()
-            .input('roundId', sql.Int, round_id)
-            .query(`
-                SELECT 
-                    r.round_number, u.username, i.lottery_type, i.selected_number, 
-                    i.price, o.currency_code, i.status, i.prize_amount
-                FROM Yeeki_Order_Items i
-                JOIN Yeeki_Orders o ON i.order_id = o.order_id
-                JOIN Yeeki_Rounds r ON o.round_id = r.round_id
-                JOIN Users u ON o.user_id = u.user_id
-                WHERE r.round_id = @roundId
-            `);
+        const allOrdersReq = await pgPool.query(`
+            SELECT 
+                r.round_number, u.username, i.lottery_type, i.selected_number, 
+                i.price, o.currency_code, i.status, i.prize_amount
+            FROM Yeeki_Order_Items i
+            JOIN Yeeki_Orders o ON i.order_id = o.order_id
+            JOIN Yeeki_Rounds r ON o.round_id = r.round_id
+            JOIN Users u ON o.user_id = u.user_id
+            WHERE r.round_id = $1
+        `, [round_id]);
 
         // 3. ดึงยอดขายรวม
-        const salesReq = await pool.request()
-            .input('roundId', sql.Int, round_id)
-            .query(`
-                SELECT o.currency_code, SUM(i.price) as total_sales
-                FROM Yeeki_Order_Items i
-                JOIN Yeeki_Orders o ON i.order_id = o.order_id
-                WHERE o.round_id = @roundId
-                GROUP BY o.currency_code
-            `);
+        const salesReq = await pgPool.query(`
+            SELECT o.currency_code, SUM(i.price) as total_sales
+            FROM Yeeki_Order_Items i
+            JOIN Yeeki_Orders o ON i.order_id = o.order_id
+            WHERE o.round_id = $1
+            GROUP BY o.currency_code
+        `, [round_id]);
 
         res.json({
             success: true,
-            round: roundReq.recordset[0],
-            all_orders: allOrdersReq.recordset, // 💡 ส่งบิลทั้งหมดไปให้หน้าเว็บ
-            sales: salesReq.recordset
+            round: roundReq.rows[0],
+            all_orders: allOrdersReq.rows, // 💡 ส่งบิลทั้งหมดไปให้หน้าเว็บ
+            sales: salesReq.rows
         });
     } catch (err) {
         console.error("Error in yeeki-round-detail:", err);
@@ -6329,19 +5870,19 @@ app.get('/api/admin/yeeki-round-detail', async (req, res) => {
 });
 
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🏦 API: จัดการบัญชีธนาคารรับฝากเงิน (Receiving Accounts)
 // ==========================================
 
 // 1. API: ดึงข้อมูลธนาคารทั้งหมด (GET)
 app.get('/api/admin/banks', async (req, res) => {
     try {
-        const pool = await sql.connect(dbConfig);
         // ดึงข้อมูลเรียงตาม bank_id
-        const result = await pool.request().query(`
+        const result = await pgPool.query(`
             SELECT * FROM Banks 
             ORDER BY bank_id ASC
         `);
-        res.json(result.recordset);
+        res.json(result.rows);
     } catch (err) {
         console.error("Error fetching banks:", err);
         res.status(500).json({ success: false, message: err.message });
@@ -6352,19 +5893,18 @@ app.get('/api/admin/banks', async (req, res) => {
 app.post('/api/admin/banks', async (req, res) => {
     const { bank_name, bank_code, account_name, account_number, currency, logo_url, is_active } = req.body;
     try {
-        const pool = await sql.connect(dbConfig);
-        await pool.request()
-            .input('bank_name', sql.NVarChar(100), bank_name)
-            .input('bank_code', sql.VarChar(20), bank_code)
-            .input('account_name', sql.NVarChar(100), account_name)
-            .input('account_number', sql.VarChar(50), account_number)
-            .input('currency', sql.VarChar(10), currency)
-            .input('logo_url', sql.NVarChar(sql.MAX), logo_url || '') // รองรับ Base64 ยาวๆ
-            .input('is_active', sql.Bit, is_active)
-            .query(`
-                INSERT INTO Banks (bank_name, bank_code, account_name, account_number, currency, logo_url, is_active, created_at)
-                VALUES (@bank_name, @bank_code, @account_name, @account_number, @currency, @logo_url, @is_active, GETDATE())
-            `);
+        await pgPool.query(`
+            INSERT INTO Banks (bank_name, bank_code, account_name, account_number, currency, logo_url, is_active, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP)
+        `, [
+            bank_name, 
+            bank_code, 
+            account_name, 
+            account_number, 
+            currency, 
+            logo_url || '', 
+            is_active ? '1' : '0'
+        ]);
             
         res.json({ success: true, message: 'เพิ่มบัญชีธนาคารสำเร็จ' });
     } catch (err) {
@@ -6379,27 +5919,26 @@ app.put('/api/admin/banks/:id', async (req, res) => {
     const { bank_name, bank_code, account_name, account_number, currency, logo_url, is_active } = req.body;
     
     try {
-        const pool = await sql.connect(dbConfig);
-        await pool.request()
-            .input('id', sql.Int, id)
-            .input('bank_name', sql.NVarChar(100), bank_name)
-            .input('bank_code', sql.VarChar(20), bank_code)
-            .input('account_name', sql.NVarChar(100), account_name)
-            .input('account_number', sql.VarChar(50), account_number)
-            .input('currency', sql.VarChar(10), currency)
-            .input('logo_url', sql.NVarChar(sql.MAX), logo_url || '') 
-            .input('is_active', sql.Bit, is_active)
-            .query(`
-                UPDATE Banks 
-                SET bank_name = @bank_name, 
-                    bank_code = @bank_code, 
-                    account_name = @account_name, 
-                    account_number = @account_number, 
-                    currency = @currency, 
-                    logo_url = @logo_url, 
-                    is_active = @is_active
-                WHERE bank_id = @id
-            `);
+        await pgPool.query(`
+            UPDATE Banks 
+            SET bank_name = $1, 
+                bank_code = $2, 
+                account_name = $3, 
+                account_number = $4, 
+                currency = $5, 
+                logo_url = $6, 
+                is_active = $7
+            WHERE bank_id = $8
+        `, [
+            bank_name, 
+            bank_code, 
+            account_name, 
+            account_number, 
+            currency, 
+            logo_url || '', 
+            is_active ? '1' : '0', 
+            id
+        ]);
             
         res.json({ success: true, message: 'อัปเดตบัญชีธนาคารสำเร็จ' });
     } catch (err) {
@@ -6407,16 +5946,13 @@ app.put('/api/admin/banks/:id', async (req, res) => {
         res.status(500).json({ success: false, message: err.message });
     }
 });
-
-
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🏆 API: ดึงประวัติการออกเลขยี่กีตามวันที่
 // ==========================================
 app.get('/api/admin/yeeki/history', async (req, res) => {
     const { date } = req.query; // รับค่าวันที่ YYYY-MM-DD
     try {
-        const pool = await sql.connect(dbConfig);
-        
         let query = `
             SELECT 
                 round_id, 
@@ -6431,21 +5967,17 @@ app.get('/api/admin/yeeki/history', async (req, res) => {
             WHERE status = 'Completed' 
         `;
 
+        let queryParams = [];
+
         if (date) {
-            // 🌟 แก้ไขตรงนี้: ลบ DATEADD ออก เพราะเวลาใน DB เป็นเวลาไทยอยู่แล้ว
-            query += ` AND CAST(draw_time AS DATE) = @targetDate `;
+            query += ` AND CAST(draw_time AS DATE) = CAST($1 AS DATE) `;
+            queryParams.push(date);
         }
         
         query += ` ORDER BY round_number DESC`;
 
-        const request = pool.request();
-        if (date) {
-            request.input('targetDate', sql.Date, date);
-        }
-
-        const result = await request.query(query);
-
-        res.json({ success: true, data: result.recordset });
+        const result = await pgPool.query(query, queryParams);
+        res.json({ success: true, data: result.rows });
 
     } catch (err) {
         console.error("Error fetching yeeki history:", err);
@@ -6459,25 +5991,24 @@ app.get('/api/admin/yeeki/history', async (req, res) => {
 
 
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 💸 [CLIENT] สร้างคำขอฝากเงิน (อัปเกรด: ค้นหาโปรโมชั่น 20% ให้อัตโนมัติ!)
 // ==========================================
 app.post('/api/p2p/request-deposit', async (req, res) => {
     try {
-        const { requester_id, amount, currency } = req.body; // 🌟 ไม่ต้องพึ่ง promo_id จากหน้าบ้านแล้ว
+        const { requester_id, amount, currency } = req.body; 
         if (!requester_id || !amount) return res.status(400).json({ success: false, message: 'ข้อมูลไม่ครบถ้วน' });
 
-        const pool = await sql.connect(dbConfig);
-        
         let bonus_amount = 0;
         let provider_reward = 0; 
         let board_timeout = 15;
         let bonusPercent = 0;
         
         // 🌟 1. ดึงการตั้งค่าหลักจากหน้าแอดมิน (P2P_Settings)
-        const settings = await pool.request().query('SELECT TOP 1 * FROM P2P_Settings');
+        const settings = await pgPool.query('SELECT * FROM P2P_Settings LIMIT 1');
         let config = {};
-        if (settings.recordset.length > 0) {
-            config = settings.recordset[0];
+        if (settings.rows.length > 0) {
+            config = settings.rows[0];
             
             // ดึงค่าคอมมิชชั่นคนรับงาน (เช่น 15%)
             provider_reward = (parseFloat(amount) * parseFloat(config.provider_reward_percent || 15)) / 100;
@@ -6489,41 +6020,31 @@ app.post('/api/p2p/request-deposit', async (req, res) => {
         }
 
        // 🌟 2. ค้นหาโปรโมชั่น "ที่กำลังทำงานอยู่" (เช็คจากเวลาปัจจุบัน)
-        const promoCheck = await pool.request().query(`
-            SELECT TOP 1 bonus_percent 
+        const promoCheck = await pgPool.query(`
+            SELECT bonus_percent 
             FROM P2P_Promotions 
-            WHERE DATEADD(hour, 7, GETUTCDATE()) BETWEEN start_time AND end_time 
+            WHERE CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Bangkok' BETWEEN start_time AND end_time 
             ORDER BY bonus_percent DESC
+            LIMIT 1
         `);
 
-        if (promoCheck.recordset.length > 0) {
+        if (promoCheck.rows.length > 0) {
             // ✅ ถ้าช่วงนี้มีโปรโมชั่น (เช่น 20%) ให้ใช้ค่านี้บวกเพิ่มให้ลูกค้า!
-            bonusPercent = parseFloat(promoCheck.recordset[0].bonus_percent);
+            bonusPercent = parseFloat(promoCheck.rows[0].bonus_percent);
         } else {
             // ✅ ถ้าหมดโปร หรือไม่มีโปรโมชั่น = ไม่ต้องบวกเพิ่ม (โบนัส 0%) คือยอดปกติ
             bonusPercent = 0;
         }
 
-       
-
         // คำนวณเงินโบนัส และยอดรับสุทธิ
         bonus_amount = (parseFloat(amount) * bonusPercent) / 100;
         const net_amount = parseFloat(amount) + bonus_amount;
 
-        // 🌟 3. บันทึกลงตาราง 
-        await pool.request()
-            .input('req_id', sql.Int, requester_id)
-            .input('type', sql.VarChar, 'DEPOSIT')
-            .input('curr', sql.VarChar, currency || 'THB')
-            .input('amt', sql.Decimal(18, 4), amount) // ใช้ 18,4 ป้องกันทศนิยมหาย
-            .input('bonus', sql.Decimal(18, 4), bonus_amount)
-            .input('net', sql.Decimal(18, 4), net_amount)
-            .input('reward', sql.Decimal(18, 4), provider_reward) 
-            .input('timeout', sql.Int, board_timeout) 
-            .query(`
-                INSERT INTO P2P_Requests (requester_id, request_type, currency, amount, bonus_or_fee, net_amount, provider_reward, status, created_at, expires_at) 
-                VALUES (@req_id, @type, @curr, @amt, @bonus, @net, @reward, 'PENDING', DATEADD(hour, 7, GETUTCDATE()), DATEADD(minute, @timeout, DATEADD(hour, 7, GETUTCDATE())))
-            `);
+        // 🌟 3. บันทึกลงตาราง (รองรับการบวกเวลา Interval นาที)
+        await pgPool.query(`
+            INSERT INTO P2P_Requests (requester_id, request_type, currency, amount, bonus_or_fee, net_amount, provider_reward, status, created_at, expires_at) 
+            VALUES ($1, $2, $3, $4, $5, $6, $7, 'PENDING', CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Bangkok', (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Bangkok') + ($8 || ' minutes')::interval)
+        `, [requester_id, 'DEPOSIT', currency || 'THB', amount, bonus_amount, net_amount, provider_reward, board_timeout]);
 
         res.json({ success: true, message: 'สร้างคำขอฝากเงินสำเร็จ' });
     } catch (err) {
@@ -6531,18 +6052,19 @@ app.post('/api/p2p/request-deposit', async (req, res) => {
         res.status(500).json({ success: false, message: err.message });
     }
 });
+
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // ⏱️ [ADMIN] ดึงข้อมูลตั้งค่าเวลา P2P (แพ็คคู่)
 // ==========================================
 app.get('/api/admin/p2p-time-setting', async (req, res) => {
     try {
-        const pool = await sql.connect(dbConfig);
-        const result = await pool.request().query('SELECT TOP 1 * FROM P2P_Settings');
-        if (result.recordset.length > 0) {
+        const result = await pgPool.query('SELECT * FROM P2P_Settings LIMIT 1');
+        if (result.rows.length > 0) {
             res.json({ 
                 success: true, 
-                board_timeout: result.recordset[0].mission_timeout_minutes || 30,
-                provider_timeout: result.recordset[0].provider_timeout_minutes || 15 
+                board_timeout: result.rows[0].mission_timeout_minutes || 30,
+                provider_timeout: result.rows[0].provider_timeout_minutes || 15 
             });
         } else {
             res.json({ success: true, board_timeout: 30, provider_timeout: 15 });
@@ -6553,25 +6075,19 @@ app.get('/api/admin/p2p-time-setting', async (req, res) => {
 });
 
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // ⏱️ [ADMIN] อัปเดตเวลาภารกิจ P2P (แพ็คคู่)
 // ==========================================
 app.post('/api/admin/p2p-time-update', async (req, res) => {
     try {
         const { board_timeout, provider_timeout } = req.body;
-        const pool = await sql.connect(dbConfig);
-        const check = await pool.request().query('SELECT COUNT(*) as count FROM P2P_Settings');
+        const check = await pgPool.query('SELECT CAST(COUNT(*) AS INTEGER) as count FROM P2P_Settings');
         
         try {
-            if (check.recordset[0].count === 0) {
-                await pool.request()
-                    .input('b_mins', sql.Int, board_timeout)
-                    .input('p_mins', sql.Int, provider_timeout)
-                    .query(`INSERT INTO P2P_Settings (mission_timeout_minutes, provider_timeout_minutes) VALUES (@b_mins, @p_mins)`);
+            if (check.rows[0].count === 0) {
+                await pgPool.query(`INSERT INTO P2P_Settings (mission_timeout_minutes, provider_timeout_minutes) VALUES ($1, $2)`, [board_timeout, provider_timeout]);
             } else {
-                await pool.request()
-                    .input('b_mins', sql.Int, board_timeout)
-                    .input('p_mins', sql.Int, provider_timeout)
-                    .query(`UPDATE P2P_Settings SET mission_timeout_minutes = @b_mins, provider_timeout_minutes = @p_mins`);
+                await pgPool.query(`UPDATE P2P_Settings SET mission_timeout_minutes = $1, provider_timeout_minutes = $2`, [board_timeout, provider_timeout]);
             }
             res.json({ success: true, message: 'บันทึกเวลา P2P ทั้ง 2 ระบบสำเร็จเรียบร้อย!' });
         } catch (sqlErr) {
@@ -6584,58 +6100,52 @@ app.post('/api/admin/p2p-time-update', async (req, res) => {
 
 
 // ==========================================
-// 🚀 [PROVIDER] ผู้รับงานกด "รับงาน" (ACCEPT JOB) - อัปเกรดกันเงินติดลบ & แก้บั๊กประเทศ
-// ==========================================
-// ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🚀 [PROVIDER] ผู้รับงานกด "รับงาน" (ACCEPT JOB) - อัปเกรดกันเงินติดลบ & แก้บั๊กประเทศ & แปลงสกุลเงินก่อนหัก
 // ==========================================
 app.post('/api/p2p/accept-job', async (req, res) => {
     try {
         const { provider_id, request_id } = req.body;
-        const pool = await sql.connect(dbConfig);
-        const transaction = new sql.Transaction(pool);
-        await transaction.begin();
-
+        const client = await pgPool.connect(); // ใช้ Transaction
+        
         try {
+            await client.query('BEGIN');
+
             // 1. ดึงข้อมูลงาน
-            const jobCheck = await transaction.request()
-                .input('rid', sql.Int, request_id)
-                .query(`
-                    SELECT r.*, u.country AS req_country, u.currency_code AS req_currency 
-                    FROM P2P_Requests r
-                    INNER JOIN users u ON r.requester_id = u.user_id
-                    WHERE r.request_id = @rid AND r.status = 'PENDING'
-                `);
+            const jobCheck = await client.query(`
+                SELECT r.*, u.country AS req_country, u.currency_code AS req_currency 
+                FROM P2P_Requests r
+                INNER JOIN users u ON r.requester_id = u.user_id
+                WHERE r.request_id = $1 AND r.status = 'PENDING'
+            `, [request_id]);
             
-            if (jobCheck.recordset.length === 0) {
+            if (jobCheck.rows.length === 0) {
                 throw new Error('งานนี้ถูกรับไปแล้ว หรือหมดเวลาแล้วครับ');
             }
-            const job = jobCheck.recordset[0];
+            const job = jobCheck.rows[0];
 
-            if (job.requester_id === provider_id) {
+            if (job.requester_id === parseInt(provider_id)) {
                 throw new Error('ไม่สามารถรับงานของตัวเองได้ครับ');
             }
 
             // 2. ดึงข้อมูล "บัญชีธนาคารของผู้รับงาน" (เช็คให้ตรงกับสกุลเงินของงาน) และสกุลเงินของ Wallet
-            const provBankCheck = await transaction.request()
-                .input('pid', sql.Int, provider_id)
-                .input('reqCurrency', sql.VarChar, job.req_currency) // สกุลเงินของงาน
-                .query(`
-                    SELECT TOP 1 ub.account_number, bk.bank_name, u.currency_code AS provider_wallet_currency
-                    FROM UserBanks ub
-                    INNER JOIN Banks bk ON ub.bank_id = bk.bank_id
-                    INNER JOIN users u ON ub.user_id = u.user_id
-                    WHERE ub.user_id = @pid 
-                    AND ub.currency_code = @reqCurrency  
-                    AND (ub.status = 'Approved' OR ub.status = 'APPROVED')
-                `);
+            const provBankCheck = await client.query(`
+                SELECT ub.account_number, bk.bank_name, u.currency_code AS provider_wallet_currency
+                FROM UserBanks ub
+                INNER JOIN Banks bk ON ub.bank_id = bk.bank_id
+                INNER JOIN users u ON ub.user_id = u.user_id
+                WHERE ub.user_id = $1 
+                AND ub.currency_code = $2  
+                AND (ub.status = 'Approved' OR ub.status = 'APPROVED')
+                LIMIT 1
+            `, [provider_id, job.req_currency]);
             
             // ถ้าหาบัญชีธนาคารไม่เจอ
-            if (provBankCheck.recordset.length === 0) {
+            if (provBankCheck.rows.length === 0) {
                 throw new Error(`ไม่สามารถรับงานได้! งานนี้สำหรับบัญชีสกุลเงิน ${job.req_currency} เท่านั้น (คุณต้องผูกและรออนุมัติบัญชีก่อน)`);
             }
 
-            const providerWalletCurrency = provBankCheck.recordset[0].provider_wallet_currency;
+            const providerWalletCurrency = provBankCheck.rows[0].provider_wallet_currency;
 
             // 3. แยก Logics ตามประเภทงาน (DEPOSIT / WITHDRAW)
             if (job.request_type === 'DEPOSIT') {
@@ -6643,13 +6153,12 @@ app.post('/api/p2p/accept-job', async (req, res) => {
                 let requireAmountInProviderCurrency = parseFloat(job.amount);
 
                 if (providerWalletCurrency !== job.currency) {
-                     const rateCheck = await transaction.request()
-                        .input('pair1', sql.VarChar, `${job.currency}_${providerWalletCurrency}`)
-                        .input('pair2', sql.VarChar, `${providerWalletCurrency}_${job.currency}`)
-                        .query(`SELECT currency_pair, rate FROM ExchangeRates WHERE currency_pair = @pair1 OR currency_pair = @pair2`);
+                     const rateCheck = await client.query(`
+                        SELECT currency_pair, rate FROM ExchangeRates WHERE currency_pair = $1 OR currency_pair = $2
+                     `, [`${job.currency}_${providerWalletCurrency}`, `${providerWalletCurrency}_${job.currency}`]);
                     
-                    if (rateCheck.recordset.length > 0) {
-                        const exRate = rateCheck.recordset[0];
+                    if (rateCheck.rows.length > 0) {
+                        const exRate = rateCheck.rows[0];
                         if (exRate.currency_pair === `${job.currency}_${providerWalletCurrency}`) {
                             requireAmountInProviderCurrency = requireAmountInProviderCurrency * parseFloat(exRate.rate);
                         } else {
@@ -6661,93 +6170,84 @@ app.post('/api/p2p/accept-job', async (req, res) => {
                 }
 
                 // เช็คเงินค้ำประกัน (เทียบกับยอดที่แปลงแล้ว)
-                const provWalletCheck = await transaction.request()
-                    .input('pid', sql.Int, provider_id)
-                    .query('SELECT balance FROM Wallets WHERE user_id = @pid');
-                
-                const provBalance = parseFloat(provWalletCheck.recordset[0].balance || 0);
+                const provWalletCheck = await client.query('SELECT balance FROM Wallets WHERE user_id = $1', [provider_id]);
+                const provBalance = parseFloat(provWalletCheck.rows[0].balance || 0);
 
                 if (provBalance < requireAmountInProviderCurrency) {
                     throw new Error(`ยอดเงินค้ำประกันไม่พอ (คุณต้องมีอย่างน้อย ${requireAmountInProviderCurrency.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})} ${providerWalletCurrency})`);
                 }
 
                 // หักเงินค้ำประกัน (หักเป็นยอดที่แปลงแล้ว)
-                const escrowUpdate = await transaction.request()
-                    .input('pid', sql.Int, provider_id)
-                    .input('amt', sql.Decimal(18, 4), requireAmountInProviderCurrency)
-                    .query(`UPDATE Wallets SET balance = balance - @amt WHERE user_id = @pid AND balance >= @amt`);
+                const escrowUpdate = await client.query(`
+                    UPDATE Wallets SET balance = balance - $1 WHERE user_id = $2 AND balance >= $1
+                `, [requireAmountInProviderCurrency, provider_id]);
 
-                if (escrowUpdate.rowsAffected[0] === 0) {
+                if (escrowUpdate.rowCount === 0) {
                     throw new Error('ยอดเงินค้ำประกันไม่เพียงพอ หรือมีการทำรายการซ้อนทับกันครับ');
                 }
 
-                // บันทึก Transaction (โชว์ยอดที่หักเป็นสกุลเงินของ Wallet)
-                await transaction.request()
-                    .input('pid', sql.Int, provider_id)
-                    .input('amt', sql.Decimal(18, 4), requireAmountInProviderCurrency)
-                    .input('reqId', sql.Int, request_id)
-                    .input('jobAmt', sql.Decimal(18,4), job.amount)
-                    .input('jobCurr', sql.VarChar, job.currency)
-                    .query(`
-                        INSERT INTO Transactions (user_id, amount, transaction_type, title, status, created_at) 
-                        VALUES (@pid, -@amt, 'P2P_Escrow', N'หักเงินค้ำประกัน รอโอน P2P (Job ID: ' + CAST(@reqId AS NVARCHAR) + N') [' + CAST(FORMAT(@jobAmt, 'N2') AS NVARCHAR) + ' ' + @jobCurr + ']', 'Completed', GETDATE());
-                    `);
+                // บันทึก Transaction (ประกอบ String Message จาก Node.js ป้องกัน Syntax SQL)
+                const jobAmountFormatted = parseFloat(job.amount).toFixed(2);
+                const titleText = `หักเงินค้ำประกัน รอโอน P2P (Job ID: ${request_id}) [${jobAmountFormatted} ${job.currency}]`;
+
+                await client.query(`
+                    INSERT INTO Transactions (user_id, amount, transaction_type, title, status, created_at) 
+                    VALUES ($1, $2, 'P2P_Escrow', $3, 'Completed', CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Bangkok')
+                `, [provider_id, -requireAmountInProviderCurrency, titleText]);
             } 
 
             // 4. เปลี่ยนสถานะงานเป็น ACCEPTED 
-            await transaction.request()
-                .input('rid', sql.Int, request_id)
-                .input('pid', sql.Int, provider_id)
-                .query(`
-                    UPDATE P2P_Requests 
-                    SET status = 'ACCEPTED', 
-                        provider_id = @pid, 
-                        accepted_at = DATEADD(hour, 7, GETUTCDATE()) 
-                    WHERE request_id = @rid
-                `);
+            await client.query(`
+                UPDATE P2P_Requests 
+                SET status = 'ACCEPTED', 
+                    provider_id = $1, 
+                    accepted_at = CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Bangkok' 
+                WHERE request_id = $2
+            `, [provider_id, request_id]);
 
-            await transaction.commit();
+            await client.query('COMMIT');
             res.json({ success: true, message: '✅ รับงานสำเร็จ! กรุณาตรวจสอบและดำเนินการตามเวลาที่กำหนด' });
 
-        } catch (err) {
-            await transaction.rollback(); 
-            throw err;
+        } catch (innerErr) {
+            await client.query('ROLLBACK'); 
+            throw innerErr;
+        } finally {
+            client.release();
         }
     } catch (err) {
         console.error("Accept Job Error:", err);
         res.status(400).json({ success: false, message: err.message });
     }
 });
+
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🚫 [API] ยกเลิกงาน P2P (คืนเงินค้ำประกัน + บันทึกประวัติ)
 // ==========================================
 app.post('/api/p2p/cancel-job', async (req, res) => {
     try {
         const { provider_id, request_id } = req.body;
-        const pool = await sql.connect(dbConfig);
 
         // 1. เช็คข้อมูลงาน
-        const reqResult = await pool.request()
-            .input('reqId', sql.Int, request_id)
-            .query(`SELECT * FROM P2P_Requests WHERE request_id = @reqId`);
+        const reqResult = await pgPool.query(`SELECT * FROM P2P_Requests WHERE request_id = $1`, [request_id]);
             
-        if (reqResult.recordset.length === 0) return res.json({ success: false, message: 'ไม่พบงานนี้ในระบบ' });
-        const mission = reqResult.recordset[0];
+        if (reqResult.rows.length === 0) return res.json({ success: false, message: 'ไม่พบงานนี้ในระบบ' });
+        const mission = reqResult.rows[0];
 
         // ต้องเป็นสถานะ ACCEPTED และต้องเป็นคนที่รับงานนี้จริงๆ เท่านั้นถึงจะยกเลิกได้
-        if (mission.status !== 'ACCEPTED' || mission.provider_id !== provider_id) {
+        if (mission.status !== 'ACCEPTED' || mission.provider_id !== parseInt(provider_id)) {
             return res.json({ success: false, message: 'ไม่สามารถยกเลิกได้ สถานะไม่ถูกต้อง หรือคุณไม่ใช่ผู้รับงานนี้' });
         }
 
         // 2. คำนวณยอดเงินที่ต้องคืน (ใช้โลจิกเดียวกับตอนหักเงิน)
-        // 🛠️ กำหนดกระเป๋าหลักเป็น THB เพื่อป้องกัน Error 500 Invalid column name 'currency' 
+        // 🛠️ กำหนดกระเป๋าหลักเป็น THB 
         const providerCurrency = 'THB'; 
         let refundAmount = parseFloat(mission.amount);
 
         // คำนวณเรทเงินให้ตรงกับตอนที่หักไป
         if (providerCurrency !== mission.currency) {
-            const rateResult = await pool.request().query('SELECT * FROM ExchangeRates');
-            const rates = rateResult.recordset;
+            const rateResult = await pgPool.query('SELECT * FROM ExchangeRates');
+            const rates = rateResult.rows;
             const rateObj = rates.find(r => r.currency_pair === `${providerCurrency}_${mission.currency}`);
             const reverseRateObj = rates.find(r => r.currency_pair === `${mission.currency}_${providerCurrency}`);
             
@@ -6757,34 +6257,25 @@ app.post('/api/p2p/cancel-job', async (req, res) => {
         }
 
         // 3. คืนเงินกลับเข้า Wallet (บวกเงินกลับ)
-        await pool.request()
-            .input('uid', sql.Int, provider_id)
-            .input('amount', sql.Decimal(18, 2), refundAmount)
-            .query(`UPDATE Wallets SET balance = balance + @amount WHERE user_id = @uid`);
+        await pgPool.query(`UPDATE Wallets SET balance = balance + $1 WHERE user_id = $2`, [refundAmount, provider_id]);
 
         // 4. 📝 บันทึกประวัติการคืนเงินลงตาราง Transactions (ทิ้งหลักฐาน)
-        // (💡 หมายเหตุ: หากตาราง Transactions ของเจ้านายใช้ชื่อคอลัมน์อื่น เช่น ใช้ 'details' แทน 'description' ให้แก้ในบรรทัด INSERT ได้เลยครับ)
-        // 4. 📝 บันทึกประวัติการคืนเงินลงตาราง Transactions (ทิ้งหลักฐาน)
-        await pool.request()
-            .input('uid', sql.Int, provider_id)
-            .input('amount', sql.Decimal(18, 2), refundAmount)
-            .input('note', sql.NVarChar, `โอนกลับเป็นเงินโอนกลับจากการยกเลิกงาน P2P (Job ID: ${request_id})`)
-            .query(`
+        await pgPool.query(`
                 INSERT INTO Transactions (user_id, amount, transaction_type, status, title, created_at)
-                VALUES (@uid, @amount, 'P2P_REFUND', 'Completed', @note, GETDATE())
-            `);
+                VALUES ($1, $2, 'P2P_REFUND', 'Completed', $3, CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Bangkok')
+            `, [provider_id, refundAmount, `โอนกลับเป็นเงินโอนกลับจากการยกเลิกงาน P2P (Job ID: ${request_id})`]
+        );
 
         // 5. ปล่อยงานกลับสู่บอร์ด (รีเซ็ตสถานะกลับเป็น PENDING และล้างค่าเวลาออก)
-        await pool.request()
-            .input('reqId', sql.Int, request_id)
-            .query(`
+        await pgPool.query(`
                 UPDATE P2P_Requests 
                 SET status = 'PENDING', 
                     provider_id = NULL, 
                     accepted_at = NULL, 
                     expires_at = NULL 
-                WHERE request_id = @reqId
-            `);
+                WHERE request_id = $1
+            `, [request_id]
+        );
 
         res.json({ success: true, message: 'ยกเลิกงานและคืนเงินค้ำประกันเรียบร้อยแล้ว!' });
     } catch (err) {
@@ -6793,74 +6284,68 @@ app.post('/api/p2p/cancel-job', async (req, res) => {
     }
 });
 
+// ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
+// ✅ [API] ตรวจสอบสลิปและจบงาน P2P
+// ==========================================
 app.post('/api/p2p/verify-slip', async (req, res) => {
     try {
         const { provider_id, request_id, is_correct } = req.body;
-        const pool = await sql.connect(dbConfig);
 
-        const reqData = await pool.request()
-            .input('rid', sql.Int, request_id)
-            .input('provider_id', sql.Int, provider_id)
-            .query(`SELECT * FROM P2P_Requests WHERE request_id = @rid AND provider_id = @provider_id`);
+        const reqData = await pgPool.query(`SELECT * FROM P2P_Requests WHERE request_id = $1 AND provider_id = $2`, [request_id, provider_id]);
         
-        if (reqData.recordset.length === 0) {
+        if (reqData.rows.length === 0) {
             return res.status(400).json({ success: false, message: '❌ ไม่พบข้อมูลงาน หรือคุณไม่ใช่ผู้รับงานนี้' });
         }
 
-        const job = reqData.recordset[0];
+        const job = reqData.rows[0];
         const jobCurrency = job.currency;
 
         if (job.status !== 'VERIFYING' && job.status !== 'ACCEPTED') {
             return res.status(400).json({ success: false, message: '⚠️ งานนี้ถูกดำเนินการเสร็จสิ้น หรือถูกยกเลิกไปแล้วครับ' });
         }
 
-        const transaction = new sql.Transaction(pool);
-        await transaction.begin();
+        const client = await pgPool.connect();
+        await client.query('BEGIN');
 
         try {
             // 🌟 1. ค้นหายอดค้ำประกัน "ของจริง" ที่โดนหักไป (เผื่อไว้ใช้ตอนสลิปปลอม จะได้คืนให้)
-            const escrowCheck = await transaction.request()
-                .input('pid', sql.Int, provider_id)
-                .input('reqId', sql.Int, request_id)
-                .query(`
-                    SELECT TOP 1 ABS(amount) as deducted_amount 
-                    FROM Transactions 
-                    WHERE user_id = @pid 
-                      AND title LIKE N'%Job ID: ' + CAST(@reqId AS NVARCHAR) + N'%' 
-                      AND amount < 0
-                    ORDER BY transaction_id DESC
-                `);
+            const escrowCheck = await client.query(`
+                SELECT ABS(amount) as deducted_amount 
+                FROM Transactions 
+                WHERE user_id = $1 
+                  AND title LIKE $2 
+                  AND amount < 0
+                ORDER BY transaction_id DESC
+                LIMIT 1
+            `, [provider_id, `%Job ID: ${request_id}%`]);
             
-            const actualEscrow = escrowCheck.recordset.length > 0 ? parseFloat(escrowCheck.recordset[0].deducted_amount) : parseFloat(job.amount);
+            const actualEscrow = escrowCheck.rows.length > 0 ? parseFloat(escrowCheck.rows[0].deducted_amount) : parseFloat(job.amount);
 
             if (is_correct) {
                 // ✅ 1. เติมเงินให้คนฝาก (เอาเงินค้ำประกันไปให้คนฝาก)
-                await transaction.request()
-                    .input('uid', sql.Int, job.requester_id)
-                    .input('net', sql.Decimal(18, 4), job.net_amount)
-                    .input('reqId', sql.Int, request_id)
-                    .query(`
-                        UPDATE Wallets SET balance = balance + @net WHERE user_id = @uid;
-                        INSERT INTO Transactions (user_id, amount, transaction_type, title, status, created_at) 
-                        VALUES (@uid, @net, 'Deposit', N'รับเงินฝากผ่านระบบ P2P (งาน ID: ' + CAST(@reqId AS NVARCHAR) + N')', 'Completed', GETDATE());
-                    `);
+                await client.query(`UPDATE Wallets SET balance = balance + $1 WHERE user_id = $2`, [job.net_amount, job.requester_id]);
+                
+                await client.query(`
+                    INSERT INTO Transactions (user_id, amount, transaction_type, title, status, created_at) 
+                    VALUES ($1, $2, 'Deposit', $3, 'Completed', CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Bangkok')
+                `, [job.requester_id, job.net_amount, `รับเงินฝากผ่านระบบ P2P (งาน ID: ${request_id})`]);
 
                 // ✅ 2. จ่ายเฉพาะ "ค่าคอมมิชชั่น" ให้คนรับงาน (🚨 ไม่คืนเงินต้น เพราะรับเงินเข้าบัญชีธนาคารไปแล้ว)
                 let rewardAmount = parseFloat(job.provider_reward); // ค่าคอมตั้งต้น
                 
                 // ดึงสกุลเงินของคนรับงาน
-                const provInfo = await transaction.request().input('pid', sql.Int, provider_id).query(`SELECT currency_code FROM users WHERE user_id = @pid`);
-                const provCurrency = provInfo.recordset[0].currency_code; 
+                const provInfo = await client.query(`SELECT currency_code FROM users WHERE user_id = $1`, [provider_id]);
+                const provCurrency = provInfo.rows[0].currency_code; 
 
                 // 🔄 แปลงสกุลเงินค่าคอม 
                 if (provCurrency !== jobCurrency) {
-                    const rateCheck = await transaction.request()
-                        .input('pair1', sql.VarChar, `${jobCurrency}_${provCurrency}`)
-                        .input('pair2', sql.VarChar, `${provCurrency}_${jobCurrency}`)
-                        .query(`SELECT currency_pair, rate FROM ExchangeRates WHERE currency_pair = @pair1 OR currency_pair = @pair2`);
+                    const rateCheck = await client.query(`
+                        SELECT currency_pair, rate FROM ExchangeRates WHERE currency_pair = $1 OR currency_pair = $2
+                    `, [`${jobCurrency}_${provCurrency}`, `${provCurrency}_${jobCurrency}`]);
                     
-                    if (rateCheck.recordset.length > 0) {
-                        const exRate = rateCheck.recordset[0];
+                    if (rateCheck.rows.length > 0) {
+                        const exRate = rateCheck.rows[0];
                         if (exRate.currency_pair === `${jobCurrency}_${provCurrency}`) {
                             rewardAmount = rewardAmount * parseFloat(exRate.rate);
                         } else {
@@ -6870,48 +6355,40 @@ app.post('/api/p2p/verify-slip', async (req, res) => {
                 }
 
                 // 💳 โอนเงินเข้า Wallet ผู้รับงาน (ใส่แค่ค่าคอม)
-                await transaction.request()
-                    .input('pid', sql.Int, provider_id)
-                    .input('reward', sql.Decimal(18, 4), rewardAmount)
-                    .input('reqId', sql.Int, request_id)
-                    .query(`
-                        UPDATE Wallets SET balance = balance + @reward WHERE user_id = @pid;
-                        
-                        -- บันทึกแค่รายการค่าคอมมิชชั่นรายการเดียว
-                        INSERT INTO Transactions (user_id, amount, transaction_type, title, status, created_at) 
-                        VALUES (@pid, @reward, 'P2P_Income', N'รับค่าคอมมิชชั่นภารกิจฝาก P2P (งาน ID: ' + CAST(@reqId AS NVARCHAR) + N')', 'Completed', GETDATE());
-                    `);
+                await client.query(`UPDATE Wallets SET balance = balance + $1 WHERE user_id = $2`, [rewardAmount, provider_id]);
+                
+                await client.query(`
+                    INSERT INTO Transactions (user_id, amount, transaction_type, title, status, created_at) 
+                    VALUES ($1, $2, 'P2P_Income', $3, 'Completed', CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Bangkok')
+                `, [provider_id, rewardAmount, `รับค่าคอมมิชชั่นภารกิจฝาก P2P (งาน ID: ${request_id})`]);
 
                 // ✅ 3. แจกคอมมิชชั่นให้ "ผู้แนะนำ" (แปลงสกุลเงินด้วย)
-                const setDb = await transaction.request().query('SELECT TOP 1 referrer_reward_percent FROM P2P_Settings');
-                const refPercent = setDb.recordset.length > 0 ? parseFloat(setDb.recordset[0].referrer_reward_percent) : 0;
+                const setDb = await client.query('SELECT referrer_reward_percent FROM P2P_Settings LIMIT 1');
+                const refPercent = setDb.rows.length > 0 ? parseFloat(setDb.rows[0].referrer_reward_percent) : 0;
 
                 if (refPercent > 0) {
-                    const refCheck = await transaction.request()
-                        .input('pid', sql.Int, provider_id)
-                        .query(`
-                            SELECT ref.user_id AS referrer_id, ref.currency_code AS ref_curr, me.username AS provider_name 
-                            FROM users me 
-                            INNER JOIN users ref ON me.referrer_username = ref.username 
-                            WHERE me.user_id = @pid
-                        `);
+                    const refCheck = await client.query(`
+                        SELECT ref.user_id AS referrer_id, ref.currency_code AS ref_curr, me.username AS provider_name 
+                        FROM users me 
+                        INNER JOIN users ref ON me.referrer_username = ref.username 
+                        WHERE me.user_id = $1
+                    `, [provider_id]);
                     
-                    if (refCheck.recordset.length > 0 && refCheck.recordset[0].referrer_id) {
-                        const referrerId = refCheck.recordset[0].referrer_id;
-                        const providerName = refCheck.recordset[0].provider_name; 
-                        const refCurrency = refCheck.recordset[0].ref_curr; 
+                    if (refCheck.rows.length > 0 && refCheck.rows[0].referrer_id) {
+                        const referrerId = refCheck.rows[0].referrer_id;
+                        const providerName = refCheck.rows[0].provider_name; 
+                        const refCurrency = refCheck.rows[0].ref_curr; 
                         
                         let finalRefReward = (parseFloat(job.amount) * refPercent) / 100; 
 
                         // 🔄 แปลงสกุลเงินค่าแนะนำ
                         if (refCurrency !== jobCurrency) {
-                            const refRateCheck = await transaction.request()
-                                .input('pair1', sql.VarChar, `${jobCurrency}_${refCurrency}`)
-                                .input('pair2', sql.VarChar, `${refCurrency}_${jobCurrency}`)
-                                .query(`SELECT currency_pair, rate FROM ExchangeRates WHERE currency_pair = @pair1 OR currency_pair = @pair2`);
+                            const refRateCheck = await client.query(`
+                                SELECT currency_pair, rate FROM ExchangeRates WHERE currency_pair = $1 OR currency_pair = $2
+                            `, [`${jobCurrency}_${refCurrency}`, `${refCurrency}_${jobCurrency}`]);
                             
-                            if (refRateCheck.recordset.length > 0) {
-                                const exRate2 = refRateCheck.recordset[0];
+                            if (refRateCheck.rows.length > 0) {
+                                const exRate2 = refRateCheck.rows[0];
                                 if (exRate2.currency_pair === `${jobCurrency}_${refCurrency}`) {
                                     finalRefReward = finalRefReward * parseFloat(exRate2.rate);
                                 } else {
@@ -6920,95 +6397,77 @@ app.post('/api/p2p/verify-slip', async (req, res) => {
                             }
                         }
 
-                        await transaction.request()
-                            .input('refId', sql.Int, referrerId)
-                            .input('reward', sql.Decimal(18, 4), finalRefReward)
-                            .input('reqId', sql.Int, request_id)
-                            .input('pName', sql.NVarChar, providerName) 
-                            .query(`
-                                UPDATE Wallets SET balance = balance + @reward WHERE user_id = @refId;
-                                INSERT INTO Transactions (user_id, amount, transaction_type, title, status, created_at) 
-                                VALUES (@refId, @reward, 'Affiliate', N'ค่าคอมมิชชั่นแนะนำเพื่อนรับงาน P2P จากคุณ ' + @pName + N' (งาน ID: ' + CAST(@reqId AS NVARCHAR) + N')', 'Completed', GETDATE());
-                            `);
+                        await client.query(`UPDATE Wallets SET balance = balance + $1 WHERE user_id = $2`, [finalRefReward, referrerId]);
+                        
+                        await client.query(`
+                            INSERT INTO Transactions (user_id, amount, transaction_type, title, status, created_at) 
+                            VALUES ($1, $2, 'Affiliate', $3, 'Completed', CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Bangkok')
+                        `, [referrerId, finalRefReward, `ค่าคอมมิชชั่นแนะนำเพื่อนรับงาน P2P จากคุณ ${providerName} (งาน ID: ${request_id})`]);
                     }
                 }
 
                 // ✅ 4. ปิดงาน
-                await transaction.request()
-                    .input('rid', sql.Int, request_id)
-                    .query(`UPDATE P2P_Requests SET status = 'COMPLETED', completed_at = GETDATE() WHERE request_id = @rid`);
+                await client.query(`UPDATE P2P_Requests SET status = 'COMPLETED', completed_at = CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Bangkok' WHERE request_id = $1`, [request_id]);
                 
             } else {
                 // ❌ กรณีเงินไม่เข้า / สลิปปลอม
                 
                 // คืนเงินค้ำประกันเต็มจำนวน เพราะคนรับงานไม่ได้เงินเข้าธนาคาร
-                await transaction.request()
-                    .input('pid', sql.Int, provider_id)
-                    .input('amt', sql.Decimal(18, 4), actualEscrow)
-                    .input('reqId', sql.Int, request_id)
-                    .query(`
-                        UPDATE Wallets SET balance = balance + @amt WHERE user_id = @pid;
-                        INSERT INTO Transactions (user_id, amount, transaction_type, title, status, created_at) 
-                        VALUES (@pid, @amt, 'P2P_Refund', N'คืนเงินมัดจำ P2P เนื่องจากลูกค้าไม่โอนเงิน (งาน ID: ' + CAST(@reqId AS NVARCHAR) + N')', 'Completed', GETDATE());
-                    `);
+                await client.query(`UPDATE Wallets SET balance = balance + $1 WHERE user_id = $2`, [actualEscrow, provider_id]);
                 
-                await transaction.request()
-                    .input('rid', sql.Int, request_id)
-                    .query(`UPDATE P2P_Requests SET status = 'CANCELLED', completed_at = GETDATE() WHERE request_id = @rid`);
+                await client.query(`
+                    INSERT INTO Transactions (user_id, amount, transaction_type, title, status, created_at) 
+                    VALUES ($1, $2, 'P2P_Refund', $3, 'Completed', CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Bangkok')
+                `, [provider_id, actualEscrow, `คืนเงินมัดจำ P2P เนื่องจากลูกค้าไม่โอนเงิน (งาน ID: ${request_id})`]);
+                
+                await client.query(`UPDATE P2P_Requests SET status = 'CANCELLED', completed_at = CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Bangkok' WHERE request_id = $1`, [request_id]);
 
                 // 🌟 ระบบแบนบัญชีลูกค้า 
-                const banCheck = await transaction.request()
-                    .input('uid', sql.Int, job.requester_id)
-                    .query(`
-                        UPDATE users 
-                        SET p2p_cancel_count = ISNULL(p2p_cancel_count, 0) + 1 
-                        OUTPUT INSERTED.p2p_cancel_count
-                        WHERE user_id = @uid
-                    `);
+                const banCheck = await client.query(`
+                    UPDATE users 
+                    SET p2p_cancel_count = COALESCE(p2p_cancel_count, 0) + 1 
+                    WHERE user_id = $1
+                    RETURNING p2p_cancel_count
+                `, [job.requester_id]);
                 
                 const maxStrikes = 3; 
 
-                if (banCheck.recordset[0].p2p_cancel_count >= maxStrikes) {
-                    await transaction.request()
-                        .input('uid', sql.Int, job.requester_id)
-                        .query(`UPDATE users SET is_active = 0 WHERE user_id = @uid`); 
+                if (banCheck.rows[0].p2p_cancel_count >= maxStrikes) {
+                    await client.query(`UPDATE users SET is_active = '0' WHERE user_id = $1`, [job.requester_id]); 
                 }
             }
 
-            await transaction.commit();
+            await client.query('COMMIT');
             res.json({ success: true, message: is_correct ? '✅ จบภารกิจ! โอนเงินและจ่ายคอมมิชชั่นสำเร็จ' : '⚠️ ยกเลิกคำขอ และคืนเงินมัดจำให้คุณแล้ว' });
 
-        } catch (err) {
-            await transaction.rollback();
-            throw err;
+        } catch (innerErr) {
+            await client.query('ROLLBACK');
+            throw innerErr;
+        } finally {
+            client.release();
         }
     } catch (err) {
         console.error("Verify Slip Error:", err);
         res.status(400).json({ success: false, message: 'Server Error: ' + err.message });
     }
 });
+
 // ==========================================
-// 🌟 4. [REQUESTER] ลูกค้ายืนยันการได้รับเงินโอน (ฝั่งถอนเงิน) - ฉบับมีจ่ายค่าคอมฯ ผู้แนะนำ!
-// ==========================================
-// ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🌟 4. [REQUESTER] ลูกค้ายืนยันการได้รับเงินโอน (ฝั่งถอนเงิน) - ฉบับสมบูรณ์ (แยก Transaction ยอดเงินต้น/ค่าคอม)
 // ==========================================
 app.post('/api/p2p/confirm-withdraw-receipt', async (req, res) => {
     try {
         const { requester_id, request_id, verify_status } = req.body;
-        const pool = await sql.connect(dbConfig);
 
         // 1. ตรวจสอบข้อมูลงาน
-        const reqData = await pool.request()
-            .input('rid', sql.Int, request_id)
-            .input('uid', sql.Int, requester_id)
-            .query(`SELECT * FROM P2P_Requests WHERE request_id = @rid AND requester_id = @uid`);
+        const reqData = await pgPool.query(`SELECT * FROM P2P_Requests WHERE request_id = $1 AND requester_id = $2`, [request_id, requester_id]);
         
-        if (reqData.recordset.length === 0) {
+        if (reqData.rows.length === 0) {
             return res.status(400).json({ success: false, message: '❌ ไม่พบข้อมูลงาน หรือคุณไม่ใช่เจ้าของคำขอนี้' });
         }
 
-        const job = reqData.recordset[0];
+        const job = reqData.rows[0];
         const provider_id = job.provider_id;
         const jobCurrency = job.currency; 
 
@@ -7016,8 +6475,8 @@ app.post('/api/p2p/confirm-withdraw-receipt', async (req, res) => {
             return res.status(400).json({ success: false, message: '⚠️ งานนี้ไม่ได้อยู่ในสถานะรอตรวจสอบสลิป' });
         }
 
-        const transaction = new sql.Transaction(pool);
-        await transaction.begin();
+        const client = await pgPool.connect(); // ใช้ Transaction
+        await client.query('BEGIN');
 
         try {
             // 🌟 กรณีที่ 1: ถูกต้อง (ได้เงินครบ)
@@ -7028,19 +6487,18 @@ app.post('/api/p2p/confirm-withdraw-receipt', async (req, res) => {
                 let rewardAmount = parseFloat(job.provider_reward); 
 
                 // --- แปลงสกุลเงินผู้รับงาน ---
-                const provInfo = await transaction.request().input('pid', sql.Int, provider_id).query(`SELECT currency_code FROM users WHERE user_id = @pid`);
-                const provCurrency = provInfo.recordset[0].currency_code;
+                const provInfo = await client.query(`SELECT currency_code FROM users WHERE user_id = $1`, [provider_id]);
+                const provCurrency = provInfo.rows[0].currency_code;
                 
                 let exchangeRate = 1;
 
                 if (provCurrency !== jobCurrency) {
-                    const rateCheck = await transaction.request()
-                        .input('pair1', sql.VarChar, `${jobCurrency}_${provCurrency}`)
-                        .input('pair2', sql.VarChar, `${provCurrency}_${jobCurrency}`)
-                        .query(`SELECT currency_pair, rate FROM ExchangeRates WHERE currency_pair = @pair1 OR currency_pair = @pair2`);
+                    const rateCheck = await client.query(`
+                        SELECT currency_pair, rate FROM ExchangeRates WHERE currency_pair = $1 OR currency_pair = $2
+                    `, [`${jobCurrency}_${provCurrency}`, `${provCurrency}_${jobCurrency}`]);
                     
-                    if (rateCheck.recordset.length > 0) {
-                        const exRate = rateCheck.recordset[0];
+                    if (rateCheck.rows.length > 0) {
+                        const exRate = rateCheck.rows[0];
                         if (exRate.currency_pair === `${jobCurrency}_${provCurrency}`) {
                             exchangeRate = parseFloat(exRate.rate);
                         } else {
@@ -7055,54 +6513,45 @@ app.post('/api/p2p/confirm-withdraw-receipt', async (req, res) => {
                 let totalForProvider = finalPrincipal + finalReward;
 
                 // 💳 โอนเงินเข้า Wallet ผู้รับงาน (เติมรวมยอด)
-                await transaction.request()
-                    .input('pid', sql.Int, provider_id)
-                    .input('total', sql.Decimal(18, 4), totalForProvider)
-                    .query(`UPDATE Wallets SET balance = balance + @total WHERE user_id = @pid`);
+                await client.query(`UPDATE Wallets SET balance = balance + $1 WHERE user_id = $2`, [totalForProvider, provider_id]);
 
                 // 📝 แยกลงประวัติ Transaction เป็น 2 รายการ
-                await transaction.request()
-                    .input('pid', sql.Int, provider_id)
-                    .input('principal', sql.Decimal(18, 4), finalPrincipal)
-                    .input('reward', sql.Decimal(18, 4), finalReward)
-                    .input('reqId', sql.Int, request_id)
-                    .query(`
-                        INSERT INTO Transactions (user_id, amount, transaction_type, title, status, created_at) 
-                        VALUES (@pid, @principal, 'P2P_Refund', N'รับเงินคืนจากภารกิจถอน P2P (เงินต้น งาน ID: ' + CAST(@reqId AS NVARCHAR) + N')', 'Completed', GETDATE());
+                await client.query(`
+                    INSERT INTO Transactions (user_id, amount, transaction_type, title, status, created_at) 
+                    VALUES ($1, $2, 'P2P_Refund', $3, 'Completed', CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Bangkok');
+                `, [provider_id, finalPrincipal, `รับเงินคืนจากภารกิจถอน P2P (เงินต้น งาน ID: ${request_id})`]);
 
-                        INSERT INTO Transactions (user_id, amount, transaction_type, title, status, created_at) 
-                        VALUES (@pid, @reward, 'P2P_Income', N'รับค่าคอมมิชชั่นภารกิจถอน P2P (งาน ID: ' + CAST(@reqId AS NVARCHAR) + N')', 'Completed', GETDATE());
-                    `);
+                await client.query(`
+                    INSERT INTO Transactions (user_id, amount, transaction_type, title, status, created_at) 
+                    VALUES ($1, $2, 'P2P_Income', $3, 'Completed', CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Bangkok');
+                `, [provider_id, finalReward, `รับค่าคอมมิชชั่นภารกิจถอน P2P (งาน ID: ${request_id})`]);
 
                 // 🎁 2. แจกคอมมิชชั่นให้ "ผู้แนะนำ" ของคนรับงาน 
-                const setDb = await transaction.request().query('SELECT TOP 1 referrer_reward_percent FROM P2P_Settings');
-                const refPercent = setDb.recordset.length > 0 ? parseFloat(setDb.recordset[0].referrer_reward_percent) : 0;
+                const setDb = await client.query('SELECT referrer_reward_percent FROM P2P_Settings LIMIT 1');
+                const refPercent = setDb.rows.length > 0 ? parseFloat(setDb.rows[0].referrer_reward_percent) : 0;
 
                 if (refPercent > 0) {
-                    const refCheck = await transaction.request()
-                        .input('pid', sql.Int, provider_id)
-                        .query(`
-                            SELECT ref.user_id AS referrer_id, ref.currency_code AS ref_curr, me.username AS provider_name 
-                            FROM users me 
-                            INNER JOIN users ref ON me.referrer_username = ref.username 
-                            WHERE me.user_id = @pid
-                        `);
+                    const refCheck = await client.query(`
+                        SELECT ref.user_id AS referrer_id, ref.currency_code AS ref_curr, me.username AS provider_name 
+                        FROM users me 
+                        INNER JOIN users ref ON me.referrer_username = ref.username 
+                        WHERE me.user_id = $1
+                    `, [provider_id]);
                     
-                    if (refCheck.recordset.length > 0 && refCheck.recordset[0].referrer_id) {
-                        const referrerId = refCheck.recordset[0].referrer_id;
-                        const providerName = refCheck.recordset[0].provider_name; 
-                        const refCurrency = refCheck.recordset[0].ref_curr; 
+                    if (refCheck.rows.length > 0 && refCheck.rows[0].referrer_id) {
+                        const referrerId = refCheck.rows[0].referrer_id;
+                        const providerName = refCheck.rows[0].provider_name; 
+                        const refCurrency = refCheck.rows[0].ref_curr; 
                         
                         let finalRefReward = (parseFloat(job.amount) * refPercent) / 100; 
 
                         if (refCurrency !== jobCurrency) {
-                            const refRateCheck = await transaction.request()
-                                .input('pair1', sql.VarChar, `${jobCurrency}_${refCurrency}`)
-                                .input('pair2', sql.VarChar, `${refCurrency}_${jobCurrency}`)
-                                .query(`SELECT currency_pair, rate FROM ExchangeRates WHERE currency_pair = @pair1 OR currency_pair = @pair2`);
+                            const refRateCheck = await client.query(`
+                                SELECT currency_pair, rate FROM ExchangeRates WHERE currency_pair = $1 OR currency_pair = $2
+                            `, [`${jobCurrency}_${refCurrency}`, `${refCurrency}_${jobCurrency}`]);
                             
-                            if (refRateCheck.recordset.length > 0) {
-                                const exRate2 = refRateCheck.recordset[0];
+                            if (refRateCheck.rows.length > 0) {
+                                const exRate2 = refRateCheck.rows[0];
                                 if (exRate2.currency_pair === `${jobCurrency}_${refCurrency}`) {
                                     finalRefReward = finalRefReward * parseFloat(exRate2.rate);
                                 } else {
@@ -7111,49 +6560,45 @@ app.post('/api/p2p/confirm-withdraw-receipt', async (req, res) => {
                             }
                         }
 
-                        await transaction.request()
-                            .input('refId', sql.Int, referrerId)
-                            .input('reward', sql.Decimal(18, 4), finalRefReward)
-                            .input('reqId', sql.Int, request_id)
-                            .input('pName', sql.NVarChar, providerName) 
-                            .query(`
-                                UPDATE Wallets SET balance = balance + @reward WHERE user_id = @refId;
-                                INSERT INTO Transactions (user_id, amount, transaction_type, title, status, created_at) 
-                                VALUES (@refId, @reward, 'Affiliate', N'ค่าคอมมิชชั่นแนะนำเพื่อนรับงาน P2P จากคุณ ' + @pName + N' (งาน ID: ' + CAST(@reqId AS NVARCHAR) + N')', 'Completed', GETDATE());
-                            `);
+                        await client.query(`UPDATE Wallets SET balance = balance + $1 WHERE user_id = $2`, [finalRefReward, referrerId]);
+                        
+                        await client.query(`
+                            INSERT INTO Transactions (user_id, amount, transaction_type, title, status, created_at) 
+                            VALUES ($1, $2, 'Affiliate', $3, 'Completed', CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Bangkok');
+                        `, [referrerId, finalRefReward, `ค่าคอมมิชชั่นแนะนำเพื่อนรับงาน P2P จากคุณ ${providerName} (งาน ID: ${request_id})`]);
                     }
                 }
 
                 // 🏁 3. ปิดงาน
-                await transaction.request()
-                    .input('rid', sql.Int, request_id)
-                    .query(`UPDATE P2P_Requests SET status = 'COMPLETED', completed_at = GETDATE() WHERE request_id = @rid`);
+                await client.query(`UPDATE P2P_Requests SET status = 'COMPLETED', completed_at = CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Bangkok' WHERE request_id = $1`, [request_id]);
 
-                await transaction.commit();
+                await client.query('COMMIT');
                 return res.json({ success: true, message: '✅ ยืนยันรับเงินสำเร็จ! ระบบได้โอนเงินและจ่ายค่าแนะนำเรียบร้อยแล้ว' });
 
             } 
             // 🌟 กรณีที่ 2: มีปัญหา (เงินไม่เข้า / ยอดไม่ตรง)
             else if (verify_status === 'no_money' || verify_status === 'wrong_amount') {
                 
-                await transaction.request()
-                    .input('rid', sql.Int, request_id)
-                    .query(`UPDATE P2P_Requests SET status = 'DISPUTED' WHERE request_id = @rid`);
+                await client.query(`UPDATE P2P_Requests SET status = 'DISPUTED' WHERE request_id = $1`, [request_id]);
 
-                await transaction.commit();
+                await client.query('COMMIT');
                 return res.json({ success: true, message: '⚠️ ส่งเรื่องแจ้งปัญหาสำเร็จ! ระบบได้อายัดคำขอนี้ไว้เพื่อให้ Admin ตรวจสอบแล้ว' });
             }
 
         } catch (err) {
-            await transaction.rollback();
+            await client.query('ROLLBACK');
             throw err;
+        } finally {
+            client.release();
         }
     } catch (err) {
         console.error("Confirm Withdraw Receipt Error:", err);
         res.status(500).json({ success: false, message: 'Server Error: ' + err.message });
     }
 });
+
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 📤 [API] ลูกค้าอัปโหลดสลิปโอนเงิน
 // ==========================================
 app.post('/api/p2p/upload-slip', async (req, res) => {
@@ -7165,137 +6610,121 @@ app.post('/api/p2p/upload-slip', async (req, res) => {
             return res.status(400).json({ success: false, message: 'กรุณาแนบรูปภาพสลิป' });
         }
 
-        const pool = await sql.connect(dbConfig);
-        await pool.request()
-            .input('reqId', sql.Int, request_id)
-            .input('slip', sql.NVarChar(sql.MAX), slip_url) // เก็บรูปเป็น Base64
-            .query(`
-                UPDATE P2P_Requests 
-                SET slip_url = @slip, status = 'VERIFYING' 
-                WHERE request_id = @reqId
-            `);
+        await pgPool.query(`
+            UPDATE P2P_Requests 
+            SET slip_url = $1, status = 'VERIFYING' 
+            WHERE request_id = $2
+        `, [slip_url, request_id]);
 
         res.json({ success: true, message: 'ส่งสลิปให้ผู้รับงานตรวจสอบเรียบร้อยแล้ว' });
     } catch (err) {
-        console.error("🔥 [CRITICAL] Upload Slip Error แบบละเอียด:", err); // เปลี่ยนตรงนี้ให้ชัดๆ
+        console.error("🔥 [CRITICAL] Upload Slip Error แบบละเอียด:", err);
         
         // บังคับส่ง Error กลับไปให้หน้าเว็บแสดงผล
         res.status(500).json({ 
             success: false, 
             message: 'Server Error: ' + err.message,
-            stack: err.stack // 👈 แอบส่ง stack trace ไปดูที่ Network
+            stack: err.stack
         });
     }
 });
 
 
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🚨 [API] ผู้รับงานดึงเงินกลับ (เลยเวลา) - แก้บัคสกุลเงิน & ทศนิยม
 // ==========================================
 app.post('/api/p2p/timeout-cancel', async (req, res) => {
     try {
         const { provider_id, request_id } = req.body;
-        const pool = await sql.connect(dbConfig);
 
-        const setDb = await pool.request().query('SELECT TOP 1 * FROM P2P_Settings');
-        const settings = setDb.recordset.length > 0 ? setDb.recordset[0] : {};
+        const setDb = await pgPool.query('SELECT * FROM P2P_Settings LIMIT 1');
+        const settings = setDb.rows.length > 0 ? setDb.rows[0] : {};
         const timeoutMinutes = settings.request_timeout_minutes || 15; 
         const maxStrikes = 3;
 
-        const reqData = await pool.request()
-            .input('rid', sql.Int, request_id)
-            .input('pid', sql.Int, provider_id)
-            .query(`SELECT * FROM P2P_Requests WHERE request_id = @rid AND provider_id = @pid AND status = 'ACCEPTED'`);
+        const reqData = await pgPool.query(`SELECT * FROM P2P_Requests WHERE request_id = $1 AND provider_id = $2 AND status = 'ACCEPTED'`, [request_id, provider_id]);
 
-        if (reqData.recordset.length === 0) {
+        if (reqData.rows.length === 0) {
             return res.json({ success: false, message: 'ไม่พบงานนี้ หรือสถานะงานถูกเปลี่ยนแปลงไปแล้ว' });
         }
 
-        const job = reqData.recordset[0];
+        const job = reqData.rows[0];
 
-        const timeCheck = await pool.request()
-            .input('rid', sql.Int, request_id)
-            .input('timeout_m', sql.Int, timeoutMinutes)
-            .query(`
+        const timeCheck = await pgPool.query(`
             SELECT CASE 
-                WHEN DATEADD(minute, @timeout_m, ISNULL(accepted_at, created_at)) < DATEADD(hour, 7, GETUTCDATE()) THEN 1 
+                WHEN (COALESCE(accepted_at, created_at) + ($1 || ' minutes')::interval) < CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Bangkok' THEN 1 
                 ELSE 0 
             END as is_expired 
             FROM P2P_Requests 
-            WHERE request_id = @rid
-        `);
+            WHERE request_id = $2
+        `, [timeoutMinutes, request_id]);
         
-        if (timeCheck.recordset[0].is_expired === 0) {
+        if (timeCheck.rows[0].is_expired === 0) {
             return res.json({ success: false, message: `⏳ ยังไม่หมดเวลาโอนเงินครับ (ระบบกำหนดเวลาไว้ ${timeoutMinutes} นาที)` });
         }
 
-        const transaction = new sql.Transaction(pool);
-        await transaction.begin();
+        const client = await pgPool.connect(); // ใช้ Transaction
+        await client.query('BEGIN');
 
         try {
             // 🌟 ท่าไม้ตาย: ค้นหายอดค้ำประกัน "ของจริง"
-            const escrowCheck = await transaction.request()
-                .input('pid', sql.Int, provider_id)
-                .input('reqId', sql.Int, request_id)
-                .query(`
-                    SELECT TOP 1 ABS(amount) as deducted_amount 
-                    FROM Transactions 
-                    WHERE user_id = @pid 
-                      AND title LIKE N'%Job ID: ' + CAST(@reqId AS NVARCHAR) + N'%' 
-                      AND amount < 0
-                    ORDER BY transaction_id DESC
-                `);
+            const escrowCheck = await client.query(`
+                SELECT ABS(amount) as deducted_amount 
+                FROM Transactions 
+                WHERE user_id = $1 
+                  AND title LIKE $2 
+                  AND amount < 0
+                ORDER BY transaction_id DESC
+                LIMIT 1
+            `, [provider_id, `%Job ID: ${request_id}%`]);
             
-            const actualEscrow = escrowCheck.recordset.length > 0 ? parseFloat(escrowCheck.recordset[0].deducted_amount) : parseFloat(job.amount);
+            const actualEscrow = escrowCheck.rows.length > 0 ? parseFloat(escrowCheck.rows[0].deducted_amount) : parseFloat(job.amount);
 
             // คืนเงินค้ำประกัน (ของจริง)
-            await transaction.request()
-                .input('pid', sql.Int, provider_id)
-                .input('amt', sql.Decimal(18, 4), actualEscrow)
-                .input('reqId', sql.Int, request_id)
-                .query(`
-                    UPDATE Wallets SET balance = balance + @amt WHERE user_id = @pid;
-                    INSERT INTO Transactions (user_id, amount, transaction_type, title, status, created_at) 
-                    VALUES (@pid, @amt, 'P2P_Refund', N'ดึงเงินมัดจำกลับ เนื่องจากลูกค้าไม่โอนเงิน (งาน ID: ' + CAST(@reqId AS NVARCHAR) + N')', 'Completed', GETDATE());
-                `);
+            await client.query(`UPDATE Wallets SET balance = balance + $1 WHERE user_id = $2`, [actualEscrow, provider_id]);
+            
+            await client.query(`
+                INSERT INTO Transactions (user_id, amount, transaction_type, title, status, created_at) 
+                VALUES ($1, $2, 'P2P_Refund', $3, 'Completed', CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Bangkok')
+            `, [provider_id, actualEscrow, `ดึงเงินมัดจำกลับ เนื่องจากลูกค้าไม่โอนเงิน (งาน ID: ${request_id})`]);
 
             // เปลี่ยนสถานะ
-            await transaction.request()
-                .input('rid', sql.Int, request_id)
-                .query(`UPDATE P2P_Requests SET status = 'CANCELLED', completed_at = DATEADD(hour, 7, GETUTCDATE()) WHERE request_id = @rid`);
+            await client.query(`UPDATE P2P_Requests SET status = 'CANCELLED', completed_at = CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Bangkok' WHERE request_id = $1`, [request_id]);
 
             // ลงโทษคนเบี้ยว
-            const offenderCheck = await transaction.request()
-                .input('uid', sql.Int, job.requester_id)
-                .query(`
-                    IF EXISTS (SELECT 1 FROM P2P_Offenders WHERE user_id = @uid)
-                    BEGIN
-                        UPDATE P2P_Offenders 
-                        SET fail_count = fail_count + 1, last_offense_date = DATEADD(hour, 7, GETUTCDATE()) 
-                        OUTPUT INSERTED.fail_count
-                        WHERE user_id = @uid
-                    END
-                    ELSE
-                    BEGIN
-                        INSERT INTO P2P_Offenders (user_id, fail_count, last_offense_date) 
-                        OUTPUT INSERTED.fail_count
-                        VALUES (@uid, 1, DATEADD(hour, 7, GETUTCDATE()))
-                    END
-                `);
-            
-            const currentFails = offenderCheck.recordset[0].fail_count;
+            const checkOffender = await client.query(`SELECT 1 FROM P2P_Offenders WHERE user_id = $1`, [job.requester_id]);
+            let currentFails = 0;
 
-            if (currentFails >= maxStrikes) {
-                await transaction.request()
-                    .input('uid', sql.Int, job.requester_id)
-                    .query(`UPDATE users SET is_locked = 1 WHERE user_id = @uid`);
+            if (checkOffender.rows.length > 0) {
+                const updateOffender = await client.query(`
+                    UPDATE P2P_Offenders 
+                    SET fail_count = fail_count + 1, last_offense_date = CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Bangkok' 
+                    WHERE user_id = $1
+                    RETURNING fail_count
+                `, [job.requester_id]);
+                currentFails = updateOffender.rows[0].fail_count;
+            } else {
+                const insertOffender = await client.query(`
+                    INSERT INTO P2P_Offenders (user_id, fail_count, last_offense_date) 
+                    VALUES ($1, 1, CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Bangkok')
+                    RETURNING fail_count
+                `, [job.requester_id]);
+                currentFails = insertOffender.rows[0].fail_count;
             }
 
-            await transaction.commit();
+            if (currentFails >= maxStrikes) {
+                // สมมติว่าตาราง users ใช้คอลัมน์ is_active (คุณวิทยาสามารถปรับเป็น is_locked = 1 ถ้า DB ใช้ชื่อนั้นครับ)
+                await client.query(`UPDATE users SET is_active = '0' WHERE user_id = $1`, [job.requester_id]);
+            }
+
+            await client.query('COMMIT');
             res.json({ success: true, message: '✅ ดึงเงินมัดจำกลับสำเร็จ และบันทึกประวัติทำผิดของลูกค้าเรียบร้อยแล้ว' });
         } catch (err) {
-            await transaction.rollback();
+            await client.query('ROLLBACK');
             throw err;
+        } finally {
+            client.release();
         }
     } catch (err) {
         console.error("Timeout Cancel Error:", err);
@@ -7303,15 +6732,15 @@ app.post('/api/p2p/timeout-cancel', async (req, res) => {
     }
 });
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🌟 [ADMIN] ดึงข้อมูลตั้งค่า P2P และโปรโมชั่น
 // ==========================================
 app.get('/api/admin/p2p-settings', async (req, res) => {
     try {
-        const pool = await sql.connect(dbConfig);
-        const result = await pool.request().query('SELECT TOP 1 * FROM P2P_Settings ORDER BY id ASC');
+        const result = await pgPool.query('SELECT * FROM P2P_Settings ORDER BY id ASC LIMIT 1');
         
-        if (result.recordset.length > 0) {
-            res.json({ success: true, settings: result.recordset[0] });
+        if (result.rows.length > 0) {
+            res.json({ success: true, settings: result.rows[0] });
         } else {
             res.status(404).json({ success: false, message: 'ไม่พบข้อมูลการตั้งค่า' });
         }
@@ -7323,6 +6752,7 @@ app.get('/api/admin/p2p-settings', async (req, res) => {
 
 
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🌟 [ADMIN] อัปเดตข้อมูลตั้งค่า P2P และโปรโมชั่น
 // ==========================================
 app.put('/api/admin/p2p-settings', async (req, res) => {
@@ -7333,28 +6763,27 @@ app.put('/api/admin/p2p-settings', async (req, res) => {
             request_timeout_minutes, promo_start_time, promo_end_time 
         } = req.body;
 
-        const pool = await sql.connect(dbConfig);
-        
         // อัปเดตข้อมูลแถวแรกเสมอ (id = 1)
-        await pool.request()
-            .input('deposit', sql.Decimal(5,2), deposit_bonus_percent)
-            .input('withdraw', sql.Decimal(5,2), withdraw_fee_percent)
-            .input('provider', sql.Decimal(5,2), provider_reward_percent)
-            .input('referrer', sql.Decimal(5,2), referrer_reward_percent)
-            .input('timeout', sql.Int, request_timeout_minutes)
-            .input('p_start', sql.DateTime, promo_start_time || null)
-            .input('p_end', sql.DateTime, promo_end_time || null)
-            .query(`
-                UPDATE P2P_Settings 
-                SET deposit_bonus_percent = @deposit,
-                    withdraw_fee_percent = @withdraw,
-                    provider_reward_percent = @provider,
-                    referrer_reward_percent = @referrer,
-                    request_timeout_minutes = @timeout,
-                    promo_start_time = @p_start,
-                    promo_end_time = @p_end,
-                    updated_at = GETDATE()
-            `);
+        await pgPool.query(`
+            UPDATE P2P_Settings 
+            SET deposit_bonus_percent = $1,
+                withdraw_fee_percent = $2,
+                provider_reward_percent = $3,
+                referrer_reward_percent = $4,
+                request_timeout_minutes = $5,
+                promo_start_time = $6,
+                promo_end_time = $7,
+                updated_at = CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Bangkok'
+            WHERE id = 1
+        `, [
+            deposit_bonus_percent, 
+            withdraw_fee_percent, 
+            provider_reward_percent, 
+            referrer_reward_percent, 
+            request_timeout_minutes, 
+            promo_start_time || null, 
+            promo_end_time || null
+        ]);
 
         res.json({ success: true, message: 'บันทึกการตั้งค่าสำเร็จ' });
     } catch (err) {
@@ -7365,23 +6794,20 @@ app.put('/api/admin/p2p-settings', async (req, res) => {
 
 
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🛡️ [ADMIN] อัปเดตเฉพาะค่า Commission P2P (แยกต่างหาก ปลอดภัย 100%)
 // ==========================================
 app.post('/api/admin/p2p-commission-update', async (req, res) => {
     try {
         const { reward_percent } = req.body;
-        const pool = await sql.connect(dbConfig);
         
         // เช็คว่ามีข้อมูลในตารางหรือยัง ถ้ายังให้ Insert ถ้ามีแล้วให้ Update
-        const check = await pool.request().query('SELECT COUNT(*) as count FROM P2P_Settings');
-        if (check.recordset[0].count === 0) {
-            await pool.request()
-                .input('percent', sql.Decimal(5, 2), reward_percent)
-                .query(`INSERT INTO P2P_Settings (provider_reward_percent) VALUES (@percent)`);
+        const check = await pgPool.query('SELECT CAST(COUNT(*) AS INTEGER) as count FROM P2P_Settings');
+        
+        if (check.rows[0].count === 0) {
+            await pgPool.query(`INSERT INTO P2P_Settings (provider_reward_percent) VALUES ($1)`, [reward_percent]);
         } else {
-            await pool.request()
-                .input('percent', sql.Decimal(5, 2), reward_percent)
-                .query(`UPDATE P2P_Settings SET provider_reward_percent = @percent`);
+            await pgPool.query(`UPDATE P2P_Settings SET provider_reward_percent = $1`, [reward_percent]);
         }
         res.json({ success: true, message: 'บันทึกค่า Commission P2P สำเร็จแล้ว! (มีผลเฉพาะบิลใหม่)' });
     } catch (err) {
@@ -7391,129 +6817,112 @@ app.post('/api/admin/p2p-commission-update', async (req, res) => {
 
 
 // ==========================================
-// 🌟 [CLIENT] ดึงข้อมูลหน้าบอร์ดลูกค้า (แยกบอร์ด กับ โฆษณา)
-// ==========================================
-// ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🛡️ [API] ดึงประวัติงาน P2P ที่กำลังดำเนินการของผู้รับงาน
 // ==========================================
 app.get('/api/p2p/my-jobs/:uid', async (req, res) => {
     try {
         const uid = req.params.uid;
-        const pool = await sql.connect(dbConfig);
         
-        const result = await pool.request()
-            .input('uid', sql.Int, uid)
-            .query(`
-                SELECT * FROM P2P_Requests 
-                WHERE provider_id = @uid 
-                  AND status IN ('ACCEPTED', 'VERIFYING')
-                ORDER BY accepted_at DESC
-            `);
+        const result = await pgPool.query(`
+            SELECT * FROM P2P_Requests 
+            WHERE provider_id = $1 
+              AND status IN ('ACCEPTED', 'VERIFYING')
+            ORDER BY accepted_at DESC
+        `, [uid]);
             
-        res.json({ success: true, jobs: result.recordset });
+        res.json({ success: true, jobs: result.rows });
     } catch (err) {
         console.error(err);
         res.status(500).json({ success: false, message: 'Server Error: ' + err.message });
     }
 });
+
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🌟 [CLIENT] ดึงข้อมูลหน้าบอร์ดลูกค้า (ฉบับสมบูรณ์ที่สุด - รวมร่างข้อดีและแก้บัคแล้ว)
 // ==========================================
-let cachedPool = null;
-
 app.get('/api/p2p/board', async (req, res) => {
     try {
         const { user_id } = req.query;
         if (!user_id) return res.status(400).json({ success: false, message: 'Missing user_id' });
         
-        // 🌟 ใช้ระบบ Cache ลดภาระเซิร์ฟเวอร์ (จากตัวที่ 1)
-        if (!cachedPool) { cachedPool = await sql.connect(dbConfig); }
-        const pool = cachedPool;
-        
-        const rateResult = await pool.request().query('SELECT * FROM ExchangeRates');
-        const settingResult = await pool.request().query('SELECT TOP 1 * FROM P2P_Settings');
+        const rateResult = await pgPool.query('SELECT * FROM ExchangeRates');
+        const settingResult = await pgPool.query('SELECT * FROM P2P_Settings LIMIT 1');
         
         // 🌟 แก้ปัญหา Timezone เซิร์ฟเวอร์ให้ตรงกับเวลาไทย/ลาว +7 (จากตัวที่ 2)
-        const activePromoResult = await pool.request().query(`
-            SELECT TOP 1 * FROM P2P_Promotions 
-            WHERE DATEADD(hour, 7, GETUTCDATE()) BETWEEN start_time AND end_time 
+        const activePromoResult = await pgPool.query(`
+            SELECT * FROM P2P_Promotions 
+            WHERE CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Bangkok' BETWEEN start_time AND end_time 
             ORDER BY end_time ASC
+            LIMIT 1
         `);
         
         // 🌟 ดึงข้อมูลกระเป๋า และ สกุลเงิน (เปลี่ยนเป็น currency_code ให้ตรง DB) (จากตัวที่ 2)
-        const walletResult = await pool.request()
-            .input('uid', sql.Int, user_id)
-            .query(`
-                SELECT w.balance, u.currency_code 
-                FROM Wallets w 
-                LEFT JOIN Users u ON w.user_id = u.user_id 
-                WHERE w.user_id = @uid
-            `);
+        const walletResult = await pgPool.query(`
+            SELECT w.balance, u.currency_code 
+            FROM Wallets w 
+            LEFT JOIN Users u ON w.user_id = u.user_id 
+            WHERE w.user_id = $1
+        `, [user_id]);
         
         // 🌟 ดึงเฉพาะ "งานว่าง" และเช็คว่า "ยังไม่หมดเวลา" (เพิ่ม JOIN ธนาคาร เพื่อไม่ให้กระทบโค้ดเดิม)
-       // 🌟 ดึง "งานว่าง" (เชื่อมเอาโลโก้ธนาคารผ่าน user_bank_id ตรงๆ)
-        const missionsResult = await pool.request()
-            .input('uid', sql.Int, user_id)
-            .query(`
-                SELECT r.*, u.username AS requester_name,
-                       bk.bank_name AS req_bank_name, bk.logo_url, bk.country,
-                       ub.account_number AS req_account_number,
-                       ub.account_name AS req_account_name
-                FROM P2P_Requests r 
-                LEFT JOIN Users u ON r.requester_id = u.user_id 
-                LEFT JOIN UserBanks ub ON r.user_bank_id = ub.user_bank_id
-                LEFT JOIN Banks bk ON ub.bank_id = bk.bank_id
-                WHERE r.status = 'PENDING' 
-                  AND r.requester_id != @uid 
-                  AND r.expires_at > DATEADD(hour, 7, GETUTCDATE())
-                ORDER BY r.created_at DESC
-            `);
+        const missionsResult = await pgPool.query(`
+            SELECT r.*, u.username AS requester_name,
+                   bk.bank_name AS req_bank_name, bk.logo_url, bk.country,
+                   ub.account_number AS req_account_number,
+                   ub.account_name AS req_account_name
+            FROM P2P_Requests r 
+            LEFT JOIN Users u ON r.requester_id = u.user_id 
+            LEFT JOIN UserBanks ub ON r.user_bank_id = ub.user_bank_id
+            LEFT JOIN Banks bk ON ub.bank_id = bk.bank_id
+            WHERE r.status = 'PENDING' 
+              AND r.requester_id != $1 
+              AND r.expires_at > CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Bangkok'
+            ORDER BY r.created_at DESC
+        `, [user_id]);
 
         // 🌟 ดึง "งานที่รับมาแล้ว" (ใช้ท่าเดียวกันเป๊ะ!)
-        const myAcceptedResult = await pool.request()
-            .input('uid', sql.Int, user_id)
-            .query(`
-                SELECT r.*, u.username AS requester_name,
-                       bk.bank_name AS req_bank_name, bk.logo_url, bk.country,
-                       ub.account_number AS req_account_number,
-                       ub.account_name AS req_account_name
-                FROM P2P_Requests r 
-                LEFT JOIN Users u ON r.requester_id = u.user_id 
-                LEFT JOIN UserBanks ub ON r.user_bank_id = ub.user_bank_id
-                LEFT JOIN Banks bk ON ub.bank_id = bk.bank_id
-                WHERE r.provider_id = @uid AND r.status IN ('ACCEPTED', 'VERIFYING')
-                ORDER BY r.created_at DESC
-            `);
+        const myAcceptedResult = await pgPool.query(`
+            SELECT r.*, u.username AS requester_name,
+                   bk.bank_name AS req_bank_name, bk.logo_url, bk.country,
+                   ub.account_number AS req_account_number,
+                   ub.account_name AS req_account_name
+            FROM P2P_Requests r 
+            LEFT JOIN Users u ON r.requester_id = u.user_id 
+            LEFT JOIN UserBanks ub ON r.user_bank_id = ub.user_bank_id
+            LEFT JOIN Banks bk ON ub.bank_id = bk.bank_id
+            WHERE r.provider_id = $1 AND r.status IN ('ACCEPTED', 'VERIFYING')
+            ORDER BY r.created_at DESC
+        `, [user_id]);
 
       // 🌟 แยกตะกร้าดึง "งานที่ฉันเป็นคนสร้าง" พร้อมเชื่อม 3 ตาราง (Requests + UserBanks + Banks) เพื่อดึงชื่อธนาคารให้ครบ!
-        const myRequestsResult = await pool.request()
-            .input('myuid', sql.Int, user_id)
-            .query(`
-                SELECT 
-                    r.*, 
-                    b.account_number AS provider_account_number,
-                    b.account_name AS provider_account_name,
-                    bk.bank_name AS provider_bank_name
-                FROM P2P_Requests r 
-                LEFT JOIN UserBanks b ON r.provider_id = b.user_id 
-                                     AND b.currency_code = r.currency 
-                                     AND b.status = 'Approved'
-                LEFT JOIN Banks bk ON b.bank_id = bk.bank_id
-                WHERE r.requester_id = @myuid 
-                ORDER BY r.created_at DESC
-            `);
+        const myRequestsResult = await pgPool.query(`
+            SELECT 
+                r.*, 
+                b.account_number AS provider_account_number,
+                b.account_name AS provider_account_name,
+                bk.bank_name AS provider_bank_name
+            FROM P2P_Requests r 
+            LEFT JOIN UserBanks b ON r.provider_id = b.user_id 
+                                 AND b.currency_code = r.currency 
+                                 AND b.status = 'Approved'
+            LEFT JOIN Banks bk ON b.bank_id = bk.bank_id
+            WHERE r.requester_id = $1 
+            ORDER BY r.created_at DESC
+        `, [user_id]);
 
         // 🌟 ส่งข้อมูลแบบจัดเต็ม ครบจบใน API เดียว
         res.json({ 
             success: true, 
-            settings: settingResult.recordset[0] || null, 
-            activePromo: activePromoResult.recordset.length > 0 ? activePromoResult.recordset[0] : null,
-            wallet: walletResult.recordset.length > 0 ? walletResult.recordset[0].balance : 0, 
-            currency: (walletResult.recordset.length > 0 && walletResult.recordset[0].currency_code) ? walletResult.recordset[0].currency_code : 'THB',
-            exchangeRates: rateResult.recordset || [],
-            missions: missionsResult.recordset || [], 
-            myAcceptedJobs: myAcceptedResult.recordset || [], 
-            myRequests: myRequestsResult.recordset || [] 
+            settings: settingResult.rows[0] || null, 
+            activePromo: activePromoResult.rows.length > 0 ? activePromoResult.rows[0] : null,
+            wallet: walletResult.rows.length > 0 ? parseFloat(walletResult.rows[0].balance) : 0, 
+            currency: (walletResult.rows.length > 0 && walletResult.rows[0].currency_code) ? walletResult.rows[0].currency_code : 'THB',
+            exchangeRates: rateResult.rows || [],
+            missions: missionsResult.rows || [], 
+            myAcceptedJobs: myAcceptedResult.rows || [], 
+            myRequests: myRequestsResult.rows || [] 
         });
     } catch (err) { 
         console.error(err);
@@ -7521,18 +6930,18 @@ app.get('/api/p2p/board', async (req, res) => {
     }
 });
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🌟 API ใหม่: ดึงเฉพาะโฆษณา/วิดีโอ (ดึงแค่ครั้งเดียวตอนลูกค้าเปิดหน้าเว็บ)
 // ==========================================
 app.get('/api/p2p/active-ads', async (req, res) => {
     try {
-        const pool = await sql.connect(dbConfig);
-        // ดึงเฉพาะโฆษณาที่ is_active = 1 (เปิดใช้งานอยู่)
-        const result = await pool.request().query(`
+        // ดึงเฉพาะโฆษณาที่ is_active = '1' (เปิดใช้งานอยู่)
+        const result = await pgPool.query(`
             SELECT * FROM P2P_Ads 
-            WHERE is_active = 1 
+            WHERE is_active = '1' 
             ORDER BY sort_order ASC, created_at DESC
         `);
-        res.json({ success: true, ads: result.recordset });
+        res.json({ success: true, ads: result.rows });
     } catch (err) { 
         res.status(500).json({ success: false, message: err.message }); 
     }
@@ -7540,66 +6949,72 @@ app.get('/api/p2p/active-ads', async (req, res) => {
 // ==========================================
 // 🌟 สิ้นสุด  API P2P
 // ==========================================
+
+
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🌟 [ADMIN] ADS และ โปรโมชั่น  เริ่ม
 // ==========================================
 
 // 1. จัดการคิวโปรโมชั่น (แจกโบนัสฝาก)
 app.get('/api/admin/promotions', async (req, res) => {
     try {
-        const pool = await sql.connect(dbConfig);
-        const result = await pool.request().query('SELECT * FROM P2P_Promotions ORDER BY start_time ASC');
-        res.json({ success: true, promotions: result.recordset });
-    } catch (err) { res.status(500).json({ success: false, message: err.message }); }
+        const result = await pgPool.query('SELECT * FROM P2P_Promotions ORDER BY start_time ASC');
+        res.json({ success: true, promotions: result.rows });
+    } catch (err) { 
+        res.status(500).json({ success: false, message: err.message }); 
+    }
 });
 
 app.post('/api/admin/promotions', async (req, res) => {
     try {
         const { title, bonus_percent, start_time, end_time } = req.body;
-        const pool = await sql.connect(dbConfig);
-        await pool.request()
-            .input('title', sql.NVarChar, title)
-            .input('bonus', sql.Decimal(5,2), bonus_percent)
-            .input('start', sql.DateTime, start_time)
-            .input('end', sql.DateTime, end_time)
-            .query('INSERT INTO P2P_Promotions (title, bonus_percent, start_time, end_time) VALUES (@title, @bonus, @start, @end)');
+        await pgPool.query(`
+            INSERT INTO P2P_Promotions (title, bonus_percent, start_time, end_time) 
+            VALUES ($1, $2, CAST($3 AS TIMESTAMP), CAST($4 AS TIMESTAMP))
+        `, [title, bonus_percent, start_time, end_time]);
+            
         res.json({ success: true, message: 'เพิ่มโปรโมชั่นสำเร็จ' });
-    } catch (err) { res.status(500).json({ success: false, message: err.message }); }
+    } catch (err) { 
+        res.status(500).json({ success: false, message: err.message }); 
+    }
 });
 
 app.delete('/api/admin/promotions/:id', async (req, res) => {
     try {
-        const pool = await sql.connect(dbConfig);
-        await pool.request().input('id', sql.Int, req.params.id).query('DELETE FROM P2P_Promotions WHERE promo_id = @id');
+        await pgPool.query('DELETE FROM P2P_Promotions WHERE promo_id = $1', [req.params.id]);
         res.json({ success: true, message: 'ลบสำเร็จ' });
-    } catch (err) { res.status(500).json({ success: false, message: err.message }); }
+    } catch (err) { 
+        res.status(500).json({ success: false, message: err.message }); 
+    }
 });
 
 // 2. จัดการป้ายโฆษณาคั่นเวลา (ADS)
 app.get('/api/admin/ads', async (req, res) => {
     try {
-        const pool = await sql.connect(dbConfig);
-        const result = await pool.request().query('SELECT * FROM P2P_Ads ORDER BY created_at DESC');
-        res.json({ success: true, ads: result.recordset });
-    } catch (err) { res.status(500).json({ success: false, message: err.message }); }
+        const result = await pgPool.query('SELECT * FROM P2P_Ads ORDER BY created_at DESC');
+        res.json({ success: true, ads: result.rows });
+    } catch (err) { 
+        res.status(500).json({ success: false, message: err.message }); 
+    }
 });
 
 app.post('/api/admin/ads', async (req, res) => {
     try {
         const { title, description, media_type, media_url } = req.body;
-        const pool = await sql.connect(dbConfig);
-        await pool.request()
-            .input('title', sql.NVarChar, title || '') // รองรับภาษาไทย
-            .input('desc', sql.NVarChar, description || '') // รองรับภาษาไทย
-            .input('type', sql.VarChar, media_type)
-            .input('url', sql.VarChar, media_url)
-            .query('INSERT INTO P2P_Ads (title, description, media_type, media_url) VALUES (@title, @desc, @type, @url)');
+        await pgPool.query(`
+            INSERT INTO P2P_Ads (title, description, media_type, media_url) 
+            VALUES ($1, $2, $3, $4)
+        `, [title || '', description || '', media_type, media_url]);
+            
         res.json({ success: true, message: 'เพิ่มโฆษณาสำเร็จ' });
     } catch (err) { 
         res.status(500).json({ success: false, message: err.message }); 
     }
 });
+
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // ✏️ API สำหรับแก้ไขโฆษณา (อัปเดตข้อความ + รูปปก)
 // ==========================================
 app.put('/api/admin/ads/:id', async (req, res) => {
@@ -7621,6 +7036,7 @@ app.put('/api/admin/ads/:id', async (req, res) => {
 });
 
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🗑️ API สำหรับลบโฆษณา
 // ==========================================
 app.delete('/api/admin/ads/:id', async (req, res) => {
@@ -7639,7 +7055,9 @@ app.delete('/api/admin/ads/:id', async (req, res) => {
 // ==========================================
 // 🌟 [ADMIN] ADS และ โปรโมชั่น  สิ้นสุด
 // ==========================================
+
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 💸 [CLIENT] สร้างคำขอถอนเงิน (P2P) - อัปเดตบันทึกบัญชีธนาคาร
 // ==========================================
 app.post('/api/p2p/request-withdraw', async (req, res) => {
@@ -7651,76 +7069,71 @@ app.post('/api/p2p/request-withdraw', async (req, res) => {
             return res.status(400).json({ success: false, message: 'กรุณาระบุจำนวนเงินและเลือกบัญชีธนาคาร' });
         }
 
-        const pool = await sql.connect(dbConfig);
-        const transaction = new sql.Transaction(pool);
-        await transaction.begin();
+        const client = await pgPool.connect(); // 🌟 ใช้ Transaction
+        await client.query('BEGIN');
 
         try {
-            const userCheck = await transaction.request()
-                .input('uid', sql.Int, requester_id)
-                .query(`
-                    SELECT u.currency_code, w.balance 
-                    FROM users u 
-                    LEFT JOIN Wallets w ON u.user_id = w.user_id 
-                    WHERE u.user_id = @uid
-                `);
+            const userCheck = await client.query(`
+                SELECT u.currency_code, w.balance 
+                FROM users u 
+                LEFT JOIN Wallets w ON u.user_id = w.user_id 
+                WHERE u.user_id = $1
+            `, [requester_id]);
                 
-            if (userCheck.recordset.length === 0) throw new Error('ไม่พบข้อมูลผู้ใช้');
+            if (userCheck.rows.length === 0) throw new Error('ไม่พบข้อมูลผู้ใช้');
             
-            const userCurrency = userCheck.recordset[0].currency_code;
-            const currentBalance = parseFloat(userCheck.recordset[0].balance || 0);
+            const userCurrency = userCheck.rows[0].currency_code;
+            const currentBalance = parseFloat(userCheck.rows[0].balance || 0);
             const reqAmount = parseFloat(amount);
 
             if (currentBalance < reqAmount) throw new Error('ยอดเงินไม่เพียงพอ');
 
-            const settings = await transaction.request().query('SELECT TOP 1 * FROM P2P_Settings');
-            const config = settings.recordset.length > 0 ? settings.recordset[0] : {};
+            const settings = await client.query('SELECT * FROM P2P_Settings LIMIT 1');
+            const config = settings.rows.length > 0 ? settings.rows[0] : {};
             const feePercent = parseFloat(config.withdraw_fee_percent || 5);
             const feeAmount = (reqAmount * feePercent) / 100;
             const netAmount = reqAmount - feeAmount; 
             const providerReward = (netAmount * parseFloat(config.provider_reward_percent || 15)) / 100;
 
             // 🛡️ หักเงินในกระเป๋า (ป้องกันการกดเบิ้ลรัวๆ)
-            const updateWallet = await transaction.request()
-                .input('uid', sql.Int, requester_id)
-                .input('amt', sql.Decimal(18, 4), reqAmount)
-                .query(`UPDATE Wallets SET balance = balance - @amt WHERE user_id = @uid AND balance >= @amt`);
+            const updateWallet = await client.query(`
+                UPDATE Wallets SET balance = balance - $1 WHERE user_id = $2 AND balance >= $1
+            `, [reqAmount, requester_id]);
 
-            if (updateWallet.rowsAffected[0] === 0) {
+            if (updateWallet.rowCount === 0) {
                 throw new Error('ยอดเงินในกระเป๋าไม่เพียงพอ หรือมีการทำรายการซ้อนทับกันครับ');
             }
 
             // บันทึกประวัติ Transaction ฝั่ง Wallet
-            await transaction.request()
-                .input('uid', sql.Int, requester_id)
-                .input('amt', sql.Decimal(18, 4), -reqAmount)
-                .query(`
-                    INSERT INTO Transactions (user_id, amount, transaction_type, title, status, created_at) 
-                    VALUES (@uid, @amt, 'P2P_Withdraw_Hold', N'หักเงินเพื่อสร้างคำขอถอนเงิน P2P', 'Pending', DATEADD(hour, 7, GETUTCDATE()))
-                `);
+            await client.query(`
+                INSERT INTO Transactions (user_id, amount, transaction_type, title, status, created_at) 
+                VALUES ($1, $2, 'P2P_Withdraw_Hold', 'หักเงินเพื่อสร้างคำขอถอนเงิน P2P', 'Pending', CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Bangkok')
+            `, [requester_id, -reqAmount]);
             
-            // 🌟 2. บันทึกคำขอถอนเงิน (แทรก user_bank_id ลงฐานข้อมูลให้เรียบร้อย)
-            await transaction.request()
-                .input('req_id', sql.Int, requester_id)
-                .input('bank_id', sql.Int, user_bank_id) // 👈 จุดนี้คือหัวใจสำคัญที่ทำให้ธนาคารไปโชว์ให้คนรับงานเห็น
-                .input('curr', sql.VarChar, userCurrency)
-                .input('amt', sql.Decimal(18, 4), reqAmount)
-                .input('fee', sql.Decimal(18, 4), feeAmount)
-                .input('net', sql.Decimal(18, 4), netAmount)
-                .input('reward', sql.Decimal(18, 4), providerReward)
-                .input('timeout', sql.Int, parseInt(config.request_timeout_minutes || 15))
-                .query(`
-                    INSERT INTO P2P_Requests 
-                    (requester_id, user_bank_id, request_type, currency, amount, bonus_or_fee, net_amount, provider_reward, status, created_at, expires_at) 
-                    VALUES 
-                    (@req_id, @bank_id, 'WITHDRAW', @curr, @amt, @fee, @net, @reward, 'PENDING', DATEADD(hour, 7, GETUTCDATE()), DATEADD(minute, @timeout, DATEADD(hour, 7, GETUTCDATE())))
-                `);
+            // 🌟 2. บันทึกคำขอถอนเงิน (แทรก user_bank_id ลงฐานข้อมูลให้เรียบร้อย และบวกเวลา expires_at ด้วย interval)
+            await client.query(`
+                INSERT INTO P2P_Requests 
+                (requester_id, user_bank_id, request_type, currency, amount, bonus_or_fee, net_amount, provider_reward, status, created_at, expires_at) 
+                VALUES 
+                ($1, $2, 'WITHDRAW', $3, $4, $5, $6, $7, 'PENDING', CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Bangkok', (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Bangkok') + ($8 || ' minutes')::interval)
+            `, [
+                requester_id, 
+                user_bank_id, 
+                userCurrency, 
+                reqAmount, 
+                feeAmount, 
+                netAmount, 
+                providerReward, 
+                parseInt(config.request_timeout_minutes || 15)
+            ]);
 
-            await transaction.commit();
+            await client.query('COMMIT');
             res.json({ success: true, message: 'สร้างคำขอถอนเงินสำเร็จ' });
         } catch (err) {
-            await transaction.rollback();
+            await client.query('ROLLBACK');
             throw err;
+        } finally {
+            client.release();
         }
     } catch (err) {
         console.error("Request Withdraw Error:", err);
@@ -7728,9 +7141,8 @@ app.post('/api/p2p/request-withdraw', async (req, res) => {
     }
 });
 
-
-
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🏦 [GET] ดึงข้อมูลเตรียมถอนเงิน (Wallet + Banks + Logo)
 // ==========================================
 app.get('/api/p2p/withdraw-info/:userId', async (req, res) => {
@@ -7738,28 +7150,27 @@ app.get('/api/p2p/withdraw-info/:userId', async (req, res) => {
         const uid = parseInt(req.params.userId, 10);
         if (!uid) return res.status(400).json({ success: false, message: 'Invalid ID' });
 
-        const pool = await sql.connect(dbConfig);
-        
         // 1. ดึงข้อมูล Wallet
-        const userDb = await pool.request().input('uid', sql.Int, uid).query(`
-            SELECT currency_code, ISNULL((SELECT balance FROM Wallets WHERE user_id = @uid), 0) as balance 
-            FROM users WHERE user_id = @uid
-        `);
-        if (userDb.recordset.length === 0) return res.json({ success: false, message: 'ไม่พบผู้ใช้' });
+        const userDb = await pgPool.query(`
+            SELECT currency_code, COALESCE((SELECT balance FROM Wallets WHERE user_id = $1), 0) as balance 
+            FROM users WHERE user_id = $1
+        `, [uid]);
         
-        const { currency_code, balance } = userDb.recordset[0];
+        if (userDb.rows.length === 0) return res.json({ success: false, message: 'ไม่พบผู้ใช้' });
+        
+        const { currency_code, balance } = userDb.rows[0];
 
-        // 2. ดึงบัญชีธนาคารที่อนุมัติแล้ว พร้อมดึง logo_url และ currency_code
         // 2. ดึงบัญชีธนาคารที่อนุมัติแล้ว พร้อมดึง logo_url, currency_code และ country
-        const banksDb = await pool.request().input('uid', sql.Int, uid).query(`
+        const banksDb = await pgPool.query(`
             SELECT ub.user_bank_id, ub.account_number, ub.currency_code, bk.bank_name, bk.logo_url, bk.country 
             FROM UserBanks ub
             LEFT JOIN Banks bk ON ub.bank_id = bk.bank_id
-            WHERE ub.user_id = @uid AND ub.status = 'Approved'
-        `);
+            WHERE ub.user_id = $1 AND (ub.status = 'Approved' OR ub.status = 'APPROVED')
+        `, [uid]);
+            
         // 3. ดึงค่าธรรมเนียม
-        const setDb = await pool.request().query('SELECT TOP 1 withdraw_fee_percent FROM P2P_Settings');
-        const feePercent = setDb.recordset.length > 0 ? parseFloat(setDb.recordset[0].withdraw_fee_percent) : 5;
+        const setDb = await pgPool.query('SELECT withdraw_fee_percent FROM P2P_Settings LIMIT 1');
+        const feePercent = setDb.rows.length > 0 ? parseFloat(setDb.rows[0].withdraw_fee_percent) : 5;
 
         // 4. อัตราแลกเปลี่ยนสำรอง
         let usdRate = currency_code === 'THB' ? 35 : currency_code === 'LAK' ? 22000 : 1; 
@@ -7770,7 +7181,7 @@ app.get('/api/p2p/withdraw-info/:userId', async (req, res) => {
             balance: parseFloat(balance),
             fee_percent: feePercent,
             usd_rate: usdRate,
-            banks: banksDb.recordset // 🌟 ส่งรายชื่อบัญชี (พร้อมโลโก้) ไปให้หน้าเว็บ
+            banks: banksDb.rows // 🌟 ส่งรายชื่อบัญชี (พร้อมโลโก้) ไปให้หน้าเว็บ
         });
     } catch (err) {
         console.error("withdraw-info API Error:", err);
@@ -7778,27 +7189,28 @@ app.get('/api/p2p/withdraw-info/:userId', async (req, res) => {
     }
 });
 
+
+// ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
+// 🚫 [API] ลูกค้ายกเลิกคำขอถอนเงินที่ยังไม่มีคนรับ
+// ==========================================
 app.post('/api/p2p/cancel-withdraw-request', async (req, res) => {
     try {
         const { request_id, requester_id } = req.body;
         if (!request_id || !requester_id) return res.status(400).json({ success: false, message: 'ข้อมูลไม่ครบถ้วน' });
 
-        const pool = await sql.connect(dbConfig);
-        const transaction = new sql.Transaction(pool);
-        await transaction.begin();
+        const client = await pgPool.connect(); // ใช้ Transaction
+        await client.query('BEGIN');
 
         try {
-            const reqCheck = await transaction.request()
-                .input('rid', sql.Int, request_id)
-                .input('uid', sql.Int, requester_id)
-                .query(`
-                    SELECT amount, currency, status, expires_at 
-                    FROM P2P_Requests 
-                    WHERE request_id = @rid AND requester_id = @uid AND request_type = 'WITHDRAW'
-                `);
+            const reqCheck = await client.query(`
+                SELECT amount, currency, status, expires_at 
+                FROM P2P_Requests 
+                WHERE request_id = $1 AND requester_id = $2 AND request_type = 'WITHDRAW'
+            `, [request_id, requester_id]);
 
-            if (reqCheck.recordset.length === 0) throw new Error('ไม่พบคำขอ หรือคุณไม่มีสิทธิ์ยกเลิกคำขอนี้');
-            const requestData = reqCheck.recordset[0];
+            if (reqCheck.rows.length === 0) throw new Error('ไม่พบคำขอ หรือคุณไม่มีสิทธิ์ยกเลิกคำขอนี้');
+            const requestData = reqCheck.rows[0];
 
             // 🌟 เช็คเวลาปัจจุบัน เทียบกับเวลาหมดอายุ
             const now = new Date();
@@ -7812,40 +7224,39 @@ app.post('/api/p2p/cancel-withdraw-request', async (req, res) => {
 
             const refundAmount = parseFloat(requestData.amount); 
 
-            await transaction.request().input('rid', sql.Int, request_id)
-                .query(`UPDATE P2P_Requests SET status = 'CANCELLED' WHERE request_id = @rid`);
+            await client.query(`UPDATE P2P_Requests SET status = 'CANCELLED' WHERE request_id = $1`, [request_id]);
 
-            await transaction.request().input('uid', sql.Int, requester_id).input('amt', sql.Decimal(18, 4), refundAmount)
-                .query(`UPDATE Wallets SET balance = balance + @amt WHERE user_id = @uid`);
+            await client.query(`UPDATE Wallets SET balance = balance + $1 WHERE user_id = $2`, [refundAmount, requester_id]);
 
-            await transaction.request()
-                .input('uid', sql.Int, requester_id).input('amt', sql.Decimal(18, 4), refundAmount).input('curr', sql.VarChar, requestData.currency).input('rid', sql.Int, request_id)
-                .query(`
-                    INSERT INTO Transactions (user_id, amount, transaction_type, title, status, created_at) 
-                    VALUES (@uid, @amt, 'P2P_Withdraw_Refund', N'คืนเงินยกเลิกคำขอถอนเงิน P2P (Job ID: ' + CAST(@rid AS NVARCHAR) + ')', 'Completed', GETDATE())
-                `);
+            await client.query(`
+                INSERT INTO Transactions (user_id, amount, transaction_type, title, status, created_at) 
+                VALUES ($1, $2, 'P2P_Withdraw_Refund', $3, 'Completed', CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Bangkok')
+            `, [requester_id, refundAmount, `คืนเงินยกเลิกคำขอถอนเงิน P2P (Job ID: ${request_id})`]);
 
-            await transaction.commit();
+            await client.query('COMMIT');
             res.json({ success: true, message: 'ยกเลิกคำขอและคืนเงินเข้ากระเป๋าเต็มจำนวนสำเร็จครับ' });
 
         } catch (err) {
-            await transaction.rollback();
+            await client.query('ROLLBACK');
             throw err;
+        } finally {
+            client.release();
         }
     } catch (err) {
         res.status(500).json({ success: false, message: err.message });
     }
 });
+
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 📋 [GET] ดึงรายการงาน P2P ที่ฉันรับมาดูแล (ฝั่งผู้รับงาน)
 // ==========================================
 app.get('/api/p2p/my-jobs/:userId', async (req, res) => {
     try {
         const pid = parseInt(req.params.userId, 10);
-        const pool = await sql.connect(dbConfig);
         
         // 🌟 ดึงแบบตรงไปตรงมา ผ่าน user_bank_id เหมือนหน้าบอร์ดเลยครับ!
-        const jobsDb = await pool.request().input('pid', sql.Int, pid).query(`
+        const jobsDb = await pgPool.query(`
             SELECT r.*, 
                    u.username AS requester_name, 
                    bk.bank_name AS req_bank_name, 
@@ -7857,21 +7268,21 @@ app.get('/api/p2p/my-jobs/:userId', async (req, res) => {
             LEFT JOIN Users u ON r.requester_id = u.user_id
             LEFT JOIN UserBanks ub ON r.user_bank_id = ub.user_bank_id
             LEFT JOIN Banks bk ON ub.bank_id = bk.bank_id
-            WHERE r.provider_id = @pid 
+            WHERE r.provider_id = $1 
               AND r.status IN ('ACCEPTED', 'VERIFYING')
             ORDER BY r.request_id DESC
-        `);
-        
-        res.json({ success: true, jobs: jobsDb.recordset });
+        `, [pid]);
+            
+        res.json({ success: true, jobs: jobsDb.rows });
     } catch (err) {
         console.error("My Jobs API Error:", err);
         res.status(500).json({ success: false, message: err.message });
     }
 });
+
+
 // ==========================================
-// 📋 [GET] ดึงประวัติคำขอถอนเงินของลูกค้า (ดึงข้อมูลฝั่งผู้รับงานมาด้วย)
-// ==========================================
-// ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 📋 [GET] ดึงประวัติคำขอถอนเงินของลูกค้า (ดึงข้อมูลฝั่งผู้รับงานมาด้วย)
 // ==========================================
 app.get('/api/p2p/my-requests/:userId', async (req, res) => {
@@ -7879,48 +7290,46 @@ app.get('/api/p2p/my-requests/:userId', async (req, res) => {
         const uid = req.params.userId;
         if (!uid || uid === 'undefined') return res.status(400).json({ success: false, message: 'Invalid ID' });
 
-        const pool = await sql.connect(dbConfig);
-        const reqDb = await pool.request()
-            .input('uid', sql.Int, parseInt(uid, 10))
-            .query(`
-                SELECT r.request_id, r.amount, r.net_amount, r.currency, r.status, r.created_at, r.expires_at, r.slip_url, r.provider_id,
-                       bk.bank_name, bk.logo_url, bk.country, ub.account_number,
-                       pu.username AS provider_username,
-                       pbk.bank_name AS provider_bank_name,
-                       pbk.logo_url AS provider_logo_url,
-                       pbk.country AS provider_country,
-                       pb.account_number AS provider_account_number
-                FROM P2P_Requests r
-                LEFT JOIN UserBanks ub ON r.user_bank_id = ub.user_bank_id
-                LEFT JOIN Banks bk ON ub.bank_id = bk.bank_id
-                
-                -- 🌟 เชื่อมตาราง Users เพื่อเอาชื่อคนรับงาน
-                LEFT JOIN Users pu ON r.provider_id = pu.user_id
-                
-                -- 🌟 แก้ไขตรงนี้: ดึงบัญชีของผู้รับงาน ที่ผูกกับระบบและตรงกับสกุลเงินของงาน
-                OUTER APPLY (
-                    SELECT TOP 1 b.account_number, b.bank_id
-                    FROM UserBanks b
-                    WHERE b.user_id = r.provider_id 
-                      AND b.currency_code = r.currency 
-                      AND b.status = 'Approved'
-                ) pb
-                LEFT JOIN Banks pbk ON pb.bank_id = pbk.bank_id
-                
-                WHERE r.requester_id = @uid AND r.request_type = 'WITHDRAW'
-                ORDER BY r.request_id DESC
-            `);
-        res.json({ success: true, requests: reqDb.recordset });
+        // 🌟 แปลง OUTER APPLY ของ SQL Server ให้อยู่ในรูป LEFT JOIN เพื่อรองรับ PostgreSQL
+        const reqDb = await pgPool.query(`
+            SELECT r.request_id, r.amount, r.net_amount, r.currency, r.status, r.created_at, r.expires_at, r.slip_url, r.provider_id,
+                   bk.bank_name, bk.logo_url, bk.country, ub.account_number,
+                   pu.username AS provider_username,
+                   pbk.bank_name AS provider_bank_name,
+                   pbk.logo_url AS provider_logo_url,
+                   pbk.country AS provider_country,
+                   pb.account_number AS provider_account_number
+            FROM P2P_Requests r
+            LEFT JOIN UserBanks ub ON r.user_bank_id = ub.user_bank_id
+            LEFT JOIN Banks bk ON ub.bank_id = bk.bank_id
+            
+            -- 🌟 เชื่อมตาราง Users เพื่อเอาชื่อคนรับงาน
+            LEFT JOIN Users pu ON r.provider_id = pu.user_id
+            
+            -- 🌟 ดึงบัญชีของผู้รับงาน ที่ผูกกับระบบและตรงกับสกุลเงินของงาน
+            LEFT JOIN (
+                SELECT DISTINCT ON (user_id, currency_code) user_id, currency_code, account_number, bank_id
+                FROM UserBanks
+                WHERE status = 'Approved' OR status = 'APPROVED'
+                ORDER BY user_id, currency_code, user_bank_id DESC
+            ) pb ON pb.user_id = r.provider_id AND pb.currency_code = r.currency
+            
+            LEFT JOIN Banks pbk ON pb.bank_id = pbk.bank_id
+            
+            WHERE r.requester_id = $1 AND r.request_type = 'WITHDRAW'
+            ORDER BY r.request_id DESC
+        `, [parseInt(uid, 10)]);
+            
+        res.json({ success: true, requests: reqDb.rows });
     } catch (err) {
         console.error("My Requests API Error:", err);
         res.status(500).json({ success: false, message: err.message });
     }
 });
+
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 📤 [POST] อัปโหลดสลิปโอนเงิน (พร้อมระบบ Anti-Fraud + การคืนเงินที่ปลอดภัย 100%)
-// ==========================================
-// ==========================================
-// 📤 [POST] อัปโหลดสลิปโอนเงิน (พร้อมระบบ Anti-Fraud และระบบตรวจสอบตัวแปรหาย)
 // ==========================================
 app.post('/api/p2p/provider-upload-slip', async (req, res) => {
     try {
@@ -7935,7 +7344,6 @@ app.post('/api/p2p/provider-upload-slip', async (req, res) => {
         if (!transfer_date) missingFields.push('transfer_date (วันที่โอน)');
         if (!transfer_time) missingFields.push('transfer_time (เวลาที่โอน)');
 
-        // ถ้ามีตัวไหนหายไป ให้ Alert บอกหน้าเว็บชัดๆ เลยว่าตัวไหน!
         if (missingFields.length > 0) {
             return res.status(400).json({ 
                 success: false, 
@@ -7943,19 +7351,14 @@ app.post('/api/p2p/provider-upload-slip', async (req, res) => {
             });
         }
 
-        const pool = await sql.connect(dbConfig);
-        
         // 1. ดึงข้อมูลงานมาตรวจสอบ
-        const jobCheck = await pool.request()
-            .input('rid', sql.Int, request_id)
-            .input('pid', sql.Int, provider_id)
-            .query(`SELECT * FROM P2P_Requests WHERE request_id = @rid AND provider_id = @pid AND status = 'ACCEPTED'`);
+        const jobCheck = await pgPool.query(`SELECT * FROM P2P_Requests WHERE request_id = $1 AND provider_id = $2 AND status = 'ACCEPTED'`, [request_id, provider_id]);
         
-        if (jobCheck.recordset.length === 0) {
+        if (jobCheck.rows.length === 0) {
             return res.status(400).json({ success: false, message: 'ไม่พบงานนี้ หรือสถานะงานไม่ถูกต้อง' });
         }
 
-        const job = jobCheck.recordset[0];
+        const job = jobCheck.rows[0];
         const expectedAmount = parseFloat(job.net_amount);
         const inputAmount = parseFloat(transfer_amount);
 
@@ -7965,52 +7368,35 @@ app.post('/api/p2p/provider-upload-slip', async (req, res) => {
 
             if (currentErrorCount >= 3) {
                 // 💥 ทุจริตครบ 3 ครั้ง: ใช้ Transaction คืนเงินตามสูตรของเจ้านายเป๊ะๆ
-                const transaction = new sql.Transaction(pool);
-                await transaction.begin();
+                const client = await pgPool.connect();
+                await client.query('BEGIN');
 
                 try {
                     // 2.1 บล็อกผู้รับงาน
-                    await transaction.request()
-                        .input('pid', sql.Int, provider_id)
-                        .query(`UPDATE Users SET status = 'Blocked' WHERE user_id = @pid`);
+                    await client.query(`UPDATE Users SET status = 'Blocked' WHERE user_id = $1`, [provider_id]);
 
                     // 2.2 ยกเลิกงาน
-                    await transaction.request()
-                        .input('rid', sql.Int, request_id)
-                        .query(`UPDATE P2P_Requests SET status = 'CANCELLED' WHERE request_id = @rid`);
+                    await client.query(`UPDATE P2P_Requests SET status = 'CANCELLED' WHERE request_id = $1`, [request_id]);
 
                     // 2.3 คืนเงินเข้ากระเป๋าผู้ส่งคำขอถอน
                     const refundAmount = parseFloat(job.amount);
-                    await transaction.request()
-                        .input('uid', sql.Int, job.requester_id)
-                        .input('amt', sql.Decimal(18, 4), refundAmount)
-                        .query(`UPDATE Wallets SET balance = balance + @amt WHERE user_id = @uid`);
+                    await client.query(`UPDATE Wallets SET balance = balance + $1 WHERE user_id = $2`, [refundAmount, job.requester_id]);
 
                     // 2.4 บันทึกประวัติ Transaction
-                    await transaction.request()
-                        .input('uid', sql.Int, job.requester_id)
-                        .input('amt', sql.Decimal(18, 4), refundAmount)
-                        .input('curr', sql.VarChar, job.currency)
-                        .input('rid', sql.Int, request_id)
-                        .query(`
-                            INSERT INTO Transactions (user_id, amount, transaction_type, title, status, created_at) 
-                            VALUES (@uid, @amt, 'P2P_Withdraw_Refund', N'คืนเงินระบบ P2P เนื่องจากผู้รับงานทุจริต (Job ID: ' + CAST(@rid AS NVARCHAR) + ')', 'Completed', GETDATE())
-                        `);
+                    await client.query(`
+                        INSERT INTO Transactions (user_id, amount, transaction_type, title, status, created_at) 
+                        VALUES ($1, $2, 'P2P_Withdraw_Refund', $3, 'Completed', CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Bangkok')
+                    `, [job.requester_id, refundAmount, `คืนเงินระบบ P2P เนื่องจากผู้รับงานทุจริต (Job ID: ${request_id})`]);
 
                     // 2.5 ส่งแจ้งเตือนหาลูกค้า
                     try {
-                        await transaction.request()
-                            .input('req_id', sql.Int, job.requester_id)
-                            .input('msg', sql.NVarChar(sql.MAX), 'ผู้รับงานมีเจตนาทุจริต ผู้รับงานโดนบล็อกแล้ว ให้ส่งคำขอใหม่ (เราได้คืนเงินกลับให้คุณแล้วกรุณาตรวจสอบ)')
-                            .query(`
-                                INSERT INTO Notifications (user_id, message, type, is_read, created_at)
-                                VALUES (@req_id, @msg, 'SYSTEM', 0, GETDATE())
-                            `);
-                    } catch (notiErr) {
-                        // ข้ามถ้าไม่มีตารางแจ้งเตือน
-                    }
+                        await client.query(`
+                            INSERT INTO Notifications (user_id, message, type, is_read, created_at)
+                            VALUES ($1, $2, 'SYSTEM', '0', CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Bangkok')
+                        `, [job.requester_id, 'ผู้รับงานมีเจตนาทุจริต ผู้รับงานโดนบล็อกแล้ว ให้ส่งคำขอใหม่ (เราได้คืนเงินกลับให้คุณแล้วกรุณาตรวจสอบ)']);
+                    } catch (notiErr) {}
 
-                    await transaction.commit(); // จบ Transaction ปลอดภัย 100%
+                    await client.query('COMMIT'); 
 
                     return res.status(403).json({ 
                         success: false, 
@@ -8018,16 +7404,15 @@ app.post('/api/p2p/provider-upload-slip', async (req, res) => {
                     });
 
                 } catch (transactionErr) {
-                    await transaction.rollback(); // ถ้าพังตรงไหน ย้อนกลับทุกอย่าง
+                    await client.query('ROLLBACK');
                     throw transactionErr;
+                } finally {
+                    client.release();
                 }
 
             } else {
                 // ⚠️ กรอกผิดแต่ยังไม่ครบ 3 ครั้ง: อัปเดตตัวนับและแจ้งเตือน
-                await pool.request()
-                    .input('rid', sql.Int, request_id)
-                    .input('errCount', sql.Int, currentErrorCount)
-                    .query(`UPDATE P2P_Requests SET slip_error_count = @errCount WHERE request_id = @rid`);
+                await pgPool.query(`UPDATE P2P_Requests SET slip_error_count = $1 WHERE request_id = $2`, [currentErrorCount, request_id]);
 
                 return res.status(400).json({ 
                     success: false, 
@@ -8035,27 +7420,17 @@ app.post('/api/p2p/provider-upload-slip', async (req, res) => {
                 });
             }
         }
-// 🌟 3. ถ้ายอดเงินตรงกันเป๊ะ: บันทึกข้อมูลและเปลี่ยนสถานะเป็น VERIFYING
-        // เราจะไม่ใช้ input('t_time', sql.Time, ...) แล้ว เพื่อหลีกเลี่ยง Invalid time
-        // แต่จะบังคับให้ SQL แปลงจาก String ไปเป็น Time ด้วยคำสั่ง CAST() หรือ CONVERT() ในตัว Query เลย
-
-        await pool.request()
-            .input('rid', sql.Int, request_id)
-            .input('slip', sql.NVarChar(sql.MAX), slip_image) 
-            .input('t_amount', sql.Decimal(18,4), inputAmount)
-            .input('t_date', sql.Date, transfer_date)
-            .input('t_time_str', sql.VarChar, transfer_time) // 👈 รับเป็น VarChar แทน!
-            .query(`
-                UPDATE P2P_Requests 
-                SET slip_url = @slip, 
-                    transfer_amount = @t_amount,
-                    transfer_date = @t_date,
-                    -- ใช้ CAST แปลง String (ที่มีรูปแบบ HH:mm) เป็นประเภท TIME ของ SQL
-                    transfer_time = CAST(@t_time_str AS TIME), 
-                    slip_error_count = 0, 
-                    status = 'VERIFYING' 
-                WHERE request_id = @rid
-            `);
+        // 🌟 3. ถ้ายอดเงินตรงกันเป๊ะ: บันทึกข้อมูลและเปลี่ยนสถานะเป็น VERIFYING
+        await pgPool.query(`
+            UPDATE P2P_Requests 
+            SET slip_url = $1, 
+                transfer_amount = $2,
+                transfer_date = CAST($3 AS DATE),
+                transfer_time = CAST($4 AS TIME), 
+                slip_error_count = 0, 
+                status = 'VERIFYING' 
+            WHERE request_id = $5
+        `, [slip_image, inputAmount, transfer_date, transfer_time, request_id]);
 
         res.json({ success: true, message: '✅ ส่งหลักฐานสำเร็จ! ระบบบันทึกข้อมูลและส่งให้ลูกค้าตรวจสอบแล้ว' });
 
@@ -8065,10 +7440,11 @@ app.post('/api/p2p/provider-upload-slip', async (req, res) => {
     }
 });
 // ==========================================
-// 🌟 API P2P ฝั่งถอนเงิน สินสุด
+// 🌟 API P2P ฝั่งถอนเงิน สิ้นสุด
 // ==========================================
 
 // ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🔔 [NOTIFICATION APIs]
 // ==========================================
 
@@ -8076,18 +7452,16 @@ app.post('/api/p2p/provider-upload-slip', async (req, res) => {
 app.get('/api/notifications/:userId', async (req, res) => {
     try {
         const uid = parseInt(req.params.userId, 10);
-        const pool = await sql.connect(dbConfig);
-        const result = await pool.request()
-            .input('uid', sql.Int, uid)
-            .query(`
-                SELECT notification_id, title, message, type, is_read, created_at
-                FROM Notifications
-                WHERE user_id = @uid AND is_deleted = 0
-                ORDER BY created_at DESC
-            `);
+        const result = await pgPool.query(`
+            SELECT notification_id, title, message, type, is_read, created_at
+            FROM Notifications
+            WHERE user_id = $1 AND (is_deleted = '0' OR is_deleted IS NULL)
+            ORDER BY created_at DESC
+        `, [uid]);
 
-        const unreadCount = result.recordset.filter(n => !n.is_read).length;
-        res.json({ success: true, notifications: result.recordset, unreadCount });
+        // เช็คจำนวนที่ยังไม่อ่าน โดยรองรับทั้ง boolean และ String '0'
+        const unreadCount = result.rows.filter(n => n.is_read === false || n.is_read === '0').length;
+        res.json({ success: true, notifications: result.rows, unreadCount });
     } catch (err) {
         res.status(500).json({ success: false, message: err.message });
     }
@@ -8097,11 +7471,7 @@ app.get('/api/notifications/:userId', async (req, res) => {
 app.post('/api/notifications/read', async (req, res) => {
     try {
         const { notification_id, user_id } = req.body;
-        const pool = await sql.connect(dbConfig);
-        await pool.request()
-            .input('nid', sql.Int, notification_id)
-            .input('uid', sql.Int, user_id)
-            .query(`UPDATE Notifications SET is_read = 1 WHERE notification_id = @nid AND user_id = @uid`);
+        await pgPool.query(`UPDATE Notifications SET is_read = '1' WHERE notification_id = $1 AND user_id = $2`, [notification_id, user_id]);
         res.json({ success: true });
     } catch (err) {
         res.status(500).json({ success: false, message: err.message });
@@ -8112,11 +7482,7 @@ app.post('/api/notifications/read', async (req, res) => {
 app.post('/api/notifications/delete', async (req, res) => {
     try {
         const { notification_id, user_id } = req.body;
-        const pool = await sql.connect(dbConfig);
-        await pool.request()
-            .input('nid', sql.Int, notification_id)
-            .input('uid', sql.Int, user_id)
-            .query(`UPDATE Notifications SET is_deleted = 1 WHERE notification_id = @nid AND user_id = @uid`);
+        await pgPool.query(`UPDATE Notifications SET is_deleted = '1' WHERE notification_id = $1 AND user_id = $2`, [notification_id, user_id]);
         res.json({ success: true, message: 'ลบการแจ้งเตือนเรียบร้อยแล้ว' });
     } catch (err) {
         res.status(500).json({ success: false, message: err.message });
@@ -8125,6 +7491,7 @@ app.post('/api/notifications/delete', async (req, res) => {
 
 
 // ==========================================
+// 🌟 ใช้งานได้เหมือนเดิม 100% ไม่พึ่งพา DB
 // 🎥 API สำหรับขอ URL อัปโหลดจาก Cloudflare Stream
 // ==========================================
 app.post('/api/get-upload-url', async (req, res) => {
@@ -8315,6 +7682,9 @@ app.post('/api/video/share', async (req, res) => {
     }
 });
 
+// ==========================================
+// 🚀 Start Server
+// ==========================================
 app.listen(port, () => {
-    console.log(`🚀 Server เปิดทำงานแล้วที่พอร์ต ${port}`);
+    console.log(`🚀 Server เปิดทำงานแล้วที่พอร์ต ${port} (Powered by PostgreSQL)`);
 });
