@@ -74,10 +74,6 @@ app.use(cors({
 // 🗄️ การเชื่อมต่อ PostgreSQL (Vercel Neon) สำหรับตาราง Video
 // ==========================================
 
-const pgPool = new Pool({
-  connectionString: process.env.DATABASE_URL, 
-});
-
 // ตรวจสอบว่าต่อติดไหม
 pgPool.connect((err, client, release) => {
   if (err) {
