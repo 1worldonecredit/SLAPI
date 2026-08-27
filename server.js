@@ -4950,12 +4950,26 @@ app.get('/api/yeeki/jackpot', async (req, res) => {
 
 // ==========================================
 // 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
-// 🌟 รายงานยอดขายหวยยี่กี (Admin Sales Report - โชว์การ์ด 12 รอบถัดไปเสมอ)
+// 🌟 รายงานยอดขายหวยยี่กี (Admin Sales Report - โชว์สไลด์ 24 รอบ ทั้งอดีตและอนาคต)
 // ==========================================
 app.get('/api/admin/yeeki/sales-report', async (req, res) => {
     try {
-        // 1. ดึง 12 รอบถัดไป (ข้ามวันได้) มาทำการ์ด
+        // 🌟 1. ดึงข้อมูล 24 รอบ (อดีตที่ออกผลแล้ว 12 รอบ + อนาคต 12 รอบ) มาแสดงแบบวนลูปข้ามวัน
         const roundsResult = await pgPool.query(`
+            WITH PastRounds AS (
+                SELECT * FROM Yeeki_Rounds 
+                WHERE close_time <= CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Bangkok'
+                  AND (category = 'YEEKI' OR category IS NULL)
+                ORDER BY close_time DESC 
+                LIMIT 12
+            ),
+            FutureRounds AS (
+                SELECT * FROM Yeeki_Rounds 
+                WHERE close_time > CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Bangkok'
+                  AND (category = 'YEEKI' OR category IS NULL)
+                ORDER BY close_time ASC 
+                LIMIT 12
+            )
             SELECT 
                 round_id, round_number, 
                 to_char(open_time, 'YYYY-MM-DD HH24:MI:SS') as open_time_str, 
@@ -4963,13 +4977,15 @@ app.get('/api/admin/yeeki/sales-report', async (req, res) => {
                 to_char(draw_time, 'YYYY-MM-DD HH24:MI:SS') as draw_time_str,
                 status as db_status,
                 result_8_super, result_4_top, result_2_bottom
-            FROM Yeeki_Rounds
-            WHERE draw_time >= CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Bangkok'
-            ORDER BY draw_date ASC, round_number ASC
-            LIMIT 12
+            FROM (
+                SELECT * FROM PastRounds
+                UNION ALL
+                SELECT * FROM FutureRounds
+            ) as CombinedRounds
+            ORDER BY close_time_str ASC
         `);
         
-        // 2. ดึงบิลทั้งหมดเฉพาะที่อยู่ใน 12 รอบนี้
+        // 🌟 2. ดึงบิลทั้งหมด "เฉพาะ" ที่อยู่ใน 24 รอบนี้ เพื่อไม่ให้หนักเซิร์ฟเวอร์
         const ordersResult = await pgPool.query(`
             SELECT 
                 o.round_id, u.username, oi.lottery_type as type, oi.selected_number as number,
@@ -4978,11 +4994,11 @@ app.get('/api/admin/yeeki/sales-report', async (req, res) => {
             JOIN Yeeki_Order_Items oi ON o.order_id = oi.order_id
             JOIN Users u ON o.user_id = u.user_id
             WHERE o.round_id IN (
-                SELECT round_id
-                FROM Yeeki_Rounds
-                WHERE draw_time >= CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Bangkok'
-                ORDER BY draw_date ASC, round_number ASC
-                LIMIT 12
+                SELECT round_id FROM (
+                    (SELECT round_id FROM Yeeki_Rounds WHERE close_time <= CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Bangkok' AND (category = 'YEEKI' OR category IS NULL) ORDER BY close_time DESC LIMIT 12)
+                    UNION ALL
+                    (SELECT round_id FROM Yeeki_Rounds WHERE close_time > CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Bangkok' AND (category = 'YEEKI' OR category IS NULL) ORDER BY close_time ASC LIMIT 12)
+                ) as CR
             )
             ORDER BY o.created_at DESC
         `);
@@ -4991,6 +5007,8 @@ app.get('/api/admin/yeeki/sales-report', async (req, res) => {
         let overallTotal = { thb: 0, lak: 0 };
         let activeRoundTotal = { thb: 0, lak: 0 };
         const jsNow = new Date(); 
+        
+        let openCount = 0; // ตัวนับให้แสดงเปิดรับแทงล่วงหน้า 12 รอบเสมอ
         
         const rounds = roundsResult.rows.map(r => {
             const roundOrders = allOrders.filter(o => o.round_id === r.round_id);
@@ -5004,16 +5022,24 @@ app.get('/api/admin/yeeki/sales-report', async (req, res) => {
             overallTotal.thb += total_thb;
             overallTotal.lak += total_lak;
             
-            const openTimeDate = new Date(r.open_time_str.replace(' ', 'T'));
-            const closeTimeDate = new Date(r.close_time_str.replace(' ', 'T'));
+            // 🌟 ล็อกโซนเวลาไทยเสมอ ป้องกันบั๊กเวลาเพี้ยนบน Server
+            const closeTimeDate = new Date(r.close_time_str.replace(' ', 'T') + '+07:00');
             
             let computedStatus = 'upcoming';
-            if (r.db_status === 'Completed' || jsNow > closeTimeDate) {
+            
+            // 🌟 3. คำนวณสถานะอัจฉริยะ (อดีต=ended, 12 รอบถัดไป=open)
+            if (r.db_status === 'Completed' || jsNow >= closeTimeDate) {
                 computedStatus = 'ended';
-            } else if (jsNow >= openTimeDate && jsNow <= closeTimeDate) {
-                computedStatus = 'open';
-                activeRoundTotal.thb += total_thb;
-                activeRoundTotal.lak += total_lak;
+            } else {
+                if (openCount < 12) {
+                    computedStatus = 'open';
+                    openCount++;
+                    // รวมยอดขายเฉพาะ 12 รอบที่กำลังเปิดรับแทง
+                    activeRoundTotal.thb += total_thb;
+                    activeRoundTotal.lak += total_lak;
+                } else {
+                    computedStatus = 'upcoming';
+                }
             }
             
             let winning_result = null;
@@ -5022,11 +5048,15 @@ app.get('/api/admin/yeeki/sales-report', async (req, res) => {
             }
             
             return {
-                round_id: r.round_id, round_number: r.round_number,
+                round_id: r.round_id, 
+                round_number: r.round_number,
                 open_time: r.open_time_str.substring(11, 16),
                 close_time: r.close_time_str.substring(11, 16),
                 draw_time: r.draw_time_str.substring(11, 16),
-                status: computedStatus, total_thb, total_lak, winning_result,
+                status: computedStatus, 
+                total_thb, 
+                total_lak, 
+                winning_result,
                 orders: roundOrders
             };
         });
