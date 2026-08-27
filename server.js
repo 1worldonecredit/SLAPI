@@ -5753,29 +5753,84 @@ app.get('/api/admin/yeeki-rounds', async (req, res) => {
     }
 });
 // ==========================================
-// 🌟 🚀 API ดึงข้อมูลรอบยี่กีสด (ดึงข้ามวันเผื่อไว้เลย)
+// 🌟 🚀 API ยี่กีสุดฉลาด: สร้างรอบอัตโนมัติ + ควบคุมโควต้า 12 รอบ
 // ==========================================
 app.get('/api/yeeki-rounds/live', async (req, res) => {
     try {
-        // ดึงข้อมูล 36 รอบล่าสุด (เอาของเมื่อวานนิดหน่อย + วันนี้เต็มๆ + วันพรุ่งนี้เผื่อไว้)
-        // โดยให้เรียงตามเวลาปิดรับแทง (close_time) จากน้อยไปมากเสมอ
+        // 🎯 1. ตั้งค่า: ต้องการให้เปิดขายล่วงหน้ากี่รอบ? (แอดมินปรับตรงนี้ได้เลย)
+        const MAX_OPEN_ROUNDS = 12; 
+
+        // 🧠 2. ระบบ Auto-Generate: เช็คว่ามีรอบของ "วันพรุ่งนี้" หรือยัง? ถ้ายังไม่มีให้สร้างทันที!
+        const tomorrow = new Date();
+        tomorrow.setDate(tomorrow.getDate() + 1);
+        const tomorrowStr = tomorrow.toLocaleDateString('en-CA', { timeZone: 'Asia/Bangkok' });
+        
+        const checkTomorrow = await pgPool.query(`SELECT 1 FROM Yeeki_Rounds WHERE CAST(draw_date AS DATE) = CAST($1 AS DATE) AND (category = 'YEEKI' OR category IS NULL)`, [tomorrowStr]);
+        
+        if (checkTomorrow.rows.length === 0) {
+            // เสก 24 รอบของวันพรุ่งนี้ ลงตาราง Database ทันทีแบบ Real-time
+            for (let i = 1; i <= 24; i++) {
+                const hour = (i - 1).toString().padStart(2, '0');
+                const openTime = `${tomorrowStr} ${hour}:01:00`;
+                const closeTime = `${tomorrowStr} ${hour}:55:00`;
+                const drawTime = `${tomorrowStr} ${hour}:56:00`;
+                
+                await pgPool.query(`
+                    INSERT INTO Yeeki_Rounds (draw_date, round_number, open_time, close_time, draw_time, status, category) 
+                    VALUES (CAST($1 AS DATE), $2, CAST($3 AS TIMESTAMP), CAST($4 AS TIMESTAMP), CAST($5 AS TIMESTAMP), 'Pending', 'YEEKI')
+                `, [tomorrowStr, i, openTime, closeTime, drawTime]);
+            }
+        }
+
+        // 🔍 3. ดึงข้อมูลอดีต 10 รอบ และอนาคต 20 รอบ (ทะลุข้ามวันแน่นอน เพราะเพิ่งสร้างเมื่อกี้)
         const roundsResult = await pgPool.query(`
-            SELECT 
-                round_id, 
-                round_number, 
-                status as db_status,
+            WITH PastRounds AS (
+                SELECT * FROM Yeeki_Rounds 
+                WHERE close_time <= CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Bangkok'
+                  AND (category = 'YEEKI' OR category IS NULL)
+                ORDER BY close_time DESC LIMIT 10
+            ),
+            FutureRounds AS (
+                SELECT * FROM Yeeki_Rounds 
+                WHERE close_time > CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Bangkok'
+                  AND (category = 'YEEKI' OR category IS NULL)
+                ORDER BY close_time ASC LIMIT 20
+            )
+            SELECT round_id, round_number, status as db_status,
                 to_char(open_time, 'YYYY-MM-DD"T"HH24:MI:SS"+07:00"') as open_time_str,
                 to_char(close_time, 'YYYY-MM-DD"T"HH24:MI:SS"+07:00"') as close_time_str,
                 to_char(draw_time, 'YYYY-MM-DD"T"HH24:MI:SS"+07:00"') as draw_time_str
-            FROM Yeeki_Rounds
-            WHERE category = 'YEEKI' OR category IS NULL
-            ORDER BY close_time DESC
-            LIMIT 36
+            FROM (SELECT * FROM PastRounds UNION ALL SELECT * FROM FutureRounds) as CombinedRounds
+            ORDER BY close_time_str ASC;
         `);
 
-        // คืนค่าไปให้หน้าบ้าน (เอาไป sort กลับหัวให้ถูกทิศก่อนส่ง)
-        const sortedData = roundsResult.rows.sort((a, b) => new Date(a.close_time_str) - new Date(b.close_time_str));
-        res.json({ success: true, rounds: sortedData });
+        // 🤖 4. API คำนวณสถานะให้เสร็จสรรพ หน้าบ้านไม่ต้องคิด!
+        let openCount = 0;
+        const now = new Date();
+        const finalRounds = roundsResult.rows.map(r => {
+            const closeTime = new Date(r.close_time_str);
+            const isEnded = r.db_status === 'Completed' || now >= closeTime;
+            
+            let finalStatus = 'upcoming'; // ค่าเริ่มต้นคือรอเปิด
+            
+            if (isEnded) {
+                finalStatus = 'ended';
+            } else if (openCount < MAX_OPEN_ROUNDS) {
+                openCount++;
+                finalStatus = 'open'; // บังคับเปิด 12 รอบ
+            }
+
+            return {
+                id: r.round_id,
+                round_number: r.round_number,
+                openTime: r.open_time_str,
+                closeTime: r.close_time_str,
+                drawTime: r.draw_time_str,
+                status: finalStatus // ส่งสถานะที่คำนวณเป๊ะๆ ไปให้หน้าบ้าน
+            };
+        });
+
+        res.json({ success: true, rounds: finalRounds });
     } catch (err) {
         console.error("Live Yeeki Error:", err);
         res.status(500).json({ success: false, message: err.message });
