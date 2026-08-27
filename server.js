@@ -3067,7 +3067,7 @@ app.get('/api/thai-lottery/current-round', async (req, res) => {
 
 // ==========================================
 // 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
-// 2. 🇹🇭 สร้างงวดหวยไทยใหม่ (แก้ปัญหา Error Type INT, ภาษาไทย และ draw_date NULL)
+// 2. 🇹🇭 สร้างงวดหวยไทยใหม่ (แก้ปัญหา Parameter $5 สับสน)
 // ==========================================
 app.post('/api/admin/thai-lottery/create-round', async (req, res) => {
     const { round_number, open_time, close_time, draw_time } = req.body;
@@ -3076,27 +3076,64 @@ app.post('/api/admin/thai-lottery/create-round', async (req, res) => {
     }
 
     try {
-        // 🌟 1. ดึงชื่อภาษาไทยมาเก็บไว้ในตัวแปรแยก
         const roundNameText = round_number; 
-        
-        // 🌟 2. สร้างเลขจำลองให้คอลัมน์ round_number เดิม (เช่น วันที่ 16/08/2026 -> 20260816)
         const d = new Date(draw_time);
         const fakeIntRound = parseInt(`${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`);
 
-        // เช็คว่าซ้ำไหม
         const checkReq = await pgPool.query(`SELECT 1 FROM Yeeki_Rounds WHERE round_name = $1 AND category = 'THAI'`, [roundNameText]);
             
         if (checkReq.rows.length > 0) return res.status(400).json({ success: false, message: 'งวดหวยไทยนี้ถูกสร้างไว้แล้ว' });
 
-        // 🌟 3. บันทึกลงฐานข้อมูล (สั่งให้ SQL คัดลอกวันที่จาก $4 ไปใส่ใน draw_date ด้วย CAST)
+        // 🌟 แก้ไข: ใช้ CAST($x AS TIMESTAMP) บังคับชนิดข้อมูลให้ชัดเจน PostgreSQL จะได้ไม่งง
         await pgPool.query(`
             INSERT INTO Yeeki_Rounds (round_number, round_name, open_time, close_time, draw_time, draw_date, status, category)
-            VALUES ($1, $2, $3, $4, $5, CAST($5 AS DATE), 'Pending', 'THAI')
+            VALUES ($1, $2, CAST($3 AS TIMESTAMP), CAST($4 AS TIMESTAMP), CAST($5 AS TIMESTAMP), CAST($5 AS DATE), 'Pending', 'THAI')
         `, [fakeIntRound, roundNameText, open_time, close_time, draw_time]);
 
         res.json({ success: true, message: `✅ สร้างงวดหวยไทย (${roundNameText}) สำเร็จ!` });
     } catch (err) { 
+        console.error("Create Round Error:", err);
         res.status(500).json({ success: false, message: err.message }); 
+    }
+});                                                      
+
+// ==========================================
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
+// 5. 🇹🇭 API: แก้ไขข้อมูลงวดหวยไทย (ป้องกันงวดขยะ + แก้ปัญหา Parameter)
+// ==========================================
+app.post('/api/admin/thai-lottery/edit-round', async (req, res) => {
+    const { round_id, round_number, open_time, close_time, draw_time } = req.body;
+    
+    if (!round_id || !round_number || !open_time || !close_time || !draw_time) {
+        return res.status(400).json({ success: false, message: 'กรุณากรอกข้อมูลให้ครบถ้วน' });
+    }
+
+    try {
+        const check = await pgPool.query(`SELECT status FROM Yeeki_Rounds WHERE round_id = $1`, [round_id]);
+        if (check.rows.length === 0) return res.status(404).json({ success: false, message: 'ไม่พบงวดนี้ในระบบ' });
+        if (check.rows[0].status === 'Completed') return res.status(400).json({ success: false, message: 'งวดนี้ประกาศผลไปแล้ว ไม่สามารถแก้ไขได้' });
+
+        const roundNameText = round_number; 
+        const d = new Date(draw_time);
+        const fakeIntRound = parseInt(`${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`);
+
+        // 🌟 แก้ไข: ใช้ CAST($x AS TIMESTAMP) บังคับชนิดข้อมูลเหมือนตอน Create
+        await pgPool.query(`
+                UPDATE Yeeki_Rounds 
+                SET round_number = $1, 
+                    round_name = $2, 
+                    open_time = CAST($3 AS TIMESTAMP), 
+                    close_time = CAST($4 AS TIMESTAMP), 
+                    draw_time = CAST($5 AS TIMESTAMP), 
+                    draw_date = CAST($5 AS DATE)
+                WHERE round_id = $6
+            `, [fakeIntRound, roundNameText, open_time, close_time, draw_time, round_id]
+        );
+
+        res.json({ success: true, message: '✅ อัปเดตข้อมูลสำเร็จ!' });
+    } catch (err) {
+        console.error("Edit Round Error:", err);
+        res.status(500).json({ success: false, message: err.message });
     }
 });
 
