@@ -3255,6 +3255,85 @@ app.get('/api/admin/thai-lottery/round-tickets/:roundId', async (req, res) => {
 });
 
 // ==========================================
+// 🌟 [ใหม่] API: ดึงรายชื่อผู้ถูกรางวัลหวยไทย เพื่อนำไปแสดงใน Modal และ Checkbox
+// ==========================================
+app.get('/api/admin/thai-lottery/winners/:round_id', async (req, res) => {
+    try {
+        const { round_id } = req.params;
+        const result = await pgPool.query(`
+            SELECT 
+                oi.item_id as order_item_id,
+                u.username,
+                oi.lottery_type,
+                oi.selected_number,
+                oi.prize_amount,
+                o.currency_code as currency,
+                oi.status
+            FROM Lottery_Order_Items oi
+            JOIN Lottery_Orders o ON oi.order_id = o.order_id
+            JOIN Users u ON o.user_id = u.user_id
+            WHERE o.round_id = $1 AND (oi.status = 'ถูกรางวัล' OR oi.status = 'Paid')
+            ORDER BY oi.prize_amount DESC
+        `, [round_id]);
+        
+        res.json({ success: true, winners: result.rows });
+    } catch (err) {
+        console.error("Error fetching winners:", err);
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
+
+// ==========================================
+// 🌟 [ใหม่] API: ยืนยันการโอนเงินเข้า Wallet เฉพาะรายการที่ Admin เลือก (Checkbox)
+// ==========================================
+app.post('/api/admin/thai-lottery/process-payouts', async (req, res) => {
+    const { order_item_ids, round_id } = req.body;
+    if (!order_item_ids || order_item_ids.length === 0) {
+        return res.status(400).json({ success: false, message: 'กรุณาส่งรายการที่ต้องการโอน' });
+    }
+
+    const client = await pgPool.connect();
+    try {
+        await client.query('BEGIN');
+
+        for (const itemId of order_item_ids) {
+            // 1. ดึงข้อมูลของบิลนี้ ว่ายอดเงินเท่าไหร่ ใครเป็นเจ้าของ
+            const itemRes = await client.query(`
+                SELECT oi.prize_amount, o.user_id, oi.status
+                FROM Lottery_Order_Items oi
+                JOIN Lottery_Orders o ON oi.order_id = o.order_id
+                WHERE oi.item_id = $1 AND oi.status = 'ถูกรางวัล'
+            `, [itemId]);
+
+            if (itemRes.rows.length > 0) {
+                const { prize_amount, user_id } = itemRes.rows[0];
+
+                // 2. เติมเงินเข้า Wallet
+                await client.query(`UPDATE Wallets SET balance = COALESCE(balance, 0) + $1 WHERE user_id = $2`, [prize_amount, user_id]);
+                
+                // 3. บันทึกประวัติ Transaction
+                await client.query(`
+                    INSERT INTO Transactions (user_id, transaction_type, title, amount, status, created_at)
+                    VALUES ($1, 'Reward', 'ถูกรางวัลหวยไทย', $2, 'Completed', CURRENT_TIMESTAMP)
+                `, [user_id, prize_amount]);
+
+                // 4. เปลี่ยนสถานะบิลเป็น Paid (จ่ายแล้ว)
+                await client.query(`UPDATE Lottery_Order_Items SET status = 'Paid' WHERE item_id = $1`, [itemId]);
+            }
+        }
+        
+        await client.query('COMMIT');
+        res.json({ success: true, message: 'โอนเงินสำเร็จ' });
+    } catch (err) {
+        await client.query('ROLLBACK');
+        console.error("Error processing payouts:", err);
+        res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการทำรายการ' });
+    } finally {
+        client.release();
+    }
+});
+
+// ==========================================
 // 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 6. 🇹🇭 API: ดึงรายงานยอดขายหวยไทย (สำหรับหน้า Admin Report)
 // ==========================================
