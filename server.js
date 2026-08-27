@@ -113,7 +113,6 @@ app.get('/api/status', (req, res) => {
     });
 });
 
-
 // ==========================================
 // 🌟 🇻🇳 ระบบเปิด-ปิดรับซื้อ และ ออกรางวัลอัตโนมัติ (หวยเวียดนาม) รันทุกๆ 1 นาที
 // ==========================================
@@ -290,7 +289,42 @@ cron.schedule('* * * * *', async () => {
     } catch (err) {
         console.error('❌ เกิดข้อผิดพลาดในระบบตั้งเวลาอัตโนมัติหวยเวียดนาม:', err);
     }
-});
+}); 
+
+// ==========================================
+// 🌟 🚀 [เพิ่มใหม่] ระบบสร้างรอบยี่กีอัตโนมัติ (รันตอน 23:50 น. เพื่อเตรียมของพรุ่งนี้)
+// ==========================================
+cron.schedule('50 23 * * *', async () => {
+    console.log('⏰ [AUTO-YEEKI] กำลังสร้างตารางเวลารอบจับยี่กีสำหรับวันพรุ่งนี้...');
+    try {
+        const tomorrow = new Date();
+        tomorrow.setDate(tomorrow.getDate() + 1);
+        const dateStr = tomorrow.toLocaleDateString('en-CA', { timeZone: 'Asia/Bangkok' }); 
+
+        for (let i = 1; i <= 24; i++) {
+            const hour = (i - 1).toString().padStart(2, '0');
+            const openTime = `${dateStr} ${hour}:01:00`;
+            const closeTime = `${dateStr} ${hour}:55:00`;
+            const drawTime = `${dateStr} ${hour}:56:00`;
+
+            const check = await pgPool.query(`
+                SELECT round_id FROM Yeeki_Rounds 
+                WHERE CAST(draw_date AS DATE) = CAST($1 AS DATE) 
+                AND round_number = $2 AND (category = 'YEEKI' OR category IS NULL)
+            `, [dateStr, i]);
+
+            if (check.rows.length === 0) {
+                await pgPool.query(`
+                    INSERT INTO Yeeki_Rounds (draw_date, round_number, open_time, close_time, draw_time, status, category) 
+                    VALUES (CAST($1 AS DATE), $2, CAST($3 AS TIMESTAMP), CAST($4 AS TIMESTAMP), CAST($5 AS TIMESTAMP), 'Pending', 'YEEKI')
+                `, [dateStr, i, openTime, closeTime, drawTime]);
+            }
+        }
+        console.log(`✅ [AUTO-YEEKI] สร้างรอบจับยี่กี 24 รอบ สำหรับวันที่ ${dateStr} สำเร็จ!`);
+    } catch (err) {
+        console.error('❌ [AUTO-YEEKI] Error:', err);
+    }
+}, { scheduled: true, timezone: "Asia/Bangkok" });
 
 // ==========================================
 // 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
@@ -5545,7 +5579,6 @@ app.get('/api/yeeki/rounds', async (req, res) => {
         res.status(500).json({ success: false, message: err.message });
     }
 });                                                                                             
-
 // ==========================================
 // 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🌟 API ฝั่งหลังบ้าน (Admin) ดึงข้อมูลรอบตาม "วันที่เลือก" บนปฏิทิน
@@ -5570,6 +5603,39 @@ app.get('/api/admin/yeeki-rounds', async (req, res) => {
         res.json({ success: true, rounds: result.rows });
     } catch (err) {
         console.error("Error admin fetch rounds:", err);
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
+
+// ==========================================
+// 🌟 🚀 [เพิ่มใหม่] API สำหรับให้ลูกค้า และ Admin ดูกระดานสดแบบ "เลื่อนข้ามวันได้ 24 รอบ"
+// ==========================================
+app.get('/api/yeeki-rounds/live', async (req, res) => {
+    try {
+        const result = await pgPool.query(`
+            WITH PastRounds AS (
+                SELECT * FROM Yeeki_Rounds 
+                WHERE close_time <= CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Bangkok'
+                  AND (category = 'YEEKI' OR category IS NULL)
+                ORDER BY close_time DESC LIMIT 12
+            ),
+            FutureRounds AS (
+                SELECT * FROM Yeeki_Rounds 
+                WHERE close_time > CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Bangkok'
+                  AND (category = 'YEEKI' OR category IS NULL)
+                ORDER BY close_time ASC LIMIT 12
+            )
+            SELECT 
+                round_id, round_number,
+                to_char(open_time, 'YYYY-MM-DD HH24:MI:SS') as open_time,
+                to_char(close_time, 'YYYY-MM-DD HH24:MI:SS') as close_time,
+                to_char(draw_time, 'YYYY-MM-DD HH24:MI:SS') as draw_time, status
+            FROM (SELECT * FROM PastRounds UNION ALL SELECT * FROM FutureRounds) as CombinedRounds
+            ORDER BY CombinedRounds.close_time ASC;
+        `);
+        res.json({ success: true, rounds: result.rows });
+    } catch (err) {
+        console.error("Error fetching live yeeki rounds:", err);
         res.status(500).json({ success: false, message: err.message });
     }
 });
