@@ -505,9 +505,10 @@ app.post('/api/register', async (req, res) => {
     const level_id = 1; // 1 คือลูกค้าระดับเริ่มต้น (ลูกค้าใหม่)
     
     // 3. บันทึกข้อมูลลงตาราง Users 
+   // 3. บันทึกข้อมูลลงตาราง Users 
     const insertResult = await pgPool.query(`
         INSERT INTO Users (username, password_hash, referrer_username, country, currency_code, role_id, level_id, is_active, created_at, wallet_balance, total_orders)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, 1, CURRENT_TIMESTAMP, 0, 0)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, B'1', CURRENT_TIMESTAMP, 0, 0)
         RETURNING user_id
       `, [username, password, referrer || null, country, currency_code, role_id, level_id]
     );
