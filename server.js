@@ -1,5 +1,6 @@
 require('dotenv').config();
 const express = require('express');
+const jwt = require('jsonwebtoken');
 const cors = require('cors');
 const { Pool } = require('pg'); // <-- ต้องมีแค่บรรทัดเดียวในไฟล์
 const cron = require('node-cron');
@@ -20,6 +21,22 @@ const pgPool = new Pool({
     }
 });
 
+const verifyToken = (req, res, next) => {
+  // ดึงกุญแจจาก Headers ที่หน้าบ้านส่งมาให้
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1]; 
+
+  if (!token) {
+    return res.status(401).json({ success: false, message: 'ไม่มีสิทธิ์เข้าถึง กรุณาล็อกอิน' });
+  }
+
+  // ตรวจสอบความถูกต้องและวันหมดอายุของกุญแจ
+  jwt.verify(token, 'SALAPI_SECRET_KEY_2026', (err, decoded) => {
+    if (err) return res.status(403).json({ success: false, message: 'เซสชันหมดอายุ กรุณาล็อกอินใหม่' });
+    req.user = decoded; // แนบข้อมูลที่ถอดรหัสแล้วไปกับ Request
+    next(); // กุญแจผ่าน! ปล่อยให้ทำงานต่อไปได้
+  });
+};
 // ==========================================
 // 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🛡️ Middleware: สกัดกั้น IP ที่ถูกบล็อกไม่ให้ใช้ API ได้
@@ -628,7 +645,7 @@ app.post('/api/deposit', async (req, res) => {
 
 // ==========================================
 // 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
-// 1. API สำหรับ Login (อัปเดตดึงข้อมูลครบถ้วน + 🛡️ ระบบเฝ้าระวัง IP)
+// 1. API สำหรับ Login (อัปเดตดึงข้อมูลครบถ้วน + 🛡️ ระบบเฝ้าระวัง IP + 🔑 ระบบ JWT Token)
 // ==========================================
 app.post('/api/login', async (req, res) => {
   const { username, password } = req.body;
@@ -638,20 +655,17 @@ app.post('/api/login', async (req, res) => {
   if (clientIp.includes(',')) clientIp = clientIp.split(',')[0].trim(); // ป้องกันกรณีดึงได้หลาย IP ซ้อนกัน
 
   try {
-    // 🛡️ [เพิ่มใหม่ระบบ IP]: 1. เช็คก่อนเลยว่า IP นี้ติดแบล็คลิสต์ (บล็อก) อยู่หรือไม่
-    // หมายเหตุ: Postgres คอลัมน์ Bit ใช้ค่า '1' เป็น String
+    // 🛡️ 1. เช็คก่อนเลยว่า IP นี้ติดแบล็คลิสต์ (บล็อก) อยู่หรือไม่
     const blockCheck = await pgPool.query(`SELECT is_blocked FROM Blocked_IPs WHERE ip_address = $1 AND is_blocked = '1'`, [clientIp]);
         
     if (blockCheck.rows.length > 0) {
         return res.status(403).json({ success: false, message: 'IP ของคุณถูกบล็อก เนื่องจากพยายามเข้าระบบผิดพลาดหลายครั้ง' });
     }
 
-    // 🛡️ [เพิ่มใหม่ระบบ IP]: ฟังก์ชันย่อยสำหรับนับจำนวนครั้งที่เข้าสู่ระบบผิดพลาด
+    // 🛡️ ฟังก์ชันย่อยสำหรับนับจำนวนครั้งที่เข้าสู่ระบบผิดพลาด
     const handleFailedLogin = async () => {
-        // บันทึกประวัติว่า IP นี้ใส่รหัสผิด
         await pgPool.query(`INSERT INTO Login_Failed_Attempts (ip_address, attempt_time) VALUES ($1, CURRENT_TIMESTAMP)`, [clientIp]);
 
-        // นับดูว่าใน 1 นาทีที่ผ่านมา IP นี้ผิดไปกี่ครั้งแล้ว
         const failCheck = await pgPool.query(`
             SELECT COUNT(id) as fail_count 
             FROM Login_Failed_Attempts 
@@ -660,35 +674,31 @@ app.post('/api/login', async (req, res) => {
 
         const failCount = parseInt(failCheck.rows[0].fail_count, 10);
 
-        // ถ้าผิดตั้งแต่ 10 ครั้งขึ้นไป ให้จับบล็อกทันที
         if (failCount >= 10) {
-            // เช็คว่ามี IP นี้อยู่ใน Blocked_IPs หรือยัง
             const existCheck = await pgPool.query(`SELECT 1 FROM Blocked_IPs WHERE ip_address = $1`, [clientIp]);
             
             if (existCheck.rows.length === 0) {
-                // ถ้ายังไม่มีให้ Insert
                 await pgPool.query(`
                     INSERT INTO Blocked_IPs (ip_address, reason, is_blocked, updated_at) 
                     VALUES ($1, 'Brute Force Login Attempt (>10 fails/min)', '1', CURRENT_TIMESTAMP)
                 `, [clientIp]);
             } else {
-                // ถ้ามีแล้วให้ Update
                 await pgPool.query(`
                     UPDATE Blocked_IPs 
                     SET is_blocked = '1', reason = 'Brute Force Login Attempt (>10 fails/min)', updated_at = CURRENT_TIMESTAMP 
                     WHERE ip_address = $1
                 `, [clientIp]);
             }
-            return true; // แจ้งว่าโดนบล็อกแล้ว
+            return true; 
         }
-        return false; // ยังไม่โดนบล็อก
+        return false; 
     };
     
     // 🌟 ดึงข้อมูล User พร้อมกับ Role, Level, ชื่อ-นามสกุล, ประเทศ และ สกุลเงิน
     const userResult = await pgPool.query(`
         SELECT 
           u.user_id, u.username, u.password_hash, u.wallet_balance, u.total_orders, u.is_active,
-          u.country, u.currency_code,  -- 🌟 เพิ่ม 2 คอลัมน์นี้
+          u.country, u.currency_code,
           un.firstname, un.lastname,
           r.role_id, r.role_name,
           cl.level_id, cl.level_name
@@ -699,9 +709,7 @@ app.post('/api/login', async (req, res) => {
         WHERE u.username = $1
     `, [username]);
 
-    // ถ้าไม่เจอ Username ในระบบ
     if (userResult.rows.length === 0) {
-      // 🛡️ [เพิ่มใหม่ระบบ IP]: บันทึกว่าใส่ข้อมูลผิด
       const isBlockedNow = await handleFailedLogin();
       if (isBlockedNow) {
           return res.status(403).json({ message: 'IP ของคุณถูกบล็อก เนื่องจากพยายามเข้าระบบผิดพลาดหลายครั้ง' });
@@ -711,8 +719,6 @@ app.post('/api/login', async (req, res) => {
 
     const user = userResult.rows[0];
 
-    // เช็คว่า User ถูกระงับการใช้งานหรือไม่ 
-    // (รองรับทั้งแบบ Boolean, Number และ String '0' จาก Postgres)
     if (user.is_active === false || user.is_active === 0 || user.is_active === '0') {
       return res.status(403).json({ message: 'บัญชีนี้ถูกระงับการใช้งาน' });
     }
@@ -726,9 +732,7 @@ app.post('/api/login', async (req, res) => {
       validPassword = true;
     } 
     
-    // ถ้ารหัสผ่านไม่ตรง
     if (!validPassword) {
-      // 🛡️ [เพิ่มใหม่ระบบ IP]: บันทึกว่าใส่ข้อมูลผิด
       const isBlockedNow = await handleFailedLogin();
       if (isBlockedNow) {
           return res.status(403).json({ message: 'IP ของคุณถูกบล็อก เนื่องจากพยายามเข้าระบบผิดพลาดหลายครั้ง' });
@@ -736,13 +740,22 @@ app.post('/api/login', async (req, res) => {
       return res.status(401).json({ message: 'ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง' });
     }
 
-    // 🛡️ [เพิ่มใหม่ระบบ IP]: 🌟 ล้างประวัติการใส่รหัสผิดทั้งหมด ถ้า Login สำเร็จ
+    // 🌟 ล้างประวัติการใส่รหัสผิดทั้งหมด ถ้า Login สำเร็จ
     await pgPool.query(`DELETE FROM Login_Failed_Attempts WHERE ip_address = $1`, [clientIp]);
 
-    // 🌟 ส่งข้อมูลกลับไปให้ Frontend แบบจัดเต็ม
+    // 🔑 [เพิ่มใหม่ระบบ JWT]: สร้างกุญแจ Token อายุ 1 วัน
+    // (แนะนำให้ใช้ process.env.JWT_SECRET ในการทำงานจริงแทนการ hardcode รหัสลับ)
+    const token = jwt.sign(
+      { user_id: user.user_id, role_id: user.role_id }, 
+      'SALAPI_SECRET_KEY_2026', 
+      { expiresIn: '1d' }
+    );
+
+    // 🌟 ส่งข้อมูลกลับไปให้ Frontend แบบจัดเต็ม พร้อมแนบกุญแจ (token)
     res.json({
       success: true, 
       message: 'เข้าสู่ระบบสำเร็จ',
+      token: token, // 🔑 ส่ง Token กลับไปให้ Frontend เก็บลง LocalStorage
       user: {
         id: user.user_id, 
         user_id: user.user_id, 
