@@ -5204,7 +5204,7 @@ app.get('/api/admin/yeeki/sales-report', async (req, res) => {
 
 // ==========================================
 // 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
-// 🌟 API สำหรับการซื้อหวยยี่กี (แก้ไขชื่อคอลัมน์เป็น title)
+// 🌟 API สำหรับการซื้อหวยยี่กี (อัปเดต: แก้บัคยอดเงินไม่พอ + Sync 2 ตาราง)
 // ==========================================
 app.post('/api/yeeki/buy', async (req, res) => {
     const { user_id, cart, total_price, currency, note, lottery_category } = req.body;
@@ -5215,43 +5215,58 @@ app.post('/api/yeeki/buy', async (req, res) => {
             return res.status(400).json({ success: false, message: "ข้อมูลการสั่งซื้อไม่ครบถ้วน" });
         }
 
-        // 1. ดึงข้อมูลผู้ซื้อ 
-        const userCheck = await client.query(`SELECT username, wallet_balance, referrer_username FROM Users WHERE user_id = $1`, [user_id]);
+        // 🌟 1. ดึงข้อมูลผู้ซื้อ (ดึงยอดเงินจากทั้ง 2 ตาราง Users และ Wallets)
+        const userCheck = await client.query(`
+            SELECT u.username, u.wallet_balance, u.referrer_username, w.balance as wallet_table_balance 
+            FROM Users u 
+            LEFT JOIN Wallets w ON u.user_id = w.user_id 
+            WHERE u.user_id = $1
+        `, [user_id]);
             
         if (userCheck.rows.length === 0) {
             return res.status(404).json({ success: false, message: "ไม่พบข้อมูลผู้ใช้" });
         }
         
         const buyer = userCheck.rows[0];
-        const currentBalance = parseFloat(buyer.wallet_balance) || 0;
         
-        if (currentBalance < parseFloat(total_price)) {
+        // 🌟 2. เช็คยอดเงินฉลาดขึ้น: ถ้า Users เป็น 0 ให้ไปดึงเงินจากตาราง Wallets มาใช้แทน
+        const balanceInUsers = parseFloat(buyer.wallet_balance) || 0;
+        const balanceInWallets = parseFloat(buyer.wallet_table_balance) || 0;
+        const currentBalance = balanceInUsers > 0 ? balanceInUsers : balanceInWallets;
+        
+        const safeTotalPrice = parseFloat(total_price);
+
+        if (currentBalance < safeTotalPrice) {
             return res.status(400).json({ success: false, message: "ยอดเงินในกระเป๋าไม่เพียงพอ" });
         }
+
+        // 🌟 แปลงสัญลักษณ์ ₭ เป็น LAK ป้องกัน Error ตอนบันทึกลง Database
+        const dbCurrency = currency === '₭' ? 'LAK' : (currency || 'THB');
 
         await client.query('BEGIN');
 
         try {
-            // 2. หักเงินผู้ซื้อ
-            await client.query(`UPDATE Users SET wallet_balance = COALESCE(wallet_balance, 0) - $1 WHERE user_id = $2`, [total_price, user_id]);
+            // 3. หักเงินผู้ซื้อ (🌟 อัปเดตทั้ง 2 ตารางให้ตรงกันเสมอ ป้องกันบัคในอนาคต)
+            await client.query(`UPDATE Users SET wallet_balance = COALESCE(wallet_balance, 0) - $1 WHERE user_id = $2`, [safeTotalPrice, user_id]);
+            await client.query(`UPDATE Wallets SET balance = COALESCE(balance, 0) - $1 WHERE user_id = $2`, [safeTotalPrice, user_id]);
 
-            // 3. สร้างประวัติ Transaction ผู้ซื้อ (เปลี่ยน description เป็น title)
+            // 4. สร้างประวัติ Transaction ผู้ซื้อ
             await client.query(`
                 INSERT INTO Transactions (user_id, amount, transaction_type, title, status, created_at)
                 VALUES ($1, $2, $3, $4, 'Completed', CURRENT_TIMESTAMP)
-            `, [user_id, -parseFloat(total_price), 'BUY_YEEKI', `แทงหวยยี่กี รอบที่ ${cart[0].round_number}`]);
+            `, [user_id, -safeTotalPrice, 'BUY_YEEKI', `แทงหวยยี่กี รอบที่ ${cart[0].round_number}`]);
 
-            // 4. บันทึกบิลหลักลง Yeeki_Orders
+            // 5. บันทึกบิลหลักลง Yeeki_Orders
             const mainRoundId = cart[0].round_id;
             const insertOrderReq = await client.query(`
                 INSERT INTO Yeeki_Orders (user_id, round_id, total_amount, currency_code, status, order_note, created_at)
                 VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP)
                 RETURNING order_id
-            `, [user_id, mainRoundId, total_price, currency, 'Completed', note || '']);
+            `, [user_id, mainRoundId, safeTotalPrice, dbCurrency, 'Completed', note || '']);
 
             const newOrderId = insertOrderReq.rows[0].order_id;
 
-            // 5. บันทึกรายการย่อยทีละตัว
+            // 6. บันทึกรายการย่อยทีละตัว
             for (let item of cart) {
                 await client.query(`
                     INSERT INTO Yeeki_Order_Items (order_id, lottery_type, selected_number, price, status)
@@ -5259,21 +5274,20 @@ app.post('/api/yeeki/buy', async (req, res) => {
                 `, [newOrderId, item.type, item.number, item.price]);
             }
 
-            // 6. 💰 ระบบแจกค่าคอมมิชชั่น 5% ให้ผู้แนะนำ
+            // 7. 💰 ระบบแจกค่าคอมมิชชั่น 5% ให้ผู้แนะนำ
             if (buyer.referrer_username) {
-                // 6.1 เอาชื่อผู้แนะนำ ไปค้นหา user_id ในตาราง Users ก่อน
                 const refCheck = await client.query(`SELECT user_id FROM Users WHERE username = $1`, [buyer.referrer_username]);
 
-                // ถ้าเจอตัวผู้แนะนำในระบบ ค่อยจ่ายเงิน
                 if (refCheck.rows.length > 0) {
                     const referrerUserId = refCheck.rows[0].user_id;
                     const commissionRate = 0.05; // เรท 5%
-                    const commissionAmount = parseFloat(total_price) * commissionRate;
+                    const commissionAmount = safeTotalPrice * commissionRate;
 
-                    // 6.2 อัปเดตกระเป๋าเงินของผู้แนะนำ (บวกเงินเพิ่ม)
+                    // 7.2 อัปเดตกระเป๋าเงินของผู้แนะนำ (🌟 อัปเดต 2 ตารางเช่นกัน)
                     await client.query(`UPDATE Users SET wallet_balance = COALESCE(wallet_balance, 0) + $1 WHERE user_id = $2`, [commissionAmount, referrerUserId]);
+                    await client.query(`UPDATE Wallets SET balance = COALESCE(balance, 0) + $1 WHERE user_id = $2`, [commissionAmount, referrerUserId]);
 
-                    // 6.3 สร้างประวัติ Transaction รายได้ให้ "ผู้แนะนำ" (เปลี่ยน description เป็น title)
+                    // 7.3 สร้างประวัติ Transaction รายได้ให้ "ผู้แนะนำ"
                     await client.query(`
                         INSERT INTO Transactions (user_id, amount, transaction_type, title, status, created_at)
                         VALUES ($1, $2, $3, $4, 'Completed', CURRENT_TIMESTAMP)
