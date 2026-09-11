@@ -5289,10 +5289,11 @@ app.post('/api/yeeki/buy', async (req, res) => {
                     await client.query(`UPDATE Wallets SET balance = COALESCE(balance, 0) + $1 WHERE user_id = $2`, [commissionAmount, referrerUserId]);
 
                     // 7.3 สร้างประวัติ Transaction รายได้ให้ "ผู้แนะนำ"
+                    // 7.3 สร้างประวัติ Transaction รายได้ให้ "ผู้แนะนำ"
                     await client.query(`
-                        INSERT INTO Transactions (user_id, amount, transaction_type, title, status, created_at)
-                        VALUES ($1, $2, $3, $4, 'Completed', CURRENT_TIMESTAMP)
-                    `, [referrerUserId, commissionAmount, 'COMMISSION_5', `รายได้ 5% จากทีมงาน (${buyer.username})`]);
+                    INSERT INTO Transactions (user_id, amount, transaction_type, title, status, created_at)
+                    VALUES ($1, $2, $3, $4, 'Completed', CURRENT_TIMESTAMP)
+                    `, [referrerUserId, commissionAmount, 'Affiliate Purchase', `รายได้ 5% จากทีมงาน (${buyer.username})`]);
                 }
             }
 
