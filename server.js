@@ -5251,9 +5251,10 @@ app.post('/api/yeeki/buy', async (req, res) => {
             await client.query(`UPDATE Wallets SET balance = COALESCE(balance, 0) - $1 WHERE user_id = $2`, [safeTotalPrice, user_id]);
 
             // 4. สร้างประวัติ Transaction ผู้ซื้อ
+            // แก้ไขจุดที่ 4: ประวัติของผู้ซื้อ
             await client.query(`
-                INSERT INTO Transactions (user_id, amount, transaction_type, title, status, created_at)
-                VALUES ($1, $2, $3, $4, 'Completed', CURRENT_TIMESTAMP)
+            INSERT INTO Transactions (user_id, amount, transaction_type, title, status, created_at)
+             VALUES ($1, $2, $3, $4, 'Completed', CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Bangkok')
             `, [user_id, -safeTotalPrice, 'BUY_YEEKI', `แทงหวยยี่กี รอบที่ ${cart[0].round_number}`]);
 
             // 5. บันทึกบิลหลักลง Yeeki_Orders
