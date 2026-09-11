@@ -7482,22 +7482,27 @@ app.post('/api/p2p/request-withdraw', async (req, res) => {
 
 // ==========================================
 // 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
-// 🏦 [GET] ดึงข้อมูลเตรียมถอนเงิน (Wallet + Banks + Logo)
+// 🏦 [GET] ดึงข้อมูลเตรียมถอนเงิน (Wallet + Banks + Logo + โบนัสค้างหัก)
 // ==========================================
 app.get('/api/p2p/withdraw-info/:userId', async (req, res) => {
     try {
         const uid = parseInt(req.params.userId, 10);
         if (!uid) return res.status(400).json({ success: false, message: 'Invalid ID' });
 
-        // 1. ดึงข้อมูล Wallet
+        // 🌟 1. ดึงข้อมูล Wallet และดึงข้อมูลโบนัสที่ติดตัวอยู่ (เพิ่มคอลัมน์ active_bonus_percent, remaining_bonus)
         const userDb = await pgPool.query(`
-            SELECT currency_code, COALESCE((SELECT balance FROM Wallets WHERE user_id = $1), 0) as balance 
-            FROM users WHERE user_id = $1
+            SELECT 
+                currency_code, 
+                active_bonus_percent, 
+                remaining_bonus,
+                COALESCE((SELECT balance FROM Wallets WHERE user_id = $1), 0) as balance 
+            FROM users 
+            WHERE user_id = $1
         `, [uid]);
         
         if (userDb.rows.length === 0) return res.json({ success: false, message: 'ไม่พบผู้ใช้' });
         
-        const { currency_code, balance } = userDb.rows[0];
+        const { currency_code, balance, active_bonus_percent, remaining_bonus } = userDb.rows[0];
 
         // 2. ดึงบัญชีธนาคารที่อนุมัติแล้ว พร้อมดึง logo_url, currency_code และ country
         const banksDb = await pgPool.query(`
@@ -7518,6 +7523,8 @@ app.get('/api/p2p/withdraw-info/:userId', async (req, res) => {
             success: true,
             currency: currency_code,
             balance: parseFloat(balance),
+            active_bonus_percent: parseFloat(active_bonus_percent || 0), // 🌟 ส่ง % โบนัสไปให้ React
+            remaining_bonus: parseFloat(remaining_bonus || 0),           // 🌟 ส่งยอดโบนัสคงเหลือไปให้ React
             fee_percent: feePercent,
             usd_rate: usdRate,
             banks: banksDb.rows // 🌟 ส่งรายชื่อบัญชี (พร้อมโลโก้) ไปให้หน้าเว็บ
