@@ -6638,17 +6638,18 @@ app.post('/api/p2p/verify-slip', async (req, res) => {
                 // 🌟 [ส่วนที่เพิ่มใหม่] จดจำ % โบนัส เพื่อใช้ดึงกลับตอนลูกค้าถอนเงิน
                 // ==================================================
                 if (parseFloat(job.bonus_or_fee) > 0) {
-                    // คำนวณหาว่าลูกค้าได้โบนัสมากี่เปอร์เซ็นต์จากยอดฝาก (เช่น (300 / 1000) * 100 = 30%)
+                    // คำนวณหาว่าลูกค้าได้โบนัสมากี่เปอร์เซ็นต์จากยอดฝาก
                     const depositAmount = parseFloat(job.amount);
                     const bonusAmount = parseFloat(job.bonus_or_fee);
                     const bonusPercent = (bonusAmount / depositAmount) * 100;
                     
-                    // บันทึก % โบนัสติดตัวลูกค้าไว้ในตาราง Users
+                    // บันทึก % โบนัส และบวกสะสม 'ยอดโบนัสคงเหลือ' ให้ลูกค้า
                     await client.query(`
                         UPDATE Users 
-                        SET active_bonus_percent = $1 
-                        WHERE user_id = $2
-                    `, [bonusPercent, job.requester_id]);
+                        SET active_bonus_percent = $1,
+                            remaining_bonus = COALESCE(remaining_bonus, 0) + $2
+                        WHERE user_id = $3
+                    `, [bonusPercent, bonusAmount, job.requester_id]);
                 }
                 // ==================================================
 
