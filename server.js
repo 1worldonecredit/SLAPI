@@ -1354,27 +1354,31 @@ app.post('/api/lottery/buy', async (req, res) => {
         if (currency === 'LAK') {
             const rateRes = await client.query("SELECT rate FROM ExchangeRates WHERE currency_pair = 'THB_LAK'");
             if (rateRes.rows.length > 0) {
-                exchangeRate = rateRes.rows[0].rate;
+                exchangeRate = Number(rateRes.rows[0].rate); // 🌟 แก้ไข: บังคับให้เป็นตัวเลข
             }
         }
 
         // 2. แปลงยอดซื้อให้เป็น THB เพื่อใช้เป็นฐาน
-        const baseTHBAmount = total_price / exchangeRate;
+        const safeTotalPrice = Number(total_price); // 🌟 แก้ไข: บังคับให้ยอดซื้อเป็นตัวเลข (Number) ป้องกันบัค String
+        const baseTHBAmount = safeTotalPrice / exchangeRate;
 
         // 3. คำนวณยอดที่จะหักเงิน (แปลงกลับเป็นสกุลเงินกระเป๋าลูกค้า)
         const deductAmount = baseTHBAmount * exchangeRate; 
 
         // 4. เช็คยอดเงินและหักเงินในกระเป๋า
-        const userRes = await client.query('SELECT balance FROM Wallets WHERE user_id = $1', [user_id]); 
+        // 🌟 แก้ไข: เปลี่ยนไปเช็คยอดจากตาราง Users (wallet_balance) ให้ตรงกับหน้า Dashboard ที่ลูกค้าเห็น
+        const userRes = await client.query('SELECT wallet_balance FROM Users WHERE user_id = $1', [user_id]); 
 
-        if (userRes.rows.length === 0) throw new Error('ไม่พบข้อมูลกระเป๋าเงินในระบบ (กรุณาแจ้งแอดมินตรวจสอบ)');
-        if (parseFloat(userRes.rows[0].balance) < deductAmount) { 
+        if (userRes.rows.length === 0) throw new Error('ไม่พบข้อมูลผู้ใช้งานในระบบ');
+        
+        // 🌟 แก้ไข: ตรวจสอบโดยใช้ Number() คลุมทั้งสองฝั่งให้ชัวร์ว่าเทียบตัวเลข
+        if (Number(userRes.rows[0].wallet_balance) < deductAmount) { 
             throw new Error('ยอดเงินในกระเป๋าไม่เพียงพอ');
         }
 
-        // 🌟 แก้ไข: หั่นคำสั่ง UPDATE ออกเป็น 2 บรรทัด (Postgres ไม่อนุญาตให้ยิงคำสั่งซ้อนกันใน Query ที่มี Parameter)
+        // 🌟 แก้ไข: หั่นคำสั่ง UPDATE ออกเป็น 2 บรรทัด และเติม COALESCE ให้ตาราง Wallets ป้องกันบัคค่าว่างในรหัสใหม่
         await client.query(`UPDATE Users SET wallet_balance = COALESCE(wallet_balance, 0) - $1 WHERE user_id = $2`, [deductAmount, user_id]);
-        await client.query(`UPDATE Wallets SET balance = balance - $1 WHERE user_id = $2`, [deductAmount, user_id]);
+        await client.query(`UPDATE Wallets SET balance = COALESCE(balance, 0) - $1 WHERE user_id = $2`, [deductAmount, user_id]);
 
         // 5. บันทึกประวัติ
         await client.query(`
@@ -1428,7 +1432,7 @@ app.post('/api/lottery/buy', async (req, res) => {
             const referrerCurrency = referrerRes.rows[0].referrer_currency;
             
             const settingRes = await client.query("SELECT purchase_percent FROM Commission_Settings LIMIT 1");
-            const purchasePercent = settingRes.rows.length > 0 ? settingRes.rows[0].purchase_percent : 2.00; 
+            const purchasePercent = settingRes.rows.length > 0 ? Number(settingRes.rows[0].purchase_percent) : 2.00; 
             
             // คำนวณค่าคอมตั้งต้น (ตามสกุลเงินที่ใช้ซื้อ)
             const rawCommission = deductAmount * (purchasePercent / 100); 
@@ -1441,21 +1445,21 @@ app.post('/api/lottery/buy', async (req, res) => {
                 const rateRes = await client.query(`SELECT rate FROM ExchangeRates WHERE currency_pair = $1`, [pair]);
                     
                 if (rateRes.rows.length > 0) {
-                    finalCommission = finalCommission * rateRes.rows[0].rate;
+                    finalCommission = finalCommission * Number(rateRes.rows[0].rate);
                 } else {
                     const reversePair = `${referrerCurrency}_${buyerCurrency}`;
                     const reverseRateRes = await client.query(`SELECT rate FROM ExchangeRates WHERE currency_pair = $1`, [reversePair]);
                     
                     if (reverseRateRes.rows.length > 0) {
-                        finalCommission = finalCommission / reverseRateRes.rows[0].rate;
+                        finalCommission = finalCommission / Number(reverseRateRes.rows[0].rate);
                     }
                 }
             }
 
             const transTitle = `รายได้ ${purchasePercent}% จากทีมงาน (${buyerUsername})`;
             
-            // 🌟 แก้ไข: หั่นคำสั่งออกทีละบรรทัดเช่นกัน
-            await client.query(`UPDATE Wallets SET balance = balance + $1 WHERE user_id = $2`, [finalCommission, referrerId]);
+            // 🌟 แก้ไข: หั่นคำสั่งออกทีละบรรทัดเช่นกัน เติม COALESCE กันพัง
+            await client.query(`UPDATE Wallets SET balance = COALESCE(balance, 0) + $1 WHERE user_id = $2`, [finalCommission, referrerId]);
             await client.query(`UPDATE Users SET total_purchase_comm = COALESCE(total_purchase_comm, 0) + $1 WHERE user_id = $2`, [finalCommission, referrerId]);
             await client.query(`
                 INSERT INTO Transactions (user_id, transaction_type, title, amount, status, created_at)
