@@ -7379,8 +7379,7 @@ app.delete('/api/admin/ads/:id', async (req, res) => {
 // ==========================================
 
 // ==========================================
-// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
-// 💸 [CLIENT] สร้างคำขอถอนเงิน (P2P) - ระบบตรงไปตรงมา (ดึงโบนัสตามสัดส่วนเงินถอนจริง)
+// 💸 [CLIENT] สร้างคำขอถอนเงิน (P2P) - หักโบนัสลดลงเรื่อยๆ และยกเลิกเมื่อเหลือ 0
 // ==========================================
 app.post('/api/p2p/request-withdraw', async (req, res) => {
     try {
@@ -7390,12 +7389,12 @@ app.post('/api/p2p/request-withdraw', async (req, res) => {
             return res.status(400).json({ success: false, message: 'กรุณาระบุจำนวนเงินและเลือกบัญชีธนาคาร' });
         }
 
-        const client = await pgPool.connect(); // 🌟 ใช้ Transaction
+        const client = await pgPool.connect(); 
         await client.query('BEGIN');
 
         try {
             const userCheck = await client.query(`
-                SELECT u.currency_code, u.active_bonus_percent, w.balance, u.wallet_balance 
+                SELECT u.currency_code, u.active_bonus_percent, u.remaining_bonus, w.balance, u.wallet_balance 
                 FROM users u 
                 LEFT JOIN Wallets w ON u.user_id = w.user_id 
                 WHERE u.user_id = $1
@@ -7406,31 +7405,29 @@ app.post('/api/p2p/request-withdraw', async (req, res) => {
             const userCurrency = userCheck.rows[0].currency_code;
             const currentBalance = Math.max(parseFloat(userCheck.rows[0].balance || 0), parseFloat(userCheck.rows[0].wallet_balance || 0));
             const bonusPercent = parseFloat(userCheck.rows[0].active_bonus_percent || 0);
-            
-            // 🌟 1. ยอดที่ลูกค้ากรอก คือ "เงินต้นจริง" ที่เขาต้องการถอน
+            const remainingBonus = parseFloat(userCheck.rows[0].remaining_bonus || 0);
             const reqAmount = parseFloat(amount); 
 
-            // 🌟 2. คำนวณหายอด "ถอนได้สูงสุด" (Max Withdrawable) 
-            // สูตร: เงินทั้งหมด / (1 + (เปอร์เซ็นต์โบนัส / 100))
-            const maxWithdrawable = currentBalance / (1 + (bonusPercent / 100));
-
-            // เช็กว่าลูกค้ากดถอนเกิน "ยอดเงินจริง" ที่ตัวเองมีหรือไม่
-            if (reqAmount > maxWithdrawable) {
-                // ถ้าเกิน ให้แจ้ง Error บอกยอดที่ถอนได้จริงๆ ให้ลูกค้าทราบ
-                const formattedMax = maxWithdrawable.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
-                throw new Error(`ยอดถอนได้สูงสุดของคุณคือ ${formattedMax} ${userCurrency} (เนื่องจากมียอดโบนัส ${bonusPercent}% รวมอยู่ในกระเป๋า)`);
+            // 🌟 1. คำนวณยอดโบนัสที่ต้องหักทิ้ง (Clawback) 
+            let clawbackAmount = 0;
+            if (bonusPercent > 0 && remainingBonus > 0) {
+                clawbackAmount = (reqAmount * bonusPercent) / 100;
+                // ถ้าคำนวณสัดส่วนแล้วได้ยอดเกินโบนัสที่เหลือ ให้หักแค่ "โบนัสที่เหลืออยู่จริง" เท่านั้น
+                if (clawbackAmount > remainingBonus) {
+                    clawbackAmount = remainingBonus;
+                }
             }
 
-            // 🌟 3. คำนวณยอดโบนัสที่ต้องหักทิ้ง (Clawback) ตามสัดส่วนเงินที่ถอน
-            const clawbackAmount = (reqAmount * bonusPercent) / 100;
-            const totalDeductFromWallet = reqAmount + clawbackAmount; // ยอดรวมที่ต้องหักจากกระเป๋า
+            const totalDeductFromWallet = reqAmount + clawbackAmount;
 
-            // ป้องกันความผิดพลาดทางคณิตศาสตร์ (กันกระเป๋าติดลบ)
             if (currentBalance < totalDeductFromWallet) {
-                throw new Error('ยอดเงินในกระเป๋ารวมโบนัสไม่เพียงพอ');
+                if (remainingBonus > 0) {
+                     throw new Error(`ยอดเงินไม่พอ: คุณมีโบนัสค้างหัก ${remainingBonus.toLocaleString()} ${userCurrency} กรุณาลดจำนวนเงินถอนลงครับ`);
+                } else {
+                     throw new Error('ยอดเงินในกระเป๋าไม่เพียงพอ');
+                }
             }
 
-            // 🌟 4. คำนวณค่าธรรมเนียมจาก "เงินถอนจริง" (เหมือนภาพที่ 1 เป๊ะ)
             const settings = await client.query('SELECT * FROM P2P_Settings LIMIT 1');
             const config = settings.rows.length > 0 ? settings.rows[0] : {};
             const feePercent = parseFloat(config.withdraw_fee_percent || 5);
@@ -7438,50 +7435,37 @@ app.post('/api/p2p/request-withdraw', async (req, res) => {
             const netAmount = reqAmount - feeAmount; 
             const providerReward = (netAmount * parseFloat(config.provider_reward_percent || 15)) / 100;
 
-            // 🛡️ 5. หักเงินออกจากกระเป๋าลูกค้า (หักเงินจริง + โบนัสคืน)
-            const updateWallet = await client.query(`
-                UPDATE Wallets SET balance = balance - $1 WHERE user_id = $2 AND balance >= $1
-            `, [totalDeductFromWallet, requester_id]);
+            // 🛡️ หักเงินออกจากกระเป๋า
+            const updateWallet = await client.query(`UPDATE Wallets SET balance = balance - $1 WHERE user_id = $2 AND balance >= $1`, [totalDeductFromWallet, requester_id]);
+            await client.query(`UPDATE Users SET wallet_balance = COALESCE(wallet_balance, 0) - $1 WHERE user_id = $2`, [totalDeductFromWallet, requester_id]);
 
-            await client.query(`
-                UPDATE Users SET wallet_balance = COALESCE(wallet_balance, 0) - $1 WHERE user_id = $2
-            `, [totalDeductFromWallet, requester_id]);
+            if (updateWallet.rowCount === 0) throw new Error('ยอดเงินในกระเป๋าไม่เพียงพอ');
 
-            if (updateWallet.rowCount === 0) {
-                throw new Error('ยอดเงินในกระเป๋าไม่เพียงพอ หรือมีการทำรายการซ้อนทับกันครับ');
-            }
-
-            // 📝 6. บันทึกประวัติ Transaction ฝั่ง Wallet (แยก 2 บิลให้เห็นชัดเจน)
-            // บิลที่ 1: หักเงินต้น
+            // 📝 บันทึกบิลหักเงินต้น
             await client.query(`
                 INSERT INTO Transactions (user_id, amount, transaction_type, title, status, created_at) 
                 VALUES ($1, $2, 'P2P_Withdraw_Hold', 'หักเงินเพื่อสร้างคำขอถอนเงิน P2P', 'Pending', CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Bangkok')
             `, [requester_id, -reqAmount]);
 
-            // บิลที่ 2: ดึงโบนัสคืน
+            // 🌟 2. อัปเดตและลดโบนัสที่เหลืออยู่ (ถ้ามีการหักโบนัส)
             if (clawbackAmount > 0) {
                 await client.query(`
                     INSERT INTO Transactions (user_id, amount, transaction_type, title, status, created_at) 
                     VALUES ($1, $2, 'Clawback', $3, 'Completed', CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Bangkok')
-                `, [requester_id, -clawbackAmount, `ดึงโบนัสคืนตามสัดส่วน (${bonusPercent}%) จากการถอนเงิน`]);
+                `, [requester_id, -clawbackAmount, `ดึงโบนัสคืน (${bonusPercent}%) คงเหลือโบนัสติดตัว ${(remainingBonus - clawbackAmount).toLocaleString()}`]);
+
+                await client.query(`UPDATE Users SET remaining_bonus = remaining_bonus - $1 WHERE user_id = $2`, [clawbackAmount, requester_id]);
+
+                // ถ้ายอดโบนัสที่เหลือหมดเกลี้ยงแล้ว = ปลดล็อกบัญชี ล้างค่า % เป็น 0 ถอนรอบหน้าได้เต็มๆ
+                await client.query(`UPDATE Users SET active_bonus_percent = 0 WHERE user_id = $1 AND remaining_bonus <= 0`, [requester_id]);
             }
 
-            // 🌟 7. สร้างคำขอถอนเงินลงกระดาน P2P (ส่งยอด reqAmount แบบเพียวๆ ลงไป)
+            // ส่งข้อมูลตั้งคำขอถอนเงิน (ใช้เงินต้น)
             await client.query(`
                 INSERT INTO P2P_Requests 
                 (requester_id, user_bank_id, request_type, currency, amount, bonus_or_fee, net_amount, provider_reward, status, created_at, expires_at) 
-                VALUES 
-                ($1, $2, 'WITHDRAW', $3, $4, $5, $6, $7, 'PENDING', CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Bangkok', (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Bangkok') + ($8 || ' minutes')::interval)
-            `, [
-                requester_id, 
-                user_bank_id, 
-                userCurrency, 
-                reqAmount, 
-                feeAmount, 
-                netAmount, 
-                providerReward, 
-                parseInt(config.request_timeout_minutes || 15)
-            ]);
+                VALUES ($1, $2, 'WITHDRAW', $3, $4, $5, $6, $7, 'PENDING', CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Bangkok', (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Bangkok') + ($8 || ' minutes')::interval)
+            `, [requester_id, user_bank_id, userCurrency, reqAmount, feeAmount, netAmount, providerReward, parseInt(config.request_timeout_minutes || 15)]);
 
             await client.query('COMMIT');
             res.json({ success: true, message: 'สร้างคำขอถอนเงินสำเร็จ' });
@@ -7492,7 +7476,6 @@ app.post('/api/p2p/request-withdraw', async (req, res) => {
             client.release();
         }
     } catch (err) {
-        console.error("Request Withdraw Error:", err);
         res.status(500).json({ success: false, message: err.message });
     }
 });
