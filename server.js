@@ -7807,19 +7807,18 @@ app.get('/api/lottery-results/:type', async (req, res) => {
     if (type === 'VIET') dbCategory = 'VIET';
 
     try {
-        // 🌟 แก้ไข: SELECT ดึงฟิลด์ตัวเลขมาให้ครบทุกประเภท
-        const query = `
+       const query = `
             SELECT 
                 round_id, 
                 round_number AS round_name, 
                 draw_time, 
-                result_6,           -- รางวัล 6 ตัว
-                result_4,           -- รางวัล 4 ตัว
-                result_3_top,       -- 3 ตัวบน
-                result_2_top,       -- 2 ตัวบน
-                result_2_bottom,    -- 2 ตัวล่าง
-                run_top,            -- วิ่งบน
-                run_bottom          -- วิ่งล่าง
+                result_6_top AS result_6,   -- เปลี่ยนชื่อตอนดึงให้ตรงกับที่หน้าบ้านต้องการ
+                result_4_top AS result_4,   
+                result_3_top,               
+                NULL AS result_2_top,       -- ส่งค่าว่างไปก่อน เพราะในตารางยังไม่มีคอลัมน์นี้
+                result_2_bottom,            
+                NULL AS run_top,            -- ส่งค่าว่างไปก่อน
+                NULL AS run_bottom          -- ส่งค่าว่างไปก่อน
             FROM Yeeki_Rounds 
             WHERE category = $1 AND status = 'Completed' 
             ORDER BY draw_time DESC 
