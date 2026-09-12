@@ -3563,15 +3563,17 @@ app.post('/api/thai-lottery/buy', async (req, res) => {
                     if (revRes.rows.length > 0) finalCommission = finalCommission / parseFloat(revRes.rows[0].rate);
                 }
             }
-
             const tTitle = `รายได้ ${purchasePercent}% หวยไทย จากทีมงาน (${ref.buyer_username})`;
             
+            // ✅ แก้ไข: แยกคำสั่ง UPDATE และ INSERT ออกทีละบรรทัด
+            await client.query(`UPDATE Wallets SET balance = balance + $1 WHERE user_id = $2`, [finalCommission, ref.user_id]);
+            
+            await client.query(`UPDATE Users SET total_purchase_comm = COALESCE(total_purchase_comm, 0) + $1 WHERE user_id = $2`, [finalCommission, ref.user_id]);
+            
             await client.query(`
-                UPDATE Wallets SET balance = balance + $1 WHERE user_id = $2;
-                UPDATE Users SET total_purchase_comm = COALESCE(total_purchase_comm, 0) + $1 WHERE user_id = $2;
                 INSERT INTO Transactions (user_id, transaction_type, title, amount, status, created_at)
-                VALUES ($2, 'Affiliate Purchase', $3, $1, 'Completed', CURRENT_TIMESTAMP);
-            `, [finalCommission, ref.user_id, tTitle]);
+                VALUES ($1, 'Affiliate Purchase', $2, $3, 'Completed', CURRENT_TIMESTAMP)
+            `, [ref.user_id, tTitle, finalCommission]);
         }
 
         await client.query('COMMIT');
