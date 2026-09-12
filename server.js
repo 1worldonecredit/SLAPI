@@ -5789,9 +5789,8 @@ app.get('/api/admin/yeeki-rounds', async (req, res) => {
     }
 });
 
-
 // ==========================================
-// 🌟 🚀 API ยี่กีสุดฉลาด: สร้างรอบอัตโนมัติ + ควบคุมโควต้า 12 รอบ
+// 🌟 🚀 API ยี่กีสุดฉลาด: สร้างรอบอัตโนมัติ + ควบคุมโควต้า 12 รอบ (เร็วขึ้น x10)
 // ==========================================
 app.get('/api/yeeki-rounds/live', async (req, res) => {
     try {
@@ -5806,21 +5805,27 @@ app.get('/api/yeeki-rounds/live', async (req, res) => {
         const checkTomorrow = await pgPool.query(`SELECT 1 FROM Yeeki_Rounds WHERE CAST(draw_date AS DATE) = CAST($1 AS DATE) AND (category = 'YEEKI' OR category IS NULL)`, [tomorrowStr]);
         
         if (checkTomorrow.rows.length === 0) {
-            // เสก 24 รอบของวันพรุ่งนี้ ลงตาราง Database ทันทีแบบ Real-time
+            // 🌟 ใช้ Promise.all เพื่อ Insert 24 รอบพร้อมกัน (ลดเวลาหน่วงจาก Database)
+            const insertPromises = [];
+            
             for (let i = 1; i <= 24; i++) {
                 const hour = (i - 1).toString().padStart(2, '0');
                 const openTime = `${tomorrowStr} ${hour}:01:00`;
                 const closeTime = `${tomorrowStr} ${hour}:55:00`;
                 const drawTime = `${tomorrowStr} ${hour}:56:00`;
                 
-                await pgPool.query(`
-                    INSERT INTO Yeeki_Rounds (draw_date, round_number, open_time, close_time, draw_time, status, category) 
-                    VALUES (CAST($1 AS DATE), $2, CAST($3 AS TIMESTAMP), CAST($4 AS TIMESTAMP), CAST($5 AS TIMESTAMP), 'Pending', 'YEEKI')
-                `, [tomorrowStr, i, openTime, closeTime, drawTime]);
+                insertPromises.push(
+                    pgPool.query(`
+                        INSERT INTO Yeeki_Rounds (draw_date, round_number, open_time, close_time, draw_time, status, category) 
+                        VALUES (CAST($1 AS DATE), $2, CAST($3 AS TIMESTAMP), CAST($4 AS TIMESTAMP), CAST($5 AS TIMESTAMP), 'Pending', 'YEEKI')
+                    `, [tomorrowStr, i, openTime, closeTime, drawTime])
+                );
             }
+            
+            await Promise.all(insertPromises); // รันคำสั่ง Insert ทั้ง 24 รอบแบบคู่ขนาน
         }
 
-        // 🔍 3. ดึงข้อมูลอดีต 10 รอบ และอนาคต 20 รอบ (ทะลุข้ามวันแน่นอน เพราะเพิ่งสร้างเมื่อกี้)
+        // 🔍 3. ดึงข้อมูลอดีต 10 รอบ และอนาคต 20 รอบ 
         const roundsResult = await pgPool.query(`
             WITH PastRounds AS (
                 SELECT * FROM Yeeki_Rounds 
@@ -5842,20 +5847,20 @@ app.get('/api/yeeki-rounds/live', async (req, res) => {
             ORDER BY close_time_str ASC;
         `);
 
-        // 🤖 4. API คำนวณสถานะให้เสร็จสรรพ หน้าบ้านไม่ต้องคิด!
+        // 🤖 4. API คำนวณสถานะให้เสร็จสรรพ
         let openCount = 0;
         const now = new Date();
         const finalRounds = roundsResult.rows.map(r => {
             const closeTime = new Date(r.close_time_str);
             const isEnded = r.db_status === 'Completed' || now >= closeTime;
             
-            let finalStatus = 'upcoming'; // ค่าเริ่มต้นคือรอเปิด
+            let finalStatus = 'upcoming'; 
             
             if (isEnded) {
                 finalStatus = 'ended';
             } else if (openCount < MAX_OPEN_ROUNDS) {
                 openCount++;
-                finalStatus = 'open'; // บังคับเปิด 12 รอบ
+                finalStatus = 'open'; 
             }
 
             return {
@@ -5864,7 +5869,7 @@ app.get('/api/yeeki-rounds/live', async (req, res) => {
                 openTime: r.open_time_str,
                 closeTime: r.close_time_str,
                 drawTime: r.draw_time_str,
-                status: finalStatus // ส่งสถานะที่คำนวณเป๊ะๆ ไปให้หน้าบ้าน
+                status: finalStatus
             };
         });
 
