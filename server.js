@@ -7796,25 +7796,30 @@ app.post('/api/p2p/provider-upload-slip', async (req, res) => {
 // 🌟 API P2P ฝั่งถอนเงิน สิ้นสุด
 // ==========================================
 // ==========================================
-// 🌟 API: ดึงประวัติผลการออกรางวัล (เลขที่ออก) ย้อนหลัง
+// 🌟 API: ดึงประวัติผลการออกรางวัล (ดึงครบทุกประเภท)
 // ==========================================
 app.get('/api/lottery-results/:type', async (req, res) => {
-    const { type } = req.params; // รับค่า YEEKI, THAI, VIET จากหน้าบ้าน
+    const { type } = req.params; 
     
-    // แปลงชื่อประเภทจากหน้าเว็บ ให้ตรงกับ category ในฐานข้อมูล
+    // แปลงชื่อประเภทให้ตรงกับฐานข้อมูล
     let dbCategory = 'YEEKI';
     if (type === 'THAI') dbCategory = 'THAI';
     if (type === 'VIET') dbCategory = 'VIET';
 
     try {
-        // ดึงข้อมูลงวดที่สถานะเป็น 'Completed' (ออกผลแล้ว) 20 งวดล่าสุด
+        // 🌟 แก้ไข: SELECT ดึงฟิลด์ตัวเลขมาให้ครบทุกประเภท
         const query = `
             SELECT 
                 round_id, 
                 round_number AS round_name, 
                 draw_time, 
-                result_3_top, 
-                result_2_bottom 
+                result_6,           -- รางวัล 6 ตัว
+                result_4,           -- รางวัล 4 ตัว
+                result_3_top,       -- 3 ตัวบน
+                result_2_top,       -- 2 ตัวบน
+                result_2_bottom,    -- 2 ตัวล่าง
+                run_top,            -- วิ่งบน
+                run_bottom          -- วิ่งล่าง
             FROM Yeeki_Rounds 
             WHERE category = $1 AND status = 'Completed' 
             ORDER BY draw_time DESC 
