@@ -1380,7 +1380,7 @@ app.post('/api/lottery/buy', async (req, res) => {
         // 🌟 หักเงิน (อัปเดตเผื่อไว้ทั้ง 2 ตาราง เพื่อให้ระบบเก่าที่อาจจะค้างอยู่ทำงานได้)
         await client.query(`UPDATE Users SET wallet_balance = COALESCE(wallet_balance, 0) - $1 WHERE user_id = $2`, [deductAmount, user_id]);
         await client.query(`UPDATE Wallets SET balance = COALESCE(balance, 0) - $1 WHERE user_id = $2`, [deductAmount, user_id]);
-        
+
         // 5. บันทึกประวัติ
         await client.query(`
             INSERT INTO Transactions (user_id, transaction_type, title, amount, status, created_at)
@@ -3512,10 +3512,9 @@ app.post('/api/thai-lottery/buy', async (req, res) => {
         if (userRes.rows.length === 0) throw new Error('ไม่พบกระเป๋าเงิน');
         if (parseFloat(userRes.rows[0].balance) < deductAmount) throw new Error('ยอดเงินในกระเป๋าไม่เพียงพอ');
 
-        await client.query(`
-            UPDATE Users SET wallet_balance = COALESCE(wallet_balance, 0) - $1 WHERE user_id = $2;
-            UPDATE Wallets SET balance = balance - $1 WHERE user_id = $2;
-        `, [deductAmount, user_id]);
+        // แยกคำสั่งอัปเดตยอดเงินเป็น 2 บรรทัด ป้องกัน Error
+        await client.query(`UPDATE Users SET wallet_balance = COALESCE(wallet_balance, 0) - $1 WHERE user_id = $2`, [deductAmount, user_id]);
+        await client.query(`UPDATE Wallets SET balance = balance - $1 WHERE user_id = $2`, [deductAmount, user_id]);
 
         // 3. บันทึกประวัติ Transaction ฝั่งหวยไทย
         await client.query(`
