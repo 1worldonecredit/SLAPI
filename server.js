@@ -1328,6 +1328,7 @@ app.put('/api/admin/animal-numbers/:id', async (req, res) => {
         res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการ UPDATE Database', error: error.message });
     }
 });
+
 // ==========================================
 // 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🌟 API: สำหรับการซื้อหวย (ตัดเงิน/คำนวณวัน/จ่ายค่าคอม/แสตมป์ชื่อลูกทีม)
@@ -1365,21 +1366,21 @@ app.post('/api/lottery/buy', async (req, res) => {
         // 3. คำนวณยอดที่จะหักเงิน (แปลงกลับเป็นสกุลเงินกระเป๋าลูกค้า)
         const deductAmount = baseTHBAmount * exchangeRate; 
 
-        // 4. เช็คยอดเงินและหักเงินในกระเป๋า
-        // 🌟 แก้ไข: เปลี่ยนไปเช็คยอดจากตาราง Users (wallet_balance) ให้ตรงกับหน้า Dashboard ที่ลูกค้าเห็น
-        const userRes = await client.query('SELECT wallet_balance FROM Users WHERE user_id = $1', [user_id]); 
+       // 4. เช็คยอดเงินและหักเงินในกระเป๋า
+        // 🌟 แก้ไข: เปลี่ยนไปเช็คยอดจากตาราง Wallets (balance) แทน เพราะระบบใหม่เก็บเงินไว้ที่นี่
+        const userRes = await client.query('SELECT balance FROM Wallets WHERE user_id = $1', [user_id]); 
 
-        if (userRes.rows.length === 0) throw new Error('ไม่พบข้อมูลผู้ใช้งานในระบบ');
+        if (userRes.rows.length === 0) throw new Error('ไม่พบข้อมูลกระเป๋าเงินในระบบ');
         
-        // 🌟 แก้ไข: ตรวจสอบโดยใช้ Number() คลุมทั้งสองฝั่งให้ชัวร์ว่าเทียบตัวเลข
-        if (Number(userRes.rows[0].wallet_balance) < deductAmount) { 
+        // 🌟 แก้ไข: เปลี่ยนมาเช็คจากตัวแปร balance แทน
+        if (Number(userRes.rows[0].balance) < deductAmount) { 
             throw new Error('ยอดเงินในกระเป๋าไม่เพียงพอ');
         }
 
-        // 🌟 แก้ไข: หั่นคำสั่ง UPDATE ออกเป็น 2 บรรทัด และเติม COALESCE ให้ตาราง Wallets ป้องกันบัคค่าว่างในรหัสใหม่
+        // 🌟 หักเงิน (อัปเดตเผื่อไว้ทั้ง 2 ตาราง เพื่อให้ระบบเก่าที่อาจจะค้างอยู่ทำงานได้)
         await client.query(`UPDATE Users SET wallet_balance = COALESCE(wallet_balance, 0) - $1 WHERE user_id = $2`, [deductAmount, user_id]);
         await client.query(`UPDATE Wallets SET balance = COALESCE(balance, 0) - $1 WHERE user_id = $2`, [deductAmount, user_id]);
-
+        
         // 5. บันทึกประวัติ
         await client.query(`
             INSERT INTO Transactions (user_id, transaction_type, title, amount, status, created_at)
