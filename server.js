@@ -7790,7 +7790,47 @@ app.post('/api/p2p/provider-upload-slip', async (req, res) => {
 // ==========================================
 // 🌟 API P2P ฝั่งถอนเงิน สิ้นสุด
 // ==========================================
+// ==========================================
+// 🌟 API: ดึงประวัติผลการออกรางวัล (เลขที่ออก) ย้อนหลัง
+// ==========================================
+app.get('/api/lottery-results/:type', async (req, res) => {
+    const { type } = req.params; // รับค่า YEEKI, THAI, VIET จากหน้าบ้าน
+    
+    // แปลงชื่อประเภทจากหน้าเว็บ ให้ตรงกับ category ในฐานข้อมูล
+    let dbCategory = 'YEEKI';
+    if (type === 'THAI') dbCategory = 'THAI';
+    if (type === 'VIET') dbCategory = 'VIET';
 
+    try {
+        // ดึงข้อมูลงวดที่สถานะเป็น 'Completed' (ออกผลแล้ว) 20 งวดล่าสุด
+        const query = `
+            SELECT 
+                round_id, 
+                round_number AS round_name, 
+                draw_time, 
+                result_3_top, 
+                result_2_bottom 
+            FROM Yeeki_Rounds 
+            WHERE category = $1 AND status = 'Completed' 
+            ORDER BY draw_time DESC 
+            LIMIT 20
+        `;
+        
+        const resultRes = await pgPool.query(query, [dbCategory]);
+
+        res.status(200).json({ 
+            success: true, 
+            data: resultRes.rows 
+        });
+
+    } catch (error) {
+        console.error('Error fetching lottery results:', error);
+        res.status(500).json({ 
+            success: false, 
+            message: 'เกิดข้อผิดพลาดในการดึงผลรางวัล' 
+        });
+    }
+});
 // ==========================================
 // 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🔔 [NOTIFICATION APIs]
