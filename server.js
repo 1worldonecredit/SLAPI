@@ -7800,31 +7800,43 @@ app.post('/api/p2p/provider-upload-slip', async (req, res) => {
 // 🌟 API 1: ดึงผลรางวัล "จับยีกี่" (YEEKI)
 // ==========================================
 // ==========================================
-// 🌟 API 1: ดึงผลรางวัล "จับยีกี่" (YEEKI)
+// 🌟 API: ดึงผลรางวัล "จับยีกี่" (YEEKI) ไปโชว์หน้าประวัติหวย
 // ==========================================
 app.get('/api/lottery-results/yeeki', async (req, res) => {
     try {
         const resultRes = await pgPool.query(`SELECT * FROM Yeeki_Rounds WHERE category = 'YEEKI' AND status = 'Completed' ORDER BY draw_time DESC LIMIT 50`);
         const data = resultRes.rows.map(row => {
             
-            // ⚠️ แก้ไข: ดึงคอลัมน์ให้ตรงตัว ไม่มั่วไปเอา result_8_super มาผสม
+            // 1. ดึง 6 ตัว และ 2 ตัวล่าง มาเป็นแกนหลัก
             const r6 = row.result_6_top || ''; 
-            const r4 = row.result_4_top || ''; 
-            const r3 = row.result_3_top || '';
-            const r2b = row.result_2_bottom || '';
+            const r2b = row.result_2_bottom || '--';
+
+            // 2. 🌟 บังคับหั่นเลข 4, 3, 2 จากเลข 6 ตัว (เพื่อทับข้อมูลเก่าที่บันทึกเพี้ยนใน DB)
+            let r4 = '--', r3 = '--', r2t = '--';
             
+            if (r6 && r6.length >= 4) {
+                r4 = r6.slice(-4);
+                r3 = r6.slice(-3);
+                r2t = r6.slice(-2);
+            } else {
+                // เผื่อรอบเก่ามากๆ ที่ยังไม่ได้ใช้ระบบ 6 ตัว
+                r4 = row.result_4_top || '--';
+                r3 = row.result_3_top || '--';
+                r2t = r3 !== '--' && r3.length >= 2 ? r3.slice(-2) : '--';
+            }
+
             return {
                 id: row.round_id, 
                 round_name: row.round_number, 
                 draw_time: row.draw_time, 
                 result_6: r6 || '--',   
-                result_4: r4 || '--',   
-                result_3_top: r3 || '--',
-                result_3_tod: r3 ? r3.split('').sort().join('') : '--',
-                result_2_top: r3.length >= 2 ? r3.slice(-2) : '--',     
-                result_2_bottom: r2b || '--',            
-                run_top: r3 ? Array.from(new Set(r3.split(''))).join(', ') : '--', 
-                run_bottom: r2b ? Array.from(new Set(r2b.split(''))).join(', ') : '--' 
+                result_4: r4,   
+                result_3_top: r3,
+                result_3_tod: r3 !== '--' ? r3.split('').sort().join('') : '--',
+                result_2_top: r2t,     
+                result_2_bottom: r2b,            
+                run_top: r3 !== '--' ? Array.from(new Set(r3.split(''))).join(', ') : '--', 
+                run_bottom: r2b !== '--' ? Array.from(new Set(r2b.split(''))).join(', ') : '--' 
             };
         });
         res.status(200).json({ success: true, data });
