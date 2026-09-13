@@ -3026,12 +3026,9 @@ app.post('/api/admin/analyze-draw', async (req, res) => {
     }
 });
 
+
 // ==========================================
-// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
-// 🌟 API หวยไทย เริ่ม
-// ==========================================
-// ==========================================
-// 1. 🇹🇭 API: ดึงข้อมูลรอบหวยไทยทั้งหมด (สำหรับฝั่ง Admin) -> แก้บั๊ก Timezone
+// 🌟 API: ดึงรายการงวดหวยไทย (ส่งให้หน้า Admin จัดการและดูประวัติ)
 // ==========================================
 app.get('/api/admin/thai-lottery/rounds', async (req, res) => {
     try {
@@ -3041,7 +3038,12 @@ app.get('/api/admin/thai-lottery/rounds', async (req, res) => {
                    to_char(open_time, 'YYYY-MM-DD"T"HH24:MI:SS') AS open_time, 
                    to_char(close_time, 'YYYY-MM-DD"T"HH24:MI:SS') AS close_time, 
                    to_char(draw_time, 'YYYY-MM-DD"T"HH24:MI:SS') AS draw_time, 
-                   status, result_8_super as result_6, result_2_bottom 
+                   status, 
+                   
+                   -- 🌟 จุดที่แก้ไข: ดึงจาก result_6_top ก่อน ถ้าเป็นงวดเก่าที่มีแต่เลข 8 ตัว ให้หั่นเอาแค่ 6 ตัวท้าย
+                   COALESCE(result_6_top, RIGHT(result_8_super, 6)) AS result_6, 
+                   
+                   result_2_bottom 
             FROM Yeeki_Rounds 
             WHERE category = 'THAI' 
             ORDER BY draw_time DESC
