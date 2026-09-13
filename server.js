@@ -3159,20 +3159,22 @@ app.post('/api/admin/thai-lottery/edit-round', async (req, res) => {
 
 
 // ==========================================
-// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
-// 3. 🇹🇭 ประกาศผลหวยไทย + จ่ายเงินรางวัลและค่าคอมมิชชัน
+// 🌟 3. 🇹🇭 ประกาศผลหวยไทย + จ่ายเงินรางวัลและค่าคอมมิชชัน
 // ==========================================
 app.post('/api/admin/thai-lottery/execute-draw', async (req, res) => {
+    // 🌟 รับมาแค่ 6 หลัก กับ 2 หลักล่างเท่านั้น
     const { round_id, number6, number2bot } = req.body;
     
     if (!round_id || !number6 || !number2bot || number6.length !== 6 || number2bot.length !== 2) {
         return res.status(400).json({ success: false, message: 'ข้อมูลไม่ครบถ้วน กรุณากรอกเลขให้ถูกต้อง' });
     }
 
-    const client = await pgPool.connect(); // 🌟 เปิด Transaction ใช้งานจริงจัง!
+    const client = await pgPool.connect(); 
     
     try {
-        // แตกตัวเลขตามกติกาหวยใต้ดินไทย
+        await client.query('BEGIN'); 
+
+        // 🌟 แตกตัวเลขจากรางวัลที่ 1 (number6)
         const top_6 = number6;
         const top_4 = top_6.slice(-4);
         const top_3 = top_6.slice(-3);
@@ -3180,7 +3182,7 @@ app.post('/api/admin/thai-lottery/execute-draw', async (req, res) => {
         const bot_2 = number2bot;
         const top_3_sorted = top_3.split('').sort().join('');
 
-        // ดึงเรทจ่ายหวยยี่กีมาใช้
+        // ดึงเรทจ่าย (อิงตารางเดิมที่คุณวิทยาใช้งาน)
         const ratesReq = await client.query(`SELECT lottery_type, multiplier FROM Yeeki_Prize_Rates`);
         const prizeRates = {};
         ratesReq.rows.forEach(r => prizeRates[r.lottery_type] = r.multiplier);
@@ -3191,16 +3193,20 @@ app.post('/api/admin/thai-lottery/execute-draw', async (req, res) => {
             if (commReq.rows.length > 0) winCommissionPercent = commReq.rows[0].win_percent || 0;
         } catch (e) {}
 
-        await client.query('BEGIN'); // เริ่มล็อค DB
-
-        // 3.1 บันทึกเลขที่ออกลงตารางรอบหวย
+        // 🌟 3.1 บันทึกเลขที่ออกลงตารางรอบหวย (เซ็ต result_8_super เป็น NULL เพื่อล้างบางระบบ 8 ตัวทิ้ง)
         await client.query(`
             UPDATE Yeeki_Rounds 
-            SET result_8_super = $1, result_4_top = $2, result_3_top = $3, result_2_bottom = $4, status = 'Completed' 
+            SET 
+                result_8_super = NULL, 
+                result_6_top = $1, 
+                result_4_top = $2, 
+                result_3_top = $3, 
+                result_2_bottom = $4, 
+                status = 'Completed' 
             WHERE round_id = $5
         `, [top_6, top_4, top_3, bot_2, round_id]);
 
-        // 3.2 ดึงบิลหวยไทยที่รอตรวจทั้งหมดของรอบนี้
+        // 3.2 ดึงบิลหวยไทยที่รอตรวจ
         const ordersReq = await client.query(`
             SELECT i.item_id, o.user_id, i.lottery_type, i.selected_number, i.price, o.currency_code
             FROM Yeeki_Order_Items i JOIN Yeeki_Orders o ON i.order_id = o.order_id
@@ -3209,13 +3215,13 @@ app.post('/api/admin/thai-lottery/execute-draw', async (req, res) => {
         
         let totalWinners = 0;
 
-        // 3.3 ตรวจบิล จ่ายเงิน จ่ายค่าคอมฯ ทีละใบ
+        // 3.3 ตรวจบิล 
         for (let item of ordersReq.rows) {
             let isWin = false;
             let t = item.lottery_type;
             let n = item.selected_number;
 
-            // กติกาตรวจหวยไทย
+            // กติกาหวยไทย (หั่นจาก 6 ตัว)
             if (t === '6 ตัว' && n === top_6) isWin = true;
             else if (t === '4 ตัวท้าย' && n === top_4) isWin = true;
             else if (t === '3 ตัวบน' && n === top_3) isWin = true;
@@ -3231,29 +3237,22 @@ app.post('/api/admin/thai-lottery/execute-draw', async (req, res) => {
                 let isLAK = (item.currency_code === 'LAK' || item.currency_code === '₭');
                 let currency = isLAK ? 'LAK' : 'THB';
 
-                // อัปเดตสถานะชนะ
                 await client.query(`UPDATE Yeeki_Order_Items SET status = 'ชนะ', prize_amount = $1 WHERE item_id = $2`, [prizeAmount, item.item_id]);
-
-                // 🌟 อัปเดตเงินเข้ากระเป๋าหลัก (balance)
                 await client.query(`UPDATE Wallets SET balance = balance + $1 WHERE user_id = $2`, [prizeAmount, item.user_id]);
 
-                // บันทึก Log การรับเงิน
                 await client.query(`
                     INSERT INTO Transactions (user_id, amount, currency_code, transaction_type, status, title, created_at) 
                     VALUES ($1, $2, $3, 'deposit', 'Completed', $4, CURRENT_TIMESTAMP)
                 `, [item.user_id, prizeAmount, currency, `ถูกรางวัลหวยไทย ${item.lottery_type}`]);
 
-                // 💵 จ่ายค่าคอมฯ ผู้แนะนำ
+                // จ่ายค่าคอมฯ
                 if (winCommissionPercent > 0) {
                     const refReq = await client.query(`SELECT referrer_id FROM User_Referrals WHERE user_id = $1`, [item.user_id]);
                     if (refReq.rows.length > 0) {
                         let refId = refReq.rows[0].referrer_id;
                         let commAmt = prizeAmount * (winCommissionPercent / 100);
                         
-                        // 🌟 อัปเดตเงินค่าคอมเข้ากระเป๋าหลัก
                         await client.query(`UPDATE Wallets SET balance = balance + $1 WHERE user_id = $2`, [commAmt, refId]);
-
-                        // บันทึก Log การรับค่าคอม
                         await client.query(`
                             INSERT INTO Transactions (user_id, amount, currency_code, transaction_type, status, title, created_at) 
                             VALUES ($1, $2, $3, 'commission', 'Completed', $4, CURRENT_TIMESTAMP)
@@ -3261,7 +3260,7 @@ app.post('/api/admin/thai-lottery/execute-draw', async (req, res) => {
                     }
                 }
             } else {
-                await client.query(`UPDATE Yeeki_Order_Items SET status = 'ไม่ถูกรางวัล', prize_amount = 0 WHERE item_id = $1`, [item.item_id]);
+                await client.query(`UPDATE Yeeki_Order_Items SET status = 'แพ้', prize_amount = 0 WHERE item_id = $1`, [item.item_id]);
             }
         }
 
