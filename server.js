@@ -2835,6 +2835,7 @@ app.get('/api/lottery/status', async (req, res) => {
         res.status(500).json({ success: false });
     }
 });
+
 // ==========================================
 // 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🌟 API: ดึงประวัติผลการออกรางวัลและรายชื่อคนถูกรางวัล ย้อนหลังตามวันที่ (เพิ่มยอดขาย)
@@ -7796,36 +7797,77 @@ app.post('/api/p2p/provider-upload-slip', async (req, res) => {
 // 🌟 API P2P ฝั่งถอนเงิน สิ้นสุด
 // ==========================================
 // ==========================================
-// 🌟 API: ดึงประวัติผลการออกรางวัล (ดึงครบทุกประเภท)
+// 🌟 API: ดึงประวัติผลการออกรางวัล (ดึงข้อมูลให้ตรงกับฐานข้อมูลจริง)
 // ==========================================
 app.get('/api/lottery-results/:type', async (req, res) => {
     const { type } = req.params; 
-    
-    // แปลงชื่อประเภทให้ตรงกับฐานข้อมูล
-    let dbCategory = 'YEEKI';
-    if (type === 'THAI') dbCategory = 'THAI';
-    if (type === 'VIET') dbCategory = 'VIET';
 
     try {
-       const query = `
-            SELECT 
-                round_id, 
-                round_number AS round_name, 
-                draw_time, 
-                result_6_top AS result_6,   
-                result_4_top AS result_4,   
-                result_3_top,               
-                NULL AS result_2_top,       
-                result_2_bottom,            
-                NULL AS run_top,            
-                NULL AS run_bottom          
-            FROM Yeeki_Rounds 
-            WHERE category = $1 AND status = 'Completed' 
-            ORDER BY draw_time DESC 
-            LIMIT 20
-        `;
+        let query = '';
         
-        const resultRes = await pgPool.query(query, [dbCategory]);
+        // 1. หวยเวียด (VIET) - ดึงจาก Draw_Results ตามโครงสร้างใหม่
+        if (type === 'VIET') {
+            query = `
+                SELECT 
+                    id AS round_id, 
+                    'หวยเวียด' AS round_name, 
+                    draw_date AS draw_time, 
+                    NULL AS result_6,   
+                    NULL AS result_4,   
+                    result_3_top,       -- รบกวนเช็กว่าใน Draw_Results ใช้ชื่อคอลัมน์นี้หรือไม่
+                    NULL AS result_2_top,       
+                    result_2_bottom,    -- รบกวนเช็กว่าใน Draw_Results ใช้ชื่อคอลัมน์นี้หรือไม่        
+                    NULL AS run_top,            
+                    NULL AS run_bottom          
+                FROM Draw_Results 
+                ORDER BY draw_date DESC 
+                LIMIT 20
+            `;
+        } 
+        
+        // 2. หวยไทย (THAI) - ดึงจาก Yeeki_Rounds และแปลงคอลัมน์ให้ตรง
+        else if (type === 'THAI') {
+            query = `
+                SELECT 
+                    round_id, 
+                    round_number AS round_name, 
+                    draw_time, 
+                    result_8_super AS result_6, -- ดึงเลข 6 ตัว จากคอลัมน์ result_8_super ที่แอดมินบันทึกไว้
+                    result_4_top AS result_4,   
+                    result_3_top,               
+                    NULL AS result_2_top,       
+                    result_2_bottom,            
+                    NULL AS run_top,            
+                    NULL AS run_bottom          
+                FROM Yeeki_Rounds 
+                WHERE category = 'THAI' AND status = 'Completed' 
+                ORDER BY draw_time DESC 
+                LIMIT 20
+            `;
+        }
+
+        // 3. จับยีกี่ (YEEKI) - ดึงจาก Yeeki_Rounds
+        else {
+            query = `
+                SELECT 
+                    round_id, 
+                    round_number AS round_name, 
+                    draw_time, 
+                    NULL AS result_6,   
+                    NULL AS result_4,   
+                    result_3_top,               
+                    NULL AS result_2_top,       
+                    result_2_bottom,            
+                    NULL AS run_top,            
+                    NULL AS run_bottom          
+                FROM Yeeki_Rounds 
+                WHERE category = 'YEEKI' AND status = 'Completed' 
+                ORDER BY draw_time DESC 
+                LIMIT 20
+            `;
+        }
+
+        const resultRes = await pgPool.query(query);
 
         res.status(200).json({ 
             success: true, 
