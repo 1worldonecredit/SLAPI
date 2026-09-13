@@ -7796,6 +7796,7 @@ app.post('/api/p2p/provider-upload-slip', async (req, res) => {
 // ==========================================
 // 🌟 API P2P ฝั่งถอนเงิน สิ้นสุด
 // ==========================================
+
 // ==========================================
 // 🌟 API 1: ดึงผลรางวัล "จับยีกี่" (YEEKI)
 // ==========================================
@@ -7803,20 +7804,22 @@ app.get('/api/lottery-results/yeeki', async (req, res) => {
     try {
         const resultRes = await pgPool.query(`SELECT * FROM Yeeki_Rounds WHERE category = 'YEEKI' AND status = 'Completed' ORDER BY draw_time DESC LIMIT 50`);
         const data = resultRes.rows.map(row => {
+            const r6 = row.result_8_super || row.result_6_top || ''; // ดึงเลข 6 ตัว
+            const r4 = row.result_4_top || (r6 ? r6.slice(-4) : ''); // ดึงเลข 4 ตัว
             const r3 = row.result_3_top || '';
             const r2b = row.result_2_bottom || '';
             return {
                 id: row.round_id, 
                 round_name: row.round_number, 
                 draw_time: row.draw_time, 
-                result_6: '--',   
-                result_4: '--',   
+                result_6: r6 || '--',   // ส่งค่าให้หน้าเว็บ
+                result_4: r4 || '--',   // ส่งค่าให้หน้าเว็บ
                 result_3_top: r3 || '--',
-                result_3_tod: r3 ? r3.split('').sort().join('') : '--', // เรียงเลขใหม่เป็น 3 ตัวโต๊ด
-                result_2_top: r3.length >= 2 ? r3.slice(-2) : '--',     // ดึง 2 ตัวท้ายจาก 3 ตัวบน
+                result_3_tod: r3 ? r3.split('').sort().join('') : '--',
+                result_2_top: r3.length >= 2 ? r3.slice(-2) : '--',     
                 result_2_bottom: r2b || '--',            
-                run_top: r3 ? Array.from(new Set(r3.split(''))).join(', ') : '--', // แยกเลขวิ่งบน
-                run_bottom: r2b ? Array.from(new Set(r2b.split(''))).join(', ') : '--' // แยกเลขวิ่งล่าง
+                run_top: r3 ? Array.from(new Set(r3.split(''))).join(', ') : '--', 
+                run_bottom: r2b ? Array.from(new Set(r2b.split(''))).join(', ') : '--' 
             };
         });
         res.status(200).json({ success: true, data });
