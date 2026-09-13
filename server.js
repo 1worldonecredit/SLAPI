@@ -7878,30 +7878,51 @@ app.get('/api/lottery-results/thai', async (req, res) => {
 // ==========================================
 // 🌟 API 3: ดึงผลรางวัล "หวยเวียด" (VIET)
 // ==========================================
+// ==========================================
+// 🌟 API: ดึงผลรางวัล "หวยเวียดนาม" (VIET)
+// ==========================================
 app.get('/api/lottery-results/viet', async (req, res) => {
     try {
         const resultRes = await pgPool.query(`SELECT * FROM Draw_Results ORDER BY draw_date DESC LIMIT 50`);
         const data = resultRes.rows.map(row => {
-            const r6 = row.result_8_super || row.result_6_top || '';
-            const r3 = r6 ? r6.slice(-3) : (row.result_3_top || ''); 
-            const r4 = r6 ? r6.slice(-4) : (row.result_4_top || '');
-            const r2b = row.result_2_bottom || '';
+            
+            // 1. ดึง 6 ตัว และ 2 ตัวล่าง มาเป็นแกนหลัก (เลิกใช้ result_8_super เด็ดขาด)
+            const r6 = row.result_6_top || ''; 
+            const r2b = row.result_2_bottom || '--';
+
+            // 2. บังคับหั่นเลข 4, 3, 2 จากเลข 6 ตัว
+            let r4 = '--', r3 = '--', r2t = '--';
+            
+            if (r6 && r6.length >= 4) {
+                r4 = r6.slice(-4);
+                r3 = r6.slice(-3);
+                r2t = r6.slice(-2);
+            } else {
+                // ดักเผื่อกรณีเป็นข้อมูลเก่าใน Database ที่ไม่มีเลข 6 ตัว
+                r4 = row.result_4_top || '--';
+                r3 = row.result_3_top || '--';
+                r2t = r3 !== '--' && r3.length >= 2 ? r3.slice(-2) : '--';
+            }
+
             return {
                 id: row.id || new Date(row.draw_date).getTime(), 
                 round_name: 'หวยเวียด', 
                 draw_time: row.draw_date, 
                 result_6: r6 || '--', 
-                result_4: r4 || '--',   
-                result_3_top: r3 || '--',
-                result_3_tod: r3 ? r3.split('').sort().join('') : '--',               
-                result_2_top: r3.length >= 2 ? r3.slice(-2) : '--',       
-                result_2_bottom: r2b || '--',            
-                run_top: r3 ? Array.from(new Set(r3.split(''))).join(', ') : '--',            
-                run_bottom: r2b ? Array.from(new Set(r2b.split(''))).join(', ') : '--'
+                result_4: r4,   
+                result_3_top: r3,
+                result_3_tod: r3 !== '--' ? r3.split('').sort().join('') : '--',               
+                result_2_top: r2t,       
+                result_2_bottom: r2b,            
+                run_top: r3 !== '--' ? Array.from(new Set(r3.split(''))).join(', ') : '--',            
+                run_bottom: r2b !== '--' ? Array.from(new Set(r2b.split(''))).join(', ') : '--'
             };
         });
         res.status(200).json({ success: true, data });
-    } catch (error) { res.status(200).json({ success: true, data: [] }); }
+    } catch (error) { 
+        console.error("VIET API Error:", error);
+        res.status(200).json({ success: true, data: [] }); 
+    }
 });
 // ==========================================
 // 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
