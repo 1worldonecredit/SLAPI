@@ -7800,20 +7800,26 @@ app.post('/api/p2p/provider-upload-slip', async (req, res) => {
 // ==========================================
 // 🌟 API 1: ดึงผลรางวัล "จับยีกี่" (YEEKI)
 // ==========================================
+// ==========================================
+// 🌟 API 1: ดึงผลรางวัล "จับยีกี่" (YEEKI)
+// ==========================================
 app.get('/api/lottery-results/yeeki', async (req, res) => {
     try {
         const resultRes = await pgPool.query(`SELECT * FROM Yeeki_Rounds WHERE category = 'YEEKI' AND status = 'Completed' ORDER BY draw_time DESC LIMIT 50`);
         const data = resultRes.rows.map(row => {
-            const r6 = row.result_8_super || row.result_6_top || ''; // ดึงเลข 6 ตัว
-            const r4 = row.result_4_top || (r6 ? r6.slice(-4) : ''); // ดึงเลข 4 ตัว
+            
+            // ⚠️ แก้ไข: ดึงคอลัมน์ให้ตรงตัว ไม่มั่วไปเอา result_8_super มาผสม
+            const r6 = row.result_6_top || ''; 
+            const r4 = row.result_4_top || ''; 
             const r3 = row.result_3_top || '';
             const r2b = row.result_2_bottom || '';
+            
             return {
                 id: row.round_id, 
                 round_name: row.round_number, 
                 draw_time: row.draw_time, 
-                result_6: r6 || '--',   // ส่งค่าให้หน้าเว็บ
-                result_4: r4 || '--',   // ส่งค่าให้หน้าเว็บ
+                result_6: r6 || '--',   
+                result_4: r4 || '--',   
                 result_3_top: r3 || '--',
                 result_3_tod: r3 ? r3.split('').sort().join('') : '--',
                 result_2_top: r3.length >= 2 ? r3.slice(-2) : '--',     
@@ -7823,7 +7829,10 @@ app.get('/api/lottery-results/yeeki', async (req, res) => {
             };
         });
         res.status(200).json({ success: true, data });
-    } catch (error) { res.status(200).json({ success: true, data: [] }); }
+    } catch (error) { 
+        console.error("YEEKI API Error:", error);
+        res.status(200).json({ success: true, data: [] }); 
+    }
 });
 
 // ==========================================
