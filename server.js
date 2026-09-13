@@ -7886,19 +7886,19 @@ app.get('/api/lottery-results/viet', async (req, res) => {
         const resultRes = await pgPool.query(`SELECT * FROM Draw_Results ORDER BY draw_date DESC LIMIT 50`);
         const data = resultRes.rows.map(row => {
             
-            // 1. ดึง 6 ตัว และ 2 ตัวล่าง มาเป็นแกนหลัก (เลิกใช้ result_8_super เด็ดขาด)
-            const r6 = row.result_6_top || ''; 
+            // 🌟 ยอมให้อ่านจาก result_8_super เพราะแอดมินหวยเวียดยังบันทึกลงคอลัมน์นี้อยู่
+            const rawMain = row.result_8_super || row.result_6_top || ''; 
             const r2b = row.result_2_bottom || '--';
 
-            // 2. บังคับหั่นเลข 4, 3, 2 จากเลข 6 ตัว
-            let r4 = '--', r3 = '--', r2t = '--';
+            // 🌟 ให้ระบบหั่นเลขจากตัวดิบ (ถ้ามี 8 ตัว ก็จะโดนหั่นเหลือ 6, 4, 3, 2 อัตโนมัติ)
+            let r6 = '--', r4 = '--', r3 = '--', r2t = '--';
             
-            if (r6 && r6.length >= 4) {
-                r4 = r6.slice(-4);
-                r3 = r6.slice(-3);
-                r2t = r6.slice(-2);
+            if (rawMain) {
+                r6 = rawMain.length >= 6 ? rawMain.slice(-6) : rawMain;
+                r4 = rawMain.length >= 4 ? rawMain.slice(-4) : rawMain;
+                r3 = rawMain.length >= 3 ? rawMain.slice(-3) : rawMain;
+                r2t = rawMain.length >= 2 ? rawMain.slice(-2) : rawMain;
             } else {
-                // ดักเผื่อกรณีเป็นข้อมูลเก่าใน Database ที่ไม่มีเลข 6 ตัว
                 r4 = row.result_4_top || '--';
                 r3 = row.result_3_top || '--';
                 r2t = r3 !== '--' && r3.length >= 2 ? r3.slice(-2) : '--';
@@ -7908,7 +7908,7 @@ app.get('/api/lottery-results/viet', async (req, res) => {
                 id: row.id || new Date(row.draw_date).getTime(), 
                 round_name: 'หวยเวียด', 
                 draw_time: row.draw_date, 
-                result_6: r6 || '--', 
+                result_6: r6, 
                 result_4: r4,   
                 result_3_top: r3,
                 result_3_tod: r3 !== '--' ? r3.split('').sort().join('') : '--',               
