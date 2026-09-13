@@ -7807,7 +7807,7 @@ app.get('/api/lottery-results/:type', async (req, res) => {
     if (type === 'VIET') dbCategory = 'VIET';
 
     try {
-        const query = `
+       const query = `
             SELECT 
                 round_id, 
                 round_number AS round_name, 
