@@ -7807,23 +7807,23 @@ app.get('/api/lottery-results/:type', async (req, res) => {
     if (type === 'VIET') dbCategory = 'VIET';
 
     try {
-      const query = `
-    SELECT 
-        round_id, 
-        round_number AS round_name, 
-        draw_time, 
-        result_6_top AS result_6,   
-        result_4_top AS result_4,   
-        result_3_top,               
-        result_2_top,       -- 🌟 เปลี่ยนจาก NULL เป็นการดึงจริง
-        result_2_bottom,            
-        run_top,            -- 🌟 เปลี่ยนจาก NULL เป็นการดึงจริง
-        run_bottom          -- 🌟 เปลี่ยนจาก NULL เป็นการดึงจริง
-    FROM Yeeki_Rounds 
-    WHERE category = $1 AND status = 'Completed' 
-    ORDER BY draw_time DESC 
-    LIMIT 20
-`;
+        const query = `
+            SELECT 
+                round_id, 
+                round_number AS round_name, 
+                draw_time, 
+                result_6_top AS result_6,   
+                result_4_top AS result_4,   
+                result_3_top,               
+                NULL AS result_2_top,       
+                result_2_bottom,            
+                NULL AS run_top,            
+                NULL AS run_bottom          
+            FROM Yeeki_Rounds 
+            WHERE category = $1 AND status = 'Completed' 
+            ORDER BY draw_time DESC 
+            LIMIT 20
+        `;
         
         const resultRes = await pgPool.query(query, [dbCategory]);
 
