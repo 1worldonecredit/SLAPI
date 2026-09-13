@@ -7846,32 +7846,46 @@ app.get('/api/lottery-results/yeeki', async (req, res) => {
 });
 
 // ==========================================
-// 🌟 API 2: ดึงผลรางวัล "หวยไทย" (THAI)
+// 🌟 API: ดึงประวัติ "หวยไทย" ไปโชว์หน้าประวัติลูกค้า
 // ==========================================
 app.get('/api/lottery-results/thai', async (req, res) => {
     try {
-        const resultRes = await pgPool.query(`SELECT * FROM Yeeki_Rounds WHERE category = 'THAI' AND status = 'Completed' ORDER BY draw_time DESC LIMIT 50`);
+        // ดึงข้อมูลจากตาราง Yeeki_Rounds โดยระบุหมวดหมู่เป็น THAI
+        const resultRes = await pgPool.query(`
+            SELECT * FROM Yeeki_Rounds 
+            WHERE category = 'THAI' AND status = 'Completed' 
+            ORDER BY draw_time DESC LIMIT 50
+        `);
+        
         const data = resultRes.rows.map(row => {
-            const r6 = row.result_8_super || '';
-            const r3 = r6 ? r6.slice(-3) : (row.result_3_top || ''); // 3 ตัวท้ายรางวัลที่ 1
-            const r4 = r6 ? r6.slice(-4) : (row.result_4_top || '');
-            const r2b = row.result_2_bottom || '';
+            const r6 = row.result_6_top || '--'; 
+            const r2b = row.result_2_bottom || '--';
+            
+            // ให้คอมพิวเตอร์หั่นเลข 4, 3, 2 ให้เพื่อความชัวร์ ป้องกันข้อมูลแหว่ง
+            const r4 = r6 !== '--' && r6.length >= 4 ? r6.slice(-4) : '--';
+            const r3 = r6 !== '--' && r6.length >= 3 ? r6.slice(-3) : '--';
+            const r2t = r6 !== '--' && r6.length >= 2 ? r6.slice(-2) : '--';
+
             return {
                 id: row.round_id, 
-                round_name: row.round_number || 'หวยไทย', 
+                round_name: row.round_number || 'งวดปัจจุบัน', 
                 draw_time: row.draw_time, 
-                result_6: r6 || '--', 
-                result_4: r4 || '--',   
-                result_3_top: r3 || '--', 
-                result_3_tod: r3 ? r3.split('').sort().join('') : '--',              
-                result_2_top: r3.length >= 2 ? r3.slice(-2) : '--',       
-                result_2_bottom: r2b || '--',            
-                run_top: r3 ? Array.from(new Set(r3.split(''))).join(', ') : '--',            
-                run_bottom: r2b ? Array.from(new Set(r2b.split(''))).join(', ') : '--'
+                result_6: r6, 
+                result_4: r4,
+                result_3_top: r3,
+                result_3_tod: r3 !== '--' ? r3.split('').sort().join('') : '--',               
+                result_2_top: r2t,       
+                result_2_bottom: r2b,            
+                run_top: r3 !== '--' ? Array.from(new Set(r3.split(''))).join(', ') : '--',            
+                run_bottom: r2b !== '--' ? Array.from(new Set(r2b.split(''))).join(', ') : '--'
             };
         });
+        
         res.status(200).json({ success: true, data });
-    } catch (error) { res.status(200).json({ success: true, data: [] }); }
+    } catch (error) { 
+        console.error("THAI API Error:", error);
+        res.status(200).json({ success: true, data: [] }); 
+    }
 });
 
 // ==========================================
