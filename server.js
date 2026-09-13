@@ -7797,77 +7797,88 @@ app.post('/api/p2p/provider-upload-slip', async (req, res) => {
 // 🌟 API P2P ฝั่งถอนเงิน สิ้นสุด
 // ==========================================
 // ==========================================
-// 🌟 API: ดึงประวัติผลการออกรางวัล (ระบบ Failsafe ป้องกัน Error 500 100%)
+// 🌟 API 1: ดึงผลรางวัล "จับยีกี่" (YEEKI)
 // ==========================================
-app.get('/api/lottery-results/:type', async (req, res) => {
-    const { type } = req.params; 
-
+app.get('/api/lottery-results/yeeki', async (req, res) => {
     try {
-        let responseData = [];
-        
-        if (type === 'VIET') {
-            try {
-                // แผน A: ลองดึงจาก Draw_Results 
-                const vietRes = await pgPool.query("SELECT * FROM Draw_Results ORDER BY draw_date DESC LIMIT 50");
-                responseData = vietRes.rows.map(row => ({
-                    id: row.id || row.draw_date,
-                    round_name: 'หวยเวียด',
-                    draw_time: row.draw_date,
-                    result_6: row.result_8_super || row.result_6_top || '--',
-                    result_4: row.result_4_top || '--',
-                    result_3_top: row.result_3_top || '--',
-                    result_2_bottom: row.result_2_bottom || '--',
-                    result_2_top: '--',
-                    run_top: '--',
-                    run_bottom: '--'
-                }));
-            } catch (e) {
-                // แผน B: ถ้าตารางไม่มีหรือพัง ให้สลับมาดึงจาก Yeeki_Rounds แทน
-                const fallbackRes = await pgPool.query("SELECT * FROM Yeeki_Rounds WHERE category = 'VIET' AND status = 'Completed' ORDER BY draw_time DESC LIMIT 50");
-                responseData = fallbackRes.rows.map(row => ({
-                    id: row.round_id,
-                    round_name: 'หวยเวียด',
-                    draw_time: row.draw_time || row.draw_date,
-                    result_6: row.result_8_super || row.result_6_top || '--',
-                    result_4: row.result_4_top || '--',
-                    result_3_top: row.result_3_top || '--',
-                    result_2_bottom: row.result_2_bottom || '--',
-                    result_2_top: '--',
-                    run_top: '--',
-                    run_bottom: '--'
-                }));
-            }
-        } 
-        else {
-            // THAI และ YEEKI
-            const resultRes = await pgPool.query("SELECT * FROM Yeeki_Rounds WHERE category = $1 AND status = 'Completed' ORDER BY draw_time DESC LIMIT 50", [type]);
-            responseData = resultRes.rows.map(row => ({
-                id: row.round_id,
-                round_name: row.round_name || row.round_number || (type === 'THAI' ? 'หวยไทย' : 'จับยีกี่'),
-                draw_time: row.draw_time || row.draw_date,
-                result_6: row.result_8_super || row.result_6_top || '--',
-                result_4: row.result_4_top || '--',
-                result_3_top: row.result_3_top || '--',
-                result_2_bottom: row.result_2_bottom || '--',
-                result_2_top: '--',
-                run_top: '--',
-                run_bottom: '--'
-            }));
-        }
-
-        // ส่งข้อมูลกลับหน้าเว็บตามปกติ
-        res.status(200).json({ 
-            success: true, 
-            data: responseData 
-        });
-
+        const resultRes = await pgPool.query(`
+            SELECT 
+                round_id AS id, 
+                round_number AS round_name, 
+                draw_time, 
+                '--' AS result_6,   
+                '--' AS result_4,   
+                COALESCE(result_3_top, '--') AS result_3_top,               
+                '--' AS result_2_top,       
+                COALESCE(result_2_bottom, '--') AS result_2_bottom,            
+                '--' AS run_top,            
+                '--' AS run_bottom          
+            FROM Yeeki_Rounds 
+            WHERE category = 'YEEKI' AND status = 'Completed' 
+            ORDER BY draw_time DESC 
+            LIMIT 50
+        `);
+        res.status(200).json({ success: true, data: resultRes.rows });
     } catch (error) {
-        console.error('API Error /lottery-results:', error.message);
-        // 🌟 หัวใจสำคัญ: ต่อให้เกิดข้อผิดพลาดร้ายแรงใน Database ก็ห้ามส่ง 500 แต่ให้ส่ง Array ว่างกลับไปแทน
-        res.status(200).json({ 
-            success: true, 
-            data: [] 
-        });
+        console.error('API Error (Yeeki):', error.message);
+        res.status(200).json({ success: true, data: [] }); 
+    }
+});
+
+// ==========================================
+// 🌟 API 2: ดึงผลรางวัล "หวยไทย" (THAI)
+// ==========================================
+app.get('/api/lottery-results/thai', async (req, res) => {
+    try {
+        const resultRes = await pgPool.query(`
+            SELECT 
+                round_id AS id, 
+                COALESCE(round_number::text, 'หวยไทย') AS round_name, 
+                draw_time, 
+                COALESCE(result_8_super, '--') AS result_6, 
+                COALESCE(result_4_top, '--') AS result_4,   
+                COALESCE(result_3_top, '--') AS result_3_top,               
+                '--' AS result_2_top,       
+                COALESCE(result_2_bottom, '--') AS result_2_bottom,            
+                '--' AS run_top,            
+                '--' AS run_bottom          
+            FROM Yeeki_Rounds 
+            WHERE category = 'THAI' AND status = 'Completed' 
+            ORDER BY draw_time DESC 
+            LIMIT 50
+        `);
+        res.status(200).json({ success: true, data: resultRes.rows });
+    } catch (error) {
+        console.error('API Error (Thai):', error.message);
+        res.status(200).json({ success: true, data: [] });
+    }
+});
+
+// ==========================================
+// 🌟 API 3: ดึงผลรางวัล "หวยเวียด" (VIET)
+// ==========================================
+app.get('/api/lottery-results/viet', async (req, res) => {
+    try {
+        const resultRes = await pgPool.query(`
+            SELECT 
+                COALESCE(id, EXTRACT(EPOCH FROM draw_date)) AS id, 
+                'หวยเวียด' AS round_name, 
+                draw_date AS draw_time, 
+                COALESCE(result_8_super, result_6_top, '--') AS result_6, 
+                COALESCE(result_4_top, '--') AS result_4,   
+                COALESCE(result_3_top, '--') AS result_3_top,               
+                '--' AS result_2_top,       
+                COALESCE(result_2_bottom, '--') AS result_2_bottom,            
+                '--' AS run_top,            
+                '--' AS run_bottom          
+            FROM Draw_Results 
+            ORDER BY draw_date DESC 
+            LIMIT 50
+        `);
+        res.status(200).json({ success: true, data: resultRes.rows });
+    } catch (error) {
+        console.error('API Error (Viet):', error.message);
+        res.status(200).json({ success: true, data: [] });
     }
 });
 // ==========================================
