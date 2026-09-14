@@ -2814,55 +2814,160 @@ app.post('/api/admin/draw-results', async (req, res) => {
 });
 
 
-// ==========================================
-// 🌟 API: ยืนยันการโอนเงินหวยเวียดนาม (จากหน้า Checkbox โอนเงิน)
-// ==========================================
+// =====================================================================
+// 🇻🇳 ส่วนระบบหวยเวียดนาม (จัดการการโอนเงิน และ แจกค่าคอมมิชชัน)
+// =====================================================================
+
+// ---------------------------------------------------------------------
+// 1. API: โอนเงินหวยเวียดนามแบบ Manual (แอดมินเลือกโอนเอง + ใส่รหัสผ่าน)
+// ---------------------------------------------------------------------
 app.post('/api/admin/viet-lottery/process-payouts', async (req, res) => {
-    const { order_item_ids } = req.body;
+    const { order_item_ids, admin_password } = req.body;
+    
     if (!order_item_ids || order_item_ids.length === 0) {
-        return res.status(400).json({ success: false, message: 'กรุณาส่งรายการที่ต้องการโอน' });
+        return res.json({ success: false, message: 'กรุณาส่งรายการที่ต้องการโอน' });
+    }
+    if (!admin_password) {
+        return res.json({ success: false, message: 'กรุณาระบุรหัสผ่าน Admin' });
     }
 
     const client = await pgPool.connect();
     try {
+        // 🌟 ตรวจสอบรหัสผ่าน Admin
+        const authCheck = await client.query(`
+            SELECT 1 FROM Users 
+            WHERE (role = 'Super Admin' OR role = 'Admin') AND password = $1 
+            LIMIT 1
+        `, [admin_password]);
+
+        if (authCheck.rows.length === 0) {
+            client.release();
+            return res.json({ success: false, message: 'รหัสผ่าน Admin ไม่ถูกต้อง!' });
+        }
+
         await client.query('BEGIN');
+        let paidCount = 0;
+
+        // ดึง % ค่าคอมมิชชัน
+        const commReq = await client.query("SELECT win_percent FROM Commission_Settings LIMIT 1");
+        const commPercent = commReq.rows.length > 0 ? parseFloat(commReq.rows[0].win_percent) : 0;
 
         for (const itemId of order_item_ids) {
-            // 1. ดึงข้อมูลบิลที่เลือก
             const itemRes = await client.query(`
-                SELECT oi.prize_amount, o.user_id, oi.status, o.currency_code
+                SELECT oi.prize_amount, o.user_id, o.currency_code, u.username, u.referrer_username
                 FROM Lottery_Order_Items oi
                 JOIN Lottery_Orders o ON oi.order_id = o.order_id
-                WHERE oi.item_id = $1 AND oi.status = 'ถูกรางวัล'
+                JOIN Users u ON o.user_id = u.user_id
+                WHERE oi.item_id = $1 AND oi.status IN ('ถูกรางวัล', 'ชนะ', 'Win')
             `, [itemId]);
 
             if (itemRes.rows.length > 0) {
-                const { prize_amount, user_id, currency_code } = itemRes.rows[0];
+                const { prize_amount, user_id, currency_code, username, referrer_username } = itemRes.rows[0];
 
-                // 2. เติมเงินเข้า Wallet ลูกค้า
-                await client.query(`UPDATE Wallets SET balance = COALESCE(balance, 0) + $1 WHERE user_id = $2`, [prize_amount, user_id]);
-                
-                // 3. บันทึกประวัติ Transaction
-                await client.query(`
-                    INSERT INTO Transactions (user_id, transaction_type, title, amount, currency_code, status, created_at)
-                    VALUES ($1, 'Reward', 'ถูกรางวัลหวยเวียดนาม', $2, $3, 'Completed', CURRENT_TIMESTAMP)
-                `, [user_id, prize_amount, currency_code]);
+                // โอนเงินลูกค้า & แจ้งเตือน
+                await client.query(`UPDATE Wallets SET balance = COALESCE(balance, 0) + CAST($1 AS NUMERIC) WHERE user_id = $2`, [prize_amount, user_id]);
+                await client.query(`INSERT INTO Transactions (user_id, transaction_type, title, amount, currency_code, status, created_at) VALUES ($1, 'Reward', 'ถูกรางวัลหวยเวียดนาม', CAST($2 AS NUMERIC), $3, 'Completed', CURRENT_TIMESTAMP)`, [user_id, prize_amount, currency_code]);
+                await client.query(`INSERT INTO Notifications (user_id, title, message, type, is_read, created_at) VALUES ($1, '🎉 ยินดีด้วยคุณถูกรางวัล!', 'ระบบได้โอนเงินรางวัลหวยเวียดนาม จำนวน ' || $2 || ' ' || $3 || ' เข้า Wallet ของคุณเรียบร้อยแล้ว', 'system', false, CURRENT_TIMESTAMP)`, [user_id, prize_amount, currency_code]);
 
-                // 4. เปลี่ยนสถานะบิลเป็น Paid (โอนแล้ว)
-                await client.query(`UPDATE Lottery_Order_Items SET status = 'Paid' WHERE item_id = $1`, [itemId]);
+                // จ่ายค่าคอมแม่ทีม & แจ้งเตือน
+                if (commPercent > 0 && referrer_username) {
+                    const refRes = await client.query(`SELECT user_id FROM Users WHERE username = $1 LIMIT 1`, [referrer_username]);
+                    if (refRes.rows.length > 0) {
+                        const referrer_id = refRes.rows[0].user_id;
+                        const commAmount = prize_amount * (commPercent / 100);
+                        const maskedName = username.length > 2 ? username.substring(0, 2) + '***' : username + '***';
+                        
+                        await client.query(`UPDATE Wallets SET balance = COALESCE(balance, 0) + CAST($1 AS NUMERIC) WHERE user_id = $2`, [commAmount, referrer_id]);
+                        await client.query(`INSERT INTO Transactions (user_id, transaction_type, title, amount, currency_code, status, created_at) VALUES ($1, 'commission', $2, CAST($3 AS NUMERIC), $4, 'Completed', CURRENT_TIMESTAMP)`, [referrer_id, `ค่าคอมฯ ลูกทีมถูกรางวัล (${maskedName})`, commAmount, currency_code]);
+                        await client.query(`INSERT INTO Notifications (user_id, title, message, type, is_read, created_at) VALUES ($1, '💰 ได้รับค่าคอมมิชชัน!', 'คุณได้รับส่วนแบ่งค่าคอมมิชชัน ' || $2 || ' ' || $3 || ' จากลูกทีมที่ถูกรางวัล', 'system', false, CURRENT_TIMESTAMP)`, [referrer_id, commAmount, currency_code]);
+                    }
+                }
+
+                // เปลี่ยนสถานะบิล
+                await client.query(`UPDATE Lottery_Order_Items SET status = 'โอนแล้ว' WHERE item_id = $1`, [itemId]);
+                paidCount++;
             }
         }
         
         await client.query('COMMIT');
-        res.json({ success: true, message: 'โอนเงินสำเร็จ' });
+        
+        if (paidCount === 0) {
+             return res.json({ success: false, message: 'หาสถานะบิลไม่เจอ หรือบิลถูกโอนเงินไปแล้ว' });
+        }
+        res.json({ success: true, message: `โอนเงินสำเร็จ ${paidCount} รายการ` });
     } catch (err) {
         await client.query('ROLLBACK');
-        console.error("Error processing payouts:", err);
-        res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการทำรายการ' });
+        console.error("Payout Error:", err);
+        res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดฐานข้อมูล: ' + err.message });
     } finally {
         client.release();
     }
 });
+
+
+// ---------------------------------------------------------------------
+// 2. 🤖 หุ่นยนต์ระบบอัตโนมัติ: Auto Payout (ทำงานหลังหวยออก 10 นาที)
+// ---------------------------------------------------------------------
+setInterval(async () => {
+    const client = await pgPool.connect();
+    try {
+        await client.query('BEGIN');
+
+        const commReq = await client.query("SELECT win_percent FROM Commission_Settings LIMIT 1");
+        const commPercent = commReq.rows.length > 0 ? parseFloat(commReq.rows[0].win_percent) : 0;
+
+        // 🌟 ค้นหาบิลที่ "เลยเวลาออกรางวัลมาแล้ว 10 นาที" (ดึงเวลาออกหวยจาก System_Settings)
+        const pendingWinners = await client.query(`
+            SELECT oi.item_id, oi.prize_amount, o.user_id, o.currency_code, u.username, u.referrer_username
+            FROM Lottery_Order_Items oi
+            JOIN Lottery_Orders o ON oi.order_id = o.order_id
+            JOIN Users u ON o.user_id = u.user_id
+            WHERE oi.status IN ('ถูกรางวัล', 'ชนะ', 'Win') 
+            AND o.draw_date = CURRENT_DATE
+            AND CURRENT_TIME >= (
+                (SELECT draw_time::time FROM System_Settings LIMIT 1) + INTERVAL '10 minutes'
+            )
+        `);
+
+        if (pendingWinners.rows.length > 0) {
+            console.log(`[Auto Payout] ⏳ หมดเวลาตรวจสอบ! กำลังโอนเงินอัตโนมัติ ${pendingWinners.rows.length} รายการ...`);
+
+            for (const winner of pendingWinners.rows) {
+                const { item_id, prize_amount, user_id, currency_code, username, referrer_username } = winner;
+
+                // โอนเงินลูกค้า
+                await client.query(`UPDATE Wallets SET balance = COALESCE(balance, 0) + CAST($1 AS NUMERIC) WHERE user_id = $2`, [prize_amount, user_id]);
+                await client.query(`INSERT INTO Transactions (user_id, transaction_type, title, amount, currency_code, status, created_at) VALUES ($1, 'Reward', 'ถูกรางวัลหวยเวียดนาม (โอนอัตโนมัติ)', CAST($2 AS NUMERIC), $3, 'Completed', CURRENT_TIMESTAMP)`, [user_id, prize_amount, currency_code]);
+                await client.query(`INSERT INTO Notifications (user_id, title, message, type, is_read, created_at) VALUES ($1, '🎉 ยินดีด้วยคุณถูกรางวัล!', 'ระบบได้โอนเงินรางวัลหวยเวียดนาม จำนวน ' || $2 || ' ' || $3 || ' เข้า Wallet ของคุณอัตโนมัติเรียบร้อยแล้ว', 'system', false, CURRENT_TIMESTAMP)`, [user_id, prize_amount, currency_code]);
+
+                // จ่ายค่าคอมแม่ทีม
+                if (commPercent > 0 && referrer_username) {
+                    const refRes = await client.query(`SELECT user_id FROM Users WHERE username = $1 LIMIT 1`, [referrer_username]);
+                    if (refRes.rows.length > 0) {
+                        const referrer_id = refRes.rows[0].user_id;
+                        const commAmount = prize_amount * (commPercent / 100);
+                        const maskedName = username.length > 2 ? username.substring(0, 2) + '***' : username + '***';
+
+                        await client.query(`UPDATE Wallets SET balance = COALESCE(balance, 0) + CAST($1 AS NUMERIC) WHERE user_id = $2`, [commAmount, referrer_id]);
+                        await client.query(`INSERT INTO Transactions (user_id, transaction_type, title, amount, currency_code, status, created_at) VALUES ($1, 'commission', $2, CAST($3 AS NUMERIC), $4, 'Completed', CURRENT_TIMESTAMP)`, [referrer_id, `ค่าคอมฯ ลูกทีมถูกรางวัล (${maskedName})`, commAmount, currency_code]);
+                        await client.query(`INSERT INTO Notifications (user_id, title, message, type, is_read, created_at) VALUES ($1, '💰 ได้รับค่าคอมมิชชัน!', 'คุณได้รับส่วนแบ่งค่าคอมมิชชัน ' || $2 || ' ' || $3 || ' จากลูกทีมที่ถูกรางวัล', 'system', false, CURRENT_TIMESTAMP)`, [referrer_id, commAmount, currency_code]);
+                    }
+                }
+
+                // ปิดบิลกันการโอนซ้ำ
+                await client.query(`UPDATE Lottery_Order_Items SET status = 'โอนแล้ว' WHERE item_id = $1`, [item_id]);
+            }
+            console.log(`[Auto Payout] ✅ ดำเนินการโอนเงินอัตโนมัติเสร็จสิ้น`);
+        }
+
+        await client.query('COMMIT');
+    } catch (err) {
+        await client.query('ROLLBACK');
+        console.error("[Auto Payout] Error:", err);
+    } finally {
+        client.release();
+    }
+}, 60000); // ให้หุ่นยนต์ตื่นมาเช็คทุกๆ 60 วินาที
 
 // ==========================================
 // 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว (ลบตัวซ้ำออกให้แล้วครับ)
