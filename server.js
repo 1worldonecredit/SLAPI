@@ -3233,23 +3233,17 @@ app.post('/api/admin/thai-lottery/execute-draw', async (req, res) => {
             else if (t === 'วิ่งบน' && top_3.includes(n)) isWin = true;
             else if (t === 'วิ่งล่าง' && bot_2.includes(n)) isWin = true;
 
-            if (isWin) {
+           if (isWin) {
                 totalWinners++;
                 let prizeAmount = item.price * (prizeRates[item.lottery_type] || 0);
                 let isLAK = (item.currency_code === 'LAK' || item.currency_code === '₭');
                 let currency = isLAK ? 'LAK' : 'THB';
 
+                // 🌟 อัปเดตแค่สถานะเป็น 'ชนะ' (รอโอนเงิน) ห้ามอัปเดต Wallet หรือ Transaction ตรงนี้!
                 await client.query(`UPDATE Yeeki_Order_Items SET status = 'ชนะ', prize_amount = $1 WHERE item_id = $2`, [prizeAmount, item.item_id]);
-                await client.query(`UPDATE Wallets SET balance = balance + $1 WHERE user_id = $2`, [prizeAmount, item.user_id]);
 
-                await client.query(`
-                    INSERT INTO Transactions (user_id, amount, currency_code, transaction_type, status, title, created_at) 
-                    VALUES ($1, $2, $3, 'deposit', 'Completed', $4, CURRENT_TIMESTAMP)
-                `, [item.user_id, prizeAmount, currency, `ถูกรางวัลหวยไทย ${item.lottery_type}`]);
-
-               // จ่ายค่าคอมฯ
+                // จ่ายค่าคอมฯ (ให้ระบบจ่ายค่าคอมออโต้ไปเลยตามปกติ)
                 if (winCommissionPercent > 0) {
-                    // 🌟 แก้ไข: วิ่งไปหา user_id ของผู้แนะนำ จากคอลัมน์ referrer_username ในตาราง users
                     const refReq = await client.query(`
                         SELECT r.user_id AS referrer_id 
                         FROM users u 
@@ -3261,10 +3255,7 @@ app.post('/api/admin/thai-lottery/execute-draw', async (req, res) => {
                         let refId = refReq.rows[0].referrer_id;
                         let commAmt = prizeAmount * (winCommissionPercent / 100);
                         
-                        // โอนเงินค่าคอมเข้ากระเป๋าคนแนะนำ
                         await client.query(`UPDATE Wallets SET balance = balance + $1 WHERE user_id = $2`, [commAmt, refId]);
-                        
-                        // บันทึกประวัติ
                         await client.query(`
                             INSERT INTO Transactions (user_id, amount, currency_code, transaction_type, status, title, created_at) 
                             VALUES ($1, $2, $3, 'commission', 'Completed', $4, CURRENT_TIMESTAMP)
