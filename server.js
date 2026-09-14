@@ -3443,7 +3443,7 @@ app.get('/api/admin/thai-lottery/sales-report', async (req, res) => {
                 to_char(r.close_time, 'YYYY-MM-DD"T"HH24:MI:SS') AS close_time, 
                 to_char(r.draw_time, 'YYYY-MM-DD"T"HH24:MI:SS') AS draw_time, 
                 r.status, 
-                r.result_8_super as result_6, 
+                r.result_6_top as result_6,  -- 🌟 แก้ตรงนี้: เปลี่ยนจาก result_8_super เป็น result_6_top
                 r.result_2_bottom,
                 
                 -- สรุปยอดขาย (THB และ LAK)
@@ -3451,10 +3451,10 @@ app.get('/api/admin/thai-lottery/sales-report', async (req, res) => {
                 COALESCE(SUM(CASE WHEN o.currency_code IN ('LAK', '₭') THEN i.price ELSE 0 END), 0) as total_sales_lak,
                 
                 -- สรุปยอดจ่ายรางวัล (THB และ LAK)
-                COALESCE(SUM(CASE WHEN o.currency_code IN ('THB', '฿') AND i.status = 'ชนะ' THEN i.prize_amount ELSE 0 END), 0) as total_payout_thb,
-                COALESCE(SUM(CASE WHEN o.currency_code IN ('LAK', '₭') AND i.status = 'ชนะ' THEN i.prize_amount ELSE 0 END), 0) as total_payout_lak,
+                COALESCE(SUM(CASE WHEN o.currency_code IN ('THB', '฿') AND i.status IN ('ชนะ', 'Win', 'Paid') THEN i.prize_amount ELSE 0 END), 0) as total_payout_thb,
+                COALESCE(SUM(CASE WHEN o.currency_code IN ('LAK', '₭') AND i.status IN ('ชนะ', 'Win', 'Paid') THEN i.prize_amount ELSE 0 END), 0) as total_payout_lak,
                 
-               -- 🌟 แก้สถานะให้ตรงกับ Database
+                -- สรุปสถานะบิล
                 COUNT(i.item_id) as total_tickets,
                 COUNT(CASE WHEN i.status IN ('ชนะ', 'Win', 'Paid') THEN 1 END) as winners_count,
                 COUNT(CASE WHEN i.status IN ('รอผล', 'Pending') THEN 1 END) as pending_count,
@@ -3464,7 +3464,8 @@ app.get('/api/admin/thai-lottery/sales-report', async (req, res) => {
             LEFT JOIN Yeeki_Orders o ON r.round_id = o.round_id
             LEFT JOIN Yeeki_Order_Items i ON o.order_id = i.order_id
             WHERE r.category = 'THAI'
-            GROUP BY r.round_id, r.round_number, r.open_time, r.close_time, r.draw_time, r.status, r.result_8_super, r.result_2_bottom
+            -- 🌟 แก้ตรงนี้: เปลี่ยน GROUP BY ให้ใช้ result_6_top
+            GROUP BY r.round_id, r.round_number, r.open_time, r.close_time, r.draw_time, r.status, r.result_6_top, r.result_2_bottom
             ORDER BY r.draw_time DESC
         `);
 
