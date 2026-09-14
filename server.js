@@ -2742,7 +2742,7 @@ app.post('/api/admin/settings', async (req, res) => {
 
 
 // ==========================================
-// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
+// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว  viet
 // 🌟 API 2: บันทึกผลออกรางวัล และ ค้นหาคนถูกรางวัล
 // ==========================================
 app.post('/api/admin/draw-results', async (req, res) => {
@@ -2813,6 +2813,56 @@ app.post('/api/admin/draw-results', async (req, res) => {
     }
 });
 
+
+// ==========================================
+// 🌟 API: ยืนยันการโอนเงินหวยเวียดนาม (จากหน้า Checkbox โอนเงิน)
+// ==========================================
+app.post('/api/admin/viet-lottery/process-payouts', async (req, res) => {
+    const { order_item_ids } = req.body;
+    if (!order_item_ids || order_item_ids.length === 0) {
+        return res.status(400).json({ success: false, message: 'กรุณาส่งรายการที่ต้องการโอน' });
+    }
+
+    const client = await pgPool.connect();
+    try {
+        await client.query('BEGIN');
+
+        for (const itemId of order_item_ids) {
+            // 1. ดึงข้อมูลบิลที่เลือก
+            const itemRes = await client.query(`
+                SELECT oi.prize_amount, o.user_id, oi.status, o.currency_code
+                FROM Lottery_Order_Items oi
+                JOIN Lottery_Orders o ON oi.order_id = o.order_id
+                WHERE oi.item_id = $1 AND oi.status = 'ถูกรางวัล'
+            `, [itemId]);
+
+            if (itemRes.rows.length > 0) {
+                const { prize_amount, user_id, currency_code } = itemRes.rows[0];
+
+                // 2. เติมเงินเข้า Wallet ลูกค้า
+                await client.query(`UPDATE Wallets SET balance = COALESCE(balance, 0) + $1 WHERE user_id = $2`, [prize_amount, user_id]);
+                
+                // 3. บันทึกประวัติ Transaction
+                await client.query(`
+                    INSERT INTO Transactions (user_id, transaction_type, title, amount, currency_code, status, created_at)
+                    VALUES ($1, 'Reward', 'ถูกรางวัลหวยเวียดนาม', $2, $3, 'Completed', CURRENT_TIMESTAMP)
+                `, [user_id, prize_amount, currency_code]);
+
+                // 4. เปลี่ยนสถานะบิลเป็น Paid (โอนแล้ว)
+                await client.query(`UPDATE Lottery_Order_Items SET status = 'Paid' WHERE item_id = $1`, [itemId]);
+            }
+        }
+        
+        await client.query('COMMIT');
+        res.json({ success: true, message: 'โอนเงินสำเร็จ' });
+    } catch (err) {
+        await client.query('ROLLBACK');
+        console.error("Error processing payouts:", err);
+        res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการทำรายการ' });
+    } finally {
+        client.release();
+    }
+});
 
 // ==========================================
 // 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว (ลบตัวซ้ำออกให้แล้วครับ)
