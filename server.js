@@ -3247,14 +3247,24 @@ app.post('/api/admin/thai-lottery/execute-draw', async (req, res) => {
                     VALUES ($1, $2, $3, 'deposit', 'Completed', $4, CURRENT_TIMESTAMP)
                 `, [item.user_id, prizeAmount, currency, `ถูกรางวัลหวยไทย ${item.lottery_type}`]);
 
-                // จ่ายค่าคอมฯ
+               // จ่ายค่าคอมฯ
                 if (winCommissionPercent > 0) {
-                    const refReq = await client.query(`SELECT referrer_id FROM User_Referrals WHERE user_id = $1`, [item.user_id]);
+                    // 🌟 แก้ไข: วิ่งไปหา user_id ของผู้แนะนำ จากคอลัมน์ referrer_username ในตาราง users
+                    const refReq = await client.query(`
+                        SELECT r.user_id AS referrer_id 
+                        FROM users u 
+                        JOIN users r ON u.referrer_username = r.username 
+                        WHERE u.user_id = $1
+                    `, [item.user_id]);
+                    
                     if (refReq.rows.length > 0) {
                         let refId = refReq.rows[0].referrer_id;
                         let commAmt = prizeAmount * (winCommissionPercent / 100);
                         
+                        // โอนเงินค่าคอมเข้ากระเป๋าคนแนะนำ
                         await client.query(`UPDATE Wallets SET balance = balance + $1 WHERE user_id = $2`, [commAmt, refId]);
+                        
+                        // บันทึกประวัติ
                         await client.query(`
                             INSERT INTO Transactions (user_id, amount, currency_code, transaction_type, status, title, created_at) 
                             VALUES ($1, $2, $3, 'commission', 'Completed', $4, CURRENT_TIMESTAMP)
