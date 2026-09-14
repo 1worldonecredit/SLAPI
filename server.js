@@ -3328,7 +3328,7 @@ app.get('/api/admin/thai-lottery/round-tickets/:roundId', async (req, res) => {
 app.get('/api/admin/thai-lottery/winners/:round_id', async (req, res) => {
     try {
         const { round_id } = req.params;
-        const result = await pgPool.query(`
+       const result = await pgPool.query(`
             SELECT 
                 oi.item_id as order_item_id,
                 u.username,
@@ -3337,10 +3337,11 @@ app.get('/api/admin/thai-lottery/winners/:round_id', async (req, res) => {
                 oi.prize_amount,
                 o.currency_code as currency,
                 oi.status
-            FROM Lottery_Order_Items oi
-            JOIN Lottery_Orders o ON oi.order_id = o.order_id
+            FROM Yeeki_Order_Items oi
+            JOIN Yeeki_Orders o ON oi.order_id = o.order_id
             JOIN Users u ON o.user_id = u.user_id
-            WHERE o.round_id = $1 AND (oi.status = 'ถูกรางวัล' OR oi.status = 'Paid')
+            -- 🌟 แก้สถานะให้ตรงกับที่ API ตรวจหวยบันทึกไว้ (คือ 'ชนะ' หรือ 'Paid')
+            WHERE o.round_id = $1 AND (oi.status = 'ชนะ' OR oi.status = 'Paid' OR oi.status = 'Win') 
             ORDER BY oi.prize_amount DESC
         `, [round_id]);
         
@@ -3366,18 +3367,18 @@ app.post('/api/admin/thai-lottery/process-payouts', async (req, res) => {
 
         for (const itemId of order_item_ids) {
             // 1. ดึงข้อมูลของบิลนี้ ว่ายอดเงินเท่าไหร่ ใครเป็นเจ้าของ
-            const itemRes = await client.query(`
+           const itemRes = await client.query(`
                 SELECT oi.prize_amount, o.user_id, oi.status
-                FROM Lottery_Order_Items oi
-                JOIN Lottery_Orders o ON oi.order_id = o.order_id
-                WHERE oi.item_id = $1 AND oi.status = 'ถูกรางวัล'
+                FROM Yeeki_Order_Items oi
+                JOIN Yeeki_Orders o ON oi.order_id = o.order_id
+                WHERE oi.item_id = $1 AND (oi.status = 'ชนะ' OR oi.status = 'Win')
             `, [itemId]);
 
             if (itemRes.rows.length > 0) {
                 const { prize_amount, user_id } = itemRes.rows[0];
 
                 // 2. เติมเงินเข้า Wallet
-                await client.query(`UPDATE Wallets SET balance = COALESCE(balance, 0) + $1 WHERE user_id = $2`, [prize_amount, user_id]);
+               await client.query(`UPDATE Yeeki_Order_Items SET status = 'Paid' WHERE item_id = $1`, [itemId]);
                 
                 // 3. บันทึกประวัติ Transaction
                 await client.query(`
