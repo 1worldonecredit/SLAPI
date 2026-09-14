@@ -3747,12 +3747,12 @@ app.post('/api/admin/suggest-draw', async (req, res) => {
 let lastAutoDrawDate = '';
 
 // ==========================================
-// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🇻🇳 2. API: ยืนยันผล จ่ายรางวัล และโอนเงิน (หวยเวียดนาม)
 // ==========================================
 app.post('/api/admin/execute-draw', async (req, res) => {
-    const { number6 } = req.body;
-    const client = await pgPool.connect(); // 🌟 เปิดใช้งาน Transaction
+    // 🌟 1. รับค่า draw_date มาจากหน้าเว็บ เพื่อให้ออกผลย้อนหลังได้
+    const { number6, draw_date } = req.body;
+    const client = await pgPool.connect(); 
 
     try {
         await client.query('BEGIN');
@@ -3762,27 +3762,29 @@ app.post('/api/admin/execute-draw', async (req, res) => {
         const top_3 = top_6.slice(-3);
         const top_2 = top_6.slice(-2);
         const num8 = Math.floor(10000000 + Math.random() * 90000000).toString(); 
-        const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Bangkok' });
+        
+        // 🌟 2. ถ้าไม่ได้ส่งวันที่มา ให้ใช้วันนี้เป็นค่าเริ่มต้น
+        const target_date = draw_date || new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Bangkok' });
 
-        // 1. บันทึกผลลง Draw_Results
-        const checkExist = await client.query("SELECT 1 FROM Draw_Results WHERE draw_date = CAST($1 AS DATE)", [today]);
+        // 1. บันทึกผลลง Draw_Results (เปลี่ยน today เป็น target_date)
+        const checkExist = await client.query("SELECT 1 FROM Draw_Results WHERE draw_date = CAST($1 AS DATE)", [target_date]);
         if (checkExist.rows.length === 0) {
             await client.query(`
                 INSERT INTO Draw_Results (draw_date, prize_8, prize_6, prize_4, prize_3, prize_2) 
                 VALUES (CAST($1 AS DATE), $2, $3, $4, $5, $6)
-            `, [today, num8, top_6, top_4, top_3, top_2]);
+            `, [target_date, num8, top_6, top_4, top_3, top_2]);
         } else {
             await client.query(`
                 UPDATE Draw_Results 
                 SET prize_8 = $2, prize_6 = $3, prize_4 = $4, prize_3 = $5, prize_2 = $6 
                 WHERE draw_date = CAST($1 AS DATE)
-            `, [today, num8, top_6, top_4, top_3, top_2]);
+            `, [target_date, num8, top_6, top_4, top_3, top_2]);
         }
 
         const commReq = await client.query("SELECT win_percent FROM Commission_Settings LIMIT 1");
         const commPercent = commReq.rows.length > 0 ? parseFloat(commReq.rows[0].win_percent) : 0;
 
-        // 2. ตรวจบิลและตั้งค่าเงินรางวัล (คูณเรท)
+        // 2. ตรวจบิลและตั้งค่าเงินรางวัล (เปลี่ยน today เป็น target_date)
         await client.query(`
             UPDATE Lottery_Order_Items i SET 
                 status = CASE 
@@ -3806,9 +3808,9 @@ app.post('/api/admin/execute-draw', async (req, res) => {
                 END
             FROM Lottery_Orders o
             WHERE i.order_id = o.order_id AND (o.draw_date = CAST($6 AS DATE) OR CAST(o.created_at AS DATE) = CAST($6 AS DATE)) AND i.status = 'รอผลตรวจ';
-        `, [top_2, top_3, top_4, top_6, num8, today]);
+        `, [top_2, top_3, top_4, top_6, num8, target_date]);
 
-        // 3. 💰 โอนเงินลูกค้า (รวมกระเป๋าตามโครงสร้างฐานข้อมูลใหม่ ให้โค้ดสั้นและไวขึ้น!)
+        // 3. 💰 โอนเงินลูกค้า (อัตโนมัติตามที่คุณวิทยาต้องการ)
         await client.query(`
             UPDATE Wallets w SET 
                 balance = COALESCE(w.balance, 0) + COALESCE(t.TotalPrize, 0)
@@ -3822,7 +3824,6 @@ app.post('/api/admin/execute-draw', async (req, res) => {
             WHERE w.user_id = t.user_id;
         `);
 
-        // บันทึกประวัติ
         await client.query(`
             INSERT INTO Transactions (user_id, amount, currency_code, transaction_type, status, title, created_at)
             SELECT o.user_id, SUM(i.prize_amount), o.currency_code, 'deposit', 'Completed', 'ถูกรางวัลหวยเวียดนาม', CURRENT_TIMESTAMP
@@ -3832,46 +3833,47 @@ app.post('/api/admin/execute-draw', async (req, res) => {
             GROUP BY o.user_id, o.currency_code;
         `);
 
-        // 4. 💸 จ่ายค่าคอมผู้แนะนำ
+        // 4. 💸 จ่ายค่าคอมผู้แนะนำ (ดึงจาก users.referrer_username และปิดบังชื่อ)
         if (commPercent > 0) {
             await client.query(`
                 UPDATE Wallets w SET 
                     balance = COALESCE(w.balance, 0) + COALESCE(c.CommAmount, 0)
                 FROM (
-                    SELECT r.referrer_id, SUM(i.prize_amount) * ($1 / 100.0) as CommAmount
+                    SELECT ref.user_id AS referrer_id, SUM(i.prize_amount) * ($1 / 100.0) as CommAmount
                     FROM Lottery_Order_Items i 
                     JOIN Lottery_Orders o ON i.order_id = o.order_id 
-                    JOIN User_Referrals r ON o.user_id = r.user_id
+                    JOIN Users u ON o.user_id = u.user_id
+                    JOIN Users ref ON u.referrer_username = ref.username
                     WHERE i.status = 'ถูกรางวัล' AND o.status = 'รอผลตรวจ' 
-                    GROUP BY r.referrer_id 
+                    GROUP BY ref.user_id 
                     HAVING SUM(i.prize_amount) > 0
                 ) c
                 WHERE w.user_id = c.referrer_id;
             `, [commPercent]);
 
-            // บันทึกประวัติค่าคอมให้ผู้แนะนำ
             await client.query(`
                 INSERT INTO Transactions (user_id, amount, currency_code, transaction_type, status, title, created_at)
-                SELECT r.referrer_id, SUM(i.prize_amount) * ($1 / 100.0), o.currency_code, 'commission', 'Completed', 'ค่าคอมฯ ลูกทีมถูกรางวัล (' || u.username || ')', CURRENT_TIMESTAMP
+                SELECT ref.user_id, SUM(i.prize_amount) * ($1 / 100.0), o.currency_code, 'commission', 'Completed', 
+                       'ค่าคอมฯ ลูกทีมถูกรางวัล (' || CASE WHEN LENGTH(u.username) > 2 THEN SUBSTRING(u.username, 1, 2) ELSE u.username END || '***)', CURRENT_TIMESTAMP
                 FROM Lottery_Order_Items i 
                 JOIN Lottery_Orders o ON i.order_id = o.order_id 
-                JOIN User_Referrals r ON o.user_id = r.user_id 
                 JOIN Users u ON o.user_id = u.user_id
+                JOIN Users ref ON u.referrer_username = ref.username
                 WHERE i.status = 'ถูกรางวัล' AND o.status = 'รอผลตรวจ' 
-                GROUP BY r.referrer_id, o.currency_code, u.username 
+                GROUP BY ref.user_id, o.currency_code, u.username 
                 HAVING SUM(i.prize_amount) > 0;
             `, [commPercent]);
         }
 
-        // 5. ปิดบิลแม่
+        // 5. ปิดบิลแม่ (เปลี่ยน today เป็น target_date)
         await client.query(`
             UPDATE Lottery_Orders 
             SET status = 'ตรวจผลแล้ว', draw_date = CAST($1 AS DATE) 
             WHERE (draw_date = CAST($1 AS DATE) OR CAST(created_at AS DATE) = CAST($1 AS DATE)) AND status = 'รอผลตรวจ';
-        `, [today]);
+        `, [target_date]);
 
         await client.query('COMMIT');
-        res.json({ success: true, message: `✅ ออกรางวัลด้วยเลข ${top_6} สำเร็จ! \n💰 จ่ายเงินลูกค้า และผู้แนะนำเรียบร้อยแล้ว!` });
+        res.json({ success: true, message: `✅ ออกรางวัลด้วยเลข ${top_6} งวด ${target_date} สำเร็จ! \n💰 โอนเงินเข้า Wallet อัตโนมัติเรียบร้อยแล้ว!` });
 
     } catch (err) { 
         await client.query('ROLLBACK');
@@ -3881,7 +3883,6 @@ app.post('/api/admin/execute-draw', async (req, res) => {
         client.release();
     }
 });
-
 
 // ==========================================
 // 🤖 3. Worker: หุ่นยนต์ออกรางวัลอัตโนมัติ (แก้บั๊ก Database)
