@@ -3290,7 +3290,34 @@ app.post('/api/admin/thai-lottery/execute-draw', async (req, res) => {
     }
 });
 
-
+// ==========================================
+// 🌟 API: ดึงรายละเอียดรายการแทงของงวดนั้นๆ (เมื่อคลิกดูจากหน้ารายงาน)
+// ==========================================
+app.get('/api/admin/thai-lottery/round-details/:round_id', async (req, res) => {
+    try {
+        const { round_id } = req.params;
+        const result = await pgPool.query(`
+            SELECT 
+                u.username,
+                i.lottery_type,
+                i.selected_number,
+                i.price,
+                o.currency_code,
+                i.status,
+                i.prize_amount
+            FROM Yeeki_Order_Items i
+            JOIN Yeeki_Orders o ON i.order_id = o.order_id
+            JOIN Users u ON o.user_id = u.user_id
+            WHERE o.round_id = $1
+            ORDER BY i.item_id DESC
+        `, [round_id]);
+        
+        res.json({ success: true, tickets: result.rows });
+    } catch (err) {
+        console.error("Error fetching round details:", err);
+        res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการดึงข้อมูลบิล' });
+    }
+});
 // ==========================================
 // 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 7. 🇹🇭 API: ดึงรายการบิลลูกค้าหวยไทยรายงวด (สำหรับหน้ารายงาน)
