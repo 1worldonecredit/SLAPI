@@ -3244,8 +3244,9 @@ app.post('/api/admin/thai-lottery/execute-draw', async (req, res) => {
 
                 // จ่ายค่าคอมฯ (ให้ระบบจ่ายค่าคอมออโต้ไปเลยตามปกติ)
                 if (winCommissionPercent > 0) {
+                    // 🌟 1. ดึงชื่อคนถูกรางวัล (u.username) มาด้วย
                     const refReq = await client.query(`
-                        SELECT r.user_id AS referrer_id 
+                        SELECT r.user_id AS referrer_id, u.username AS winner_name
                         FROM users u 
                         JOIN users r ON u.referrer_username = r.username 
                         WHERE u.user_id = $1
@@ -3253,13 +3254,20 @@ app.post('/api/admin/thai-lottery/execute-draw', async (req, res) => {
                     
                     if (refReq.rows.length > 0) {
                         let refId = refReq.rows[0].referrer_id;
+                        let winnerName = refReq.rows[0].winner_name || '';
+                        
+                        // 🌟 2. ปิดบังชื่อบางส่วน (ดึงมาแค่ 2 ตัวอักษรแรก แล้วต่อด้วย ***)
+                        let maskedName = winnerName.length > 2 ? winnerName.substring(0, 2) + '***' : winnerName + '***';
+
                         let commAmt = prizeAmount * (winCommissionPercent / 100);
                         
                         await client.query(`UPDATE Wallets SET balance = balance + $1 WHERE user_id = $2`, [commAmt, refId]);
+                        
+                        // 🌟 3. อัปเดตข้อความ Title ให้โชว์ชื่อทีมงาน
                         await client.query(`
                             INSERT INTO Transactions (user_id, amount, currency_code, transaction_type, status, title, created_at) 
                             VALUES ($1, $2, $3, 'commission', 'Completed', $4, CURRENT_TIMESTAMP)
-                        `, [refId, commAmt, currency, `ค่าคอมหวยไทยลูกทีมถูกรางวัล ${winCommissionPercent}%`]);
+                        `, [refId, commAmt, currency, `ค่าคอมหวยไทยจากทีมงาน (${maskedName}) ถูกรางวัล ${winCommissionPercent}%`]);
                     }
                 }
             } else {
