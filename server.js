@@ -3428,11 +3428,11 @@ app.get('/api/admin/thai-lottery/sales-report', async (req, res) => {
                 COALESCE(SUM(CASE WHEN o.currency_code IN ('THB', '฿') AND i.status = 'ชนะ' THEN i.prize_amount ELSE 0 END), 0) as total_payout_thb,
                 COALESCE(SUM(CASE WHEN o.currency_code IN ('LAK', '₭') AND i.status = 'ชนะ' THEN i.prize_amount ELSE 0 END), 0) as total_payout_lak,
                 
-                -- สรุปสถานะบิล
+               -- 🌟 แก้สถานะให้ตรงกับ Database
                 COUNT(i.item_id) as total_tickets,
-                COUNT(CASE WHEN i.status = 'ชนะ' THEN 1 END) as winners_count,
-                COUNT(CASE WHEN i.status = 'รอผลตรวจ' THEN 1 END) as pending_count,
-                COUNT(CASE WHEN i.status = 'ไม่ถูกรางวัล' THEN 1 END) as lost_count
+                COUNT(CASE WHEN i.status IN ('ชนะ', 'Win', 'Paid') THEN 1 END) as winners_count,
+                COUNT(CASE WHEN i.status IN ('รอผล', 'Pending') THEN 1 END) as pending_count,
+                COUNT(CASE WHEN i.status IN ('แพ้', 'Lose') THEN 1 END) as lost_count
                 
             FROM Yeeki_Rounds r
             LEFT JOIN Yeeki_Orders o ON r.round_id = o.round_id
