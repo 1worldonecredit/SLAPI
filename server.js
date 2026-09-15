@@ -1495,38 +1495,42 @@ app.get('/api/lottery/prize-rates', async (req, res) => {
 
 
 // ==========================================
-// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
-// 🌟 API: ดึงประวัติการซื้อหวยของ User (GET)
+// 🌟 API: ดึงประวัติการซื้อของ User (อัปเดตให้สรุปสถานะบิล ถูก/ไม่ถูก และรวมยอดเงินรางวัล)
 // ==========================================
 app.get('/api/lottery/history/:userId', async (req, res) => {
-    const userId = req.params.userId;
+    const { userId } = req.params;
+    const client = await pgPool.connect();
     try {
-        // 1. ดึงหัวบิลทั้งหมดของ User นี้ เรียงจากใหม่ไปเก่า
-        const orderRes = await pgPool.query(`
-                SELECT order_id, total_amount, currency_code, status, created_at
-                FROM Lottery_Orders
-                WHERE user_id = $1
-                ORDER BY created_at DESC
-            `, [userId]
-        );
-            
-        const orders = orderRes.rows;
-
-        // 2. ดึงรายละเอียดเลขหวยแต่ละตัว มาผูกกับหัวบิล
-        for (let order of orders) {
-            const itemRes = await pgPool.query(`
-                    SELECT item_id, lottery_type, selected_number, price, status
-                    FROM Lottery_Order_Items
-                    WHERE order_id = $1
-                `, [order.order_id]
-            );
-            order.items = itemRes.rows;
-        }
-
-        res.status(200).json({ success: true, data: orders });
+        const query = `
+            SELECT 
+                o.order_id, 
+                o.total_amount, 
+                o.currency_code, 
+                o.created_at, 
+                o.lottery_type,
+                o.round_name,
+                o.draw_date,
+                -- 🌟 คำนวณสถานะบิล: ถ้ามีเลขใดถูกถือว่า 'ถูกรางวัล', ถ้าผิดหมดถือว่า 'ไม่ถูกรางวัล', นอกนั้น 'รอผลตรวจ'
+                CASE 
+                    WHEN COUNT(CASE WHEN oi.status IN ('ถูกรางวัล', 'ชนะ', 'Win', 'Paid', 'โอนแล้ว') THEN 1 END) > 0 THEN 'ถูกรางวัล'
+                    WHEN COUNT(CASE WHEN oi.status IN ('ไม่ถูกรางวัล', 'แพ้', 'Lose') THEN 1 END) = COUNT(oi.item_id) THEN 'ไม่ถูกรางวัล'
+                    ELSE 'รอผลตรวจ'
+                END as status,
+                -- 🌟 รวมยอดเงินรางวัลที่ได้ในบิลนี้
+                SUM(COALESCE(oi.prize_amount, 0)) as total_prize
+            FROM Lottery_Orders o
+            LEFT JOIN Lottery_Order_Items oi ON o.order_id = oi.order_id
+            WHERE o.user_id = $1
+            GROUP BY o.order_id
+            ORDER BY o.created_at DESC
+        `;
+        const { rows } = await client.query(query, [userId]);
+        res.json({ success: true, data: rows });
     } catch (error) {
-        console.error('Error fetching lottery history:', error);
-        res.status(500).json({ success: false, message: 'ไม่สามารถดึงข้อมูลประวัติได้' });
+        console.error("Error fetching history:", error);
+        res.status(500).json({ success: false, message: "Server Error" });
+    } finally {
+        client.release();
     }
 });
 
@@ -2814,9 +2818,6 @@ app.post('/api/admin/draw-results', async (req, res) => {
 });
 
 
-// =====================================================================
-// 🇻🇳 ส่วนระบบหวยเวียดนาม (จัดการการโอนเงิน และ แจกค่าคอมมิชชัน)
-// =====================================================================
 
 // ---------------------------------------------------------------------
 // 1. API: โอนเงินหวยเวียดนามแบบ Manual (แอดมินเลือกโอนเอง + ใส่รหัสผ่าน)
