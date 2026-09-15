@@ -2848,7 +2848,7 @@ app.post('/api/admin/viet-lottery/process-payouts', async (req, res) => {
             AND u.password_hash = $1
             LIMIT 1
         `, [admin_password]);
-        
+
         if (authCheck.rows.length === 0) {
             client.release();
             return res.json({ success: false, message: 'รหัสผ่าน Admin ไม่ถูกต้อง!' });
@@ -2876,7 +2876,7 @@ app.post('/api/admin/viet-lottery/process-payouts', async (req, res) => {
                 // โอนเงินลูกค้า & แจ้งเตือน
                 await client.query(`UPDATE Wallets SET balance = COALESCE(balance, 0) + CAST($1 AS NUMERIC) WHERE user_id = $2`, [prize_amount, user_id]);
                 await client.query(`INSERT INTO Transactions (user_id, transaction_type, title, amount, currency_code, status, created_at) VALUES ($1, 'Reward', 'ถูกรางวัลหวยเวียดนาม', CAST($2 AS NUMERIC), $3, 'Completed', CURRENT_TIMESTAMP)`, [user_id, prize_amount, currency_code]);
-                await client.query(`INSERT INTO Notifications (user_id, title, message, type, is_read, created_at) VALUES ($1, '🎉 ยินดีด้วยคุณถูกรางวัล!', 'ระบบได้โอนเงินรางวัลหวยเวียดนาม จำนวน ' || $2 || ' ' || $3 || ' เข้า Wallet ของคุณเรียบร้อยแล้ว', 'system', false, CURRENT_TIMESTAMP)`, [user_id, prize_amount, currency_code]);
+              await client.query(`INSERT INTO Notifications (user_id, title, message, type, is_read, created_at) VALUES ($1, '🎉 ยินดีด้วยคุณถูกรางวัล!', 'ระบบได้โอนเงินรางวัลหวยเวียดนาม จำนวน ' || $2 || ' ' || $3 || ' เข้า Wallet ของคุณเรียบร้อยแล้ว', 'system', '0', CURRENT_TIMESTAMP)`, [user_id, prize_amount, currency_code]);
 
                 // จ่ายค่าคอมแม่ทีม & แจ้งเตือน
                 if (commPercent > 0 && referrer_username) {
