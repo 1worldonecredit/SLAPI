@@ -1485,9 +1485,9 @@ app.post('/api/lottery/buy', async (req, res) => {
 // ==========================================
 app.get('/api/prize-rates', async (req, res) => {
     const client = await pgPool.connect();
-    try {
-        // ดึงเรทราคาทั้งหมดจากตาราง lottery_prize_rates
-        const { rows } = await client.query('SELECT lottery_type, multiplier, description FROM lottery_prize_rates ORDER BY id ASC');
+   try {
+        // 🌟 เติมคำว่า "id," เข้าไปตรงนี้ครับ เพื่อให้มันส่ง ID กลับมาให้หน้า Admin ด้วย
+        const { rows } = await client.query('SELECT id, lottery_type, multiplier, description FROM lottery_prize_rates ORDER BY id ASC');
         res.json({ success: true, data: rows });
     } catch (error) {
         console.error("Error fetching prize rates:", error);
