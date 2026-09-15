@@ -3089,28 +3089,40 @@ app.get('/api/admin/prize-rates', async (req, res) => {
 });
 
 // ==========================================
-// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
-// 🌟 API 2: อัปเดตเรทการจ่ายรางวัล
+// 🌟 API: อัปเดตอัตราการจ่ายเงินรางวัล (แก้ไขให้บันทึกลง Database ได้จริง)
 // ==========================================
 app.post('/api/admin/prize-rates', async (req, res) => {
     const { rates } = req.body;
-    const client = await pgPool.connect(); // ใช้ Transaction เพื่อประสิทธิภาพเวลา Update หลายแถว
+    
+    if (!rates || !Array.isArray(rates)) {
+        return res.status(400).json({ success: false, message: 'Invalid data format' });
+    }
+
+    const client = await pgPool.connect();
     try {
         await client.query('BEGIN');
-        for (let r of rates) {
-            await client.query("UPDATE Lottery_Prize_Rates SET multiplier = $1 WHERE id = $2", [r.multiplier, r.id]);
+        
+        for (const rate of rates) {
+            // 🌟 แก้ไขจุดนี้: แปลง rate.id ให้เป็นตัวเลข (parseInt) ก่อนเซฟลง Database 
+            // และแปลง multiplier ให้เป็นทศนิยมเผื่อไว้ด้วย (parseFloat)
+            await client.query(
+                `UPDATE lottery_prize_rates 
+                 SET multiplier = $1 
+                 WHERE id = $2`,
+                [parseFloat(rate.multiplier), parseInt(rate.id)] 
+            );
         }
+
         await client.query('COMMIT');
-        res.json({ success: true, message: "อัปเดตอัตราจ่ายสำเร็จ" });
-    } catch (err) { 
+        res.json({ success: true, message: 'อัปเดตอัตราจ่ายสำเร็จ' });
+    } catch (error) {
         await client.query('ROLLBACK');
-        console.error('Error updating prize rates:', err);
-        res.status(500).json({ success: false }); 
+        console.error("Error updating prize rates:", error);
+        res.status(500).json({ success: false, message: "Server Error" });
     } finally {
         client.release();
     }
 });
-
 // ==========================================
 // 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🌟 API: ดึงและอัปเดตอัตราแลกเปลี่ยน (ExchangeRates)
