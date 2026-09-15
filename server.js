@@ -2888,7 +2888,7 @@ app.post('/api/admin/viet-lottery/process-payouts', async (req, res) => {
                         
                         await client.query(`UPDATE Wallets SET balance = COALESCE(balance, 0) + CAST($1 AS NUMERIC) WHERE user_id = $2`, [commAmount, referrer_id]);
                         await client.query(`INSERT INTO Transactions (user_id, transaction_type, title, amount, currency_code, status, created_at) VALUES ($1, 'commission', $2, CAST($3 AS NUMERIC), $4, 'Completed', CURRENT_TIMESTAMP)`, [referrer_id, `ค่าคอมฯ ลูกทีมถูกรางวัล (${maskedName})`, commAmount, currency_code]);
-                        await client.query(`INSERT INTO Notifications (user_id, title, message, type, is_read, created_at) VALUES ($1, '💰 ได้รับค่าคอมมิชชัน!', 'คุณได้รับส่วนแบ่งค่าคอมมิชชัน ' || $2 || ' ' || $3 || ' จากลูกทีมที่ถูกรางวัล', 'system', false, CURRENT_TIMESTAMP)`, [referrer_id, commAmount, currency_code]);
+                        await client.query(`INSERT INTO Notifications (user_id, title, message, type, is_read, created_at) VALUES ($1, '💰 ได้รับค่าคอมมิชชัน!', 'คุณได้รับส่วนแบ่งค่าคอมมิชชัน ' || $2 || ' ' || $3 || ' จากลูกทีมที่ถูกรางวัล', 'system', '0', CURRENT_TIMESTAMP)`, [referrer_id, commAmount, currency_code]);
                     }
                 }
 
