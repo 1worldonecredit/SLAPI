@@ -1495,7 +1495,7 @@ app.get('/api/lottery/prize-rates', async (req, res) => {
 
 
 // ==========================================
-// 🌟 API: ดึงประวัติการซื้อของ User (อัปเดตให้สรุปสถานะบิล ถูก/ไม่ถูก และรวมยอดเงินรางวัล)
+// 🌟 API: ดึงประวัติการซื้อของ User (แก้ Error 500 เรื่อง GROUP BY)
 // ==========================================
 app.get('/api/lottery/history/:userId', async (req, res) => {
     const { userId } = req.params;
@@ -1510,18 +1510,26 @@ app.get('/api/lottery/history/:userId', async (req, res) => {
                 o.lottery_type,
                 o.round_name,
                 o.draw_date,
-                -- 🌟 คำนวณสถานะบิล: ถ้ามีเลขใดถูกถือว่า 'ถูกรางวัล', ถ้าผิดหมดถือว่า 'ไม่ถูกรางวัล', นอกนั้น 'รอผลตรวจ'
+                -- 🌟 คำนวณสถานะบิล
                 CASE 
                     WHEN COUNT(CASE WHEN oi.status IN ('ถูกรางวัล', 'ชนะ', 'Win', 'Paid', 'โอนแล้ว') THEN 1 END) > 0 THEN 'ถูกรางวัล'
                     WHEN COUNT(CASE WHEN oi.status IN ('ไม่ถูกรางวัล', 'แพ้', 'Lose') THEN 1 END) = COUNT(oi.item_id) THEN 'ไม่ถูกรางวัล'
                     ELSE 'รอผลตรวจ'
                 END as status,
-                -- 🌟 รวมยอดเงินรางวัลที่ได้ในบิลนี้
-                SUM(COALESCE(oi.prize_amount, 0)) as total_prize
+                -- 🌟 รวมยอดเงินรางวัล
+                SUM(COALESCE(CAST(oi.prize_amount AS NUMERIC), 0)) as total_prize
             FROM Lottery_Orders o
             LEFT JOIN Lottery_Order_Items oi ON o.order_id = oi.order_id
             WHERE o.user_id = $1
-            GROUP BY o.order_id
+            -- 🌟 สำคัญ: ต้องระบุคอลัมน์ที่ดึงมาทั้งหมดไว้ใน GROUP BY ด้วย ระบบถึงจะไม่แจ้ง Error 500
+            GROUP BY 
+                o.order_id, 
+                o.total_amount, 
+                o.currency_code, 
+                o.created_at, 
+                o.lottery_type,
+                o.round_name,
+                o.draw_date
             ORDER BY o.created_at DESC
         `;
         const { rows } = await client.query(query, [userId]);
