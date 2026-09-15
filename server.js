@@ -1495,53 +1495,47 @@ app.get('/api/lottery/prize-rates', async (req, res) => {
 
 
 // ==========================================
-// 🌟 API: ดึงประวัติการซื้อของ User (แก้ Error 500 เรื่อง GROUP BY)
+// 🌟 API: ดึงประวัติการซื้อของ User (อัปเดตแบบ Subquery ป้องกัน Error 500)
 // ==========================================
 app.get('/api/lottery/history/:userId', async (req, res) => {
     const { userId } = req.params;
     const client = await pgPool.connect();
     try {
+        // ใช้ o.* เพื่อดึงข้อมูลเดิมทั้งหมดที่เคยมี และใช้ Subquery ดึงแค่ status กับ total_prize ป้องกัน Error
         const query = `
             SELECT 
-                o.order_id, 
-                o.total_amount, 
-                o.currency_code, 
-                o.created_at, 
-                o.lottery_type,
-                o.round_name,
-                o.draw_date,
-                -- 🌟 คำนวณสถานะบิล
-                CASE 
-                    WHEN COUNT(CASE WHEN oi.status IN ('ถูกรางวัล', 'ชนะ', 'Win', 'Paid', 'โอนแล้ว') THEN 1 END) > 0 THEN 'ถูกรางวัล'
-                    WHEN COUNT(CASE WHEN oi.status IN ('ไม่ถูกรางวัล', 'แพ้', 'Lose') THEN 1 END) = COUNT(oi.item_id) THEN 'ไม่ถูกรางวัล'
-                    ELSE 'รอผลตรวจ'
-                END as status,
-                -- 🌟 รวมยอดเงินรางวัล
-                SUM(COALESCE(CAST(oi.prize_amount AS NUMERIC), 0)) as total_prize
+                o.*, 
+                COALESCE((
+                    SELECT 
+                        CASE 
+                            WHEN COUNT(CASE WHEN status IN ('ถูกรางวัล', 'ชนะ', 'Win', 'Paid', 'โอนแล้ว') THEN 1 END) > 0 THEN 'ถูกรางวัล'
+                            WHEN COUNT(CASE WHEN status IN ('ไม่ถูกรางวัล', 'แพ้', 'Lose') THEN 1 END) = COUNT(item_id) THEN 'ไม่ถูกรางวัล'
+                            ELSE 'รอผลตรวจ'
+                        END
+                    FROM Lottery_Order_Items 
+                    WHERE order_id = o.order_id
+                ), 'รอผลตรวจ') as status,
+                
+                COALESCE((
+                    SELECT SUM(CAST(prize_amount AS NUMERIC))
+                    FROM Lottery_Order_Items 
+                    WHERE order_id = o.order_id AND status IN ('ถูกรางวัล', 'ชนะ', 'Win', 'Paid', 'โอนแล้ว')
+                ), 0) as total_prize
+
             FROM Lottery_Orders o
-            LEFT JOIN Lottery_Order_Items oi ON o.order_id = oi.order_id
             WHERE o.user_id = $1
-            -- 🌟 สำคัญ: ต้องระบุคอลัมน์ที่ดึงมาทั้งหมดไว้ใน GROUP BY ด้วย ระบบถึงจะไม่แจ้ง Error 500
-            GROUP BY 
-                o.order_id, 
-                o.total_amount, 
-                o.currency_code, 
-                o.created_at, 
-                o.lottery_type,
-                o.round_name,
-                o.draw_date
             ORDER BY o.created_at DESC
         `;
         const { rows } = await client.query(query, [userId]);
         res.json({ success: true, data: rows });
     } catch (error) {
-        console.error("Error fetching history:", error);
-        res.status(500).json({ success: false, message: "Server Error" });
+        // 🌟 ถ้ายังมี Error อีก มันจะพ่นแจ้งเตือนสีแดงในหน้าจอ Terminal (VS Code) ของ Backend ครับ
+        console.error("🔥 Error fetching history:", error);
+        res.status(500).json({ success: false, message: "Server Error", error: error.message });
     } finally {
         client.release();
     }
 });
-
 
 // ==========================================
 // 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
