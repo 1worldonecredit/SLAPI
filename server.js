@@ -1479,17 +1479,21 @@ app.post('/api/lottery/buy', async (req, res) => {
     }
 });
 
+
 // ==========================================
-// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว (ลบตัวซ้ำออกแล้ว)
-// 🌟 API: ดึงอัตราจ่ายเงินรางวัลหวยไปแสดงที่หน้าสลิป
+// 🌟 API: ดึงอัตราการจ่ายเงินรางวัลทั้งหมด (เอาไปโชว์หน้าสลิป)
 // ==========================================
-app.get('/api/lottery/prize-rates', async (req, res) => {
+app.get('/api/prize-rates', async (req, res) => {
+    const client = await pgPool.connect();
     try {
-        const result = await pgPool.query('SELECT * FROM Lottery_Prize_Rates ORDER BY CAST(lottery_type AS INTEGER) ASC');
-        res.status(200).json({ success: true, data: result.rows });
+        // ดึงเรทราคาทั้งหมดจากตาราง lottery_prize_rates
+        const { rows } = await client.query('SELECT lottery_type, multiplier, description FROM lottery_prize_rates ORDER BY id ASC');
+        res.json({ success: true, data: rows });
     } catch (error) {
-        console.error('Error fetching prize rates:', error);
-        res.status(500).json({ success: false, message: 'ไม่สามารถดึงข้อมูลอัตราจ่ายได้' });
+        console.error("Error fetching prize rates:", error);
+        res.status(500).json({ success: false, message: "Server Error" });
+    } finally {
+        client.release();
     }
 });
 
