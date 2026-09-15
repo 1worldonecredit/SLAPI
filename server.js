@@ -4125,7 +4125,75 @@ setInterval(async () => {
     }
 }, 30000);
 
+// ==========================================
+// 🌟 API: ดึงรายชื่อผู้ที่(คาดว่า)จะถูกรางวัล หวยยี่กี (จำลองก่อนประกาศผลจริง)
+// ==========================================
+app.post('/api/admin/simulate-yeeki-winners', async (req, res) => {
+    // รองรับทั้งชื่อตัวแปรแบบเก่าและใหม่ ป้องกัน Error
+    const roundId = req.body.round_id;
+    const lottoType = req.body.lottery_type || req.body.type;
+    const lottoNumber = req.body.selected_number || req.body.number;
 
+    if (!roundId || !lottoType || !lottoNumber) {
+        return res.status(400).json({ success: false, message: 'ข้อมูลสำหรับค้นหาไม่ครบถ้วน' });
+    }
+
+    try {
+        // 1. ดึงอัตราจ่ายของยี่กี (เพื่อนำไปคูณยอดแทง)
+        const rateRes = await pgPool.query("SELECT lottery_type, multiplier FROM yeeki_prize_rates");
+        const prizeRates = {};
+        rateRes.rows.forEach(r => {
+            prizeRates[r.lottery_type] = parseFloat(r.multiplier);
+        });
+
+        // 2. ดึงเรทแลกเปลี่ยน LAK -> THB 
+        const exRes = await pgPool.query("SELECT rate FROM ExchangeRates WHERE currency_pair = 'THB_LAK'");
+        const lakRate = exRes.rows.length > 0 ? parseFloat(exRes.rows[0].rate) : 1;
+
+        // 3. 🔍 ค้นหาบิลที่ตรงเป๊ะ! จากตาราง yeeki_orders และ yeeki_order_items
+        const query = `
+            SELECT 
+                u.username,
+                o.currency_code,
+                i.price,
+                i.lottery_type
+            FROM yeeki_order_items i
+            JOIN yeeki_orders o ON i.order_id = o.order_id
+            JOIN users u ON o.user_id = u.user_id
+            WHERE o.round_id = $1 
+              AND i.lottery_type = $2 
+              AND i.selected_number = $3
+              AND o.status = 'รอผลตรวจ'
+        `;
+        const { rows } = await pgPool.query(query, [roundId, lottoType, lottoNumber]);
+
+        // 4. 🧮 คำนวณยอดเงินรางวัลที่จะได้รับ
+        const winners = rows.map(row => {
+            const multiplier = prizeRates[row.lottery_type] || 0;
+            const estimated_prize = parseFloat(row.price) * multiplier;
+            
+            // แปลงกลับเป็นเงินบาทไทย (THB) เผื่อในกรณีที่ลูกค้าใช้เงินกีบ (LAK) ซื้อ
+            let estimated_prize_thb = estimated_prize;
+            if (row.currency_code === 'LAK' || row.currency_code === '₭') {
+                estimated_prize_thb = estimated_prize / lakRate;
+            }
+
+            return {
+                username: row.username || 'ไม่ระบุชื่อ',
+                currency_code: row.currency_code,
+                price: parseFloat(row.price),
+                estimated_prize: estimated_prize,
+                estimated_prize_thb: estimated_prize_thb
+            };
+        });
+
+        res.status(200).json({ success: true, winners: winners });
+
+    } catch (error) {
+        console.error("Error in simulate-yeeki-winners:", error);
+        res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการดึงข้อมูลรายชื่อ' });
+    }
+});
 // ==========================================
 // 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🌟 API สุ่มเลขแนะนำ (AI V21: Auto-Detect Round ID แก้บั๊กหุ่นยนต์ลืมส่งรอบ)
