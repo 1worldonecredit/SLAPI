@@ -2841,12 +2841,14 @@ app.post('/api/admin/viet-lottery/process-payouts', async (req, res) => {
     const client = await pgPool.connect();
     try {
         // 🌟 ตรวจสอบรหัสผ่าน Admin
-        const authCheck = await client.query(`
-            SELECT 1 FROM Users 
-            WHERE (role = 'Super Admin' OR role = 'Admin') AND password = $1 
+       const authCheck = await client.query(`
+            SELECT 1 FROM Users u
+            LEFT JOIN Roles r ON u.role_id = r.role_id
+            WHERE (r.role_name = 'Super Admin' OR r.role_name = 'Admin') 
+            AND u.password_hash = $1
             LIMIT 1
         `, [admin_password]);
-
+        
         if (authCheck.rows.length === 0) {
             client.release();
             return res.json({ success: false, message: 'รหัสผ่าน Admin ไม่ถูกต้อง!' });
