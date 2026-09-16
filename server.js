@@ -7015,7 +7015,7 @@ app.post('/api/p2p/verify-slip', async (req, res) => {
                         await client.query(`
                             INSERT INTO Transactions (user_id, amount, transaction_type, title, status, created_at) 
                             VALUES ($1, $2, 'Affiliate', $3, 'Completed', CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Bangkok')
-                        `, [referrerId, finalRefReward, `ค่าคอมมิชชั่นแนะนำเพื่อนรับงาน P2P จากคุณ ${providerName} (งาน ID: ${request_id})`]);
+                        `, [referrerId, finalRefReward, `ทีมงานรับงาน P2P ${providerName} (งาน ID: ${request_id})`]);
                     }
                 }
 
