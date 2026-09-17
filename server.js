@@ -8312,16 +8312,14 @@ app.post('/api/save-profile-media', async (req, res) => {
         const uploadedUrl = cfData.result.variants[0];
 
         // 🌟 3. จัดการ Database (แก้คำว่า pool เป็น pgPool แล้ว)
-        await pgPool.query(`UPDATE user_profile_media SET is_active = false WHERE user_id = $1`, [user_id]);
+      await pgPool.query(`UPDATE user_profile_media SET is_active = false WHERE user_id = $1`, [user_id]);
 
-        await pgPool.query(
+       await pgPool.query(
             `INSERT INTO user_profile_media (user_id, media_url, media_type, is_active) VALUES ($1, $2, 'image', true)`,
             [user_id, uploadedUrl]
         );
         
-        await pgPool.query(`UPDATE users SET avatar = $1 WHERE user_id = $2`, [uploadedUrl, user_id]);
-
-        res.json({ success: true, avatar: uploadedUrl, message: 'บันทึกรูปโปรไฟล์สำเร็จ' });
+       res.json({ success: true, avatar: uploadedUrl, message: 'บันทึกรูปโปรไฟล์สำเร็จ' });
 
     } catch (error) {
         console.error('Save Profile Media Error:', error);
