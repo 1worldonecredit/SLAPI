@@ -8299,9 +8299,13 @@ app.post('/api/save-profile-media', async (req, res) => {
         });
         
         const cfData = await cfRes.json();
-        
-        if (!cfData.success) {
-            return res.status(400).json({ success: false, message: 'อัปโหลดรูปขึ้น Cloudflare ไม่สำเร็จ' });
+       if (!cfData.success) {
+            console.error('Cloudflare Reject Reason:', cfData.errors);
+            const cfErrorMsg = cfData.errors && cfData.errors.length > 0 ? cfData.errors[0].message : 'Unknown Error';
+            return res.status(400).json({ 
+                success: false, 
+                message: 'Cloudflare แจ้งว่า: ' + cfErrorMsg 
+            });
         }
 
         const uploadedUrl = cfData.result.variants[0];
