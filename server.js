@@ -8269,7 +8269,49 @@ app.post('/api/notifications/delete', async (req, res) => {
     }
 });
 
+// ==========================================
+// 📸 API สำหรับบันทึกรูป Profile ลง Database และอัปเดตสถานะ
+// ==========================================
+app.post('/api/save-profile-media', async (req, res) => {
+    const { user_id, media_url, media_type = 'image' } = req.body;
 
+    // ตรวจสอบความถูกต้องของข้อมูลที่ส่งมา
+    if (!user_id || !media_url) {
+        return res.status(400).json({ success: false, message: 'กรุณาระบุ user_id และ media_url' });
+    }
+
+    try {
+        // 1. เปลี่ยนสถานะรูปโปรไฟล์เดิมทั้งหมดของ User คนนี้ให้เป็น "ไม่ใช้งาน" (is_active = false)
+        await pool.query(
+            `UPDATE user_profile_media SET is_active = false WHERE user_id = $1`,
+            [user_id]
+        );
+
+        // 2. บันทึกรูป/วิดีโอใหม่ลงในตารางประวัติ และตั้งสถานะเป็น "กำลังใช้งาน" (is_active = true)
+        await pool.query(
+            `INSERT INTO user_profile_media (user_id, media_url, media_type, is_active) 
+             VALUES ($1, $2, $3, true)`,
+            [user_id, media_url, media_type]
+        );
+
+        // 3. อัปเดตคอลัมน์ avatar ในตาราง users หลัก (เพื่อให้ดึงข้อมูลตอนโหลดหน้าเว็บได้ทันที)
+        // หมายเหตุ: หากตาราง users ของคุณวิทยาใช้ชื่อคอลัมน์ avatar_url ให้เปลี่ยนคำว่า avatar เป็น avatar_url ครับ
+        await pool.query(
+            `UPDATE users SET avatar = $1 WHERE user_id = $2`,
+            [media_url, user_id]
+        );
+
+        res.json({ 
+            success: true, 
+            message: 'อัปเดตโปรไฟล์สำเร็จ', 
+            avatar: media_url 
+        });
+
+    } catch (error) {
+        console.error('Save Profile Media Error:', error);
+        res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดที่ระบบฐานข้อมูล' });
+    }
+});
 // ==========================================
 // 🌟 ใช้งานได้เหมือนเดิม 100% ไม่พึ่งพา DB
 // 🎥 API สำหรับขอ URL อัปโหลดจาก Cloudflare Stream
