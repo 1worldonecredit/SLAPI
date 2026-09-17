@@ -8310,15 +8310,15 @@ app.post('/api/save-profile-media', async (req, res) => {
 
         const uploadedUrl = cfData.result.variants[0];
 
-        // 3. จัดการ Database (เปลี่ยนสถานะรูปเก่า -> เพิ่มรูปใหม่ -> อัปเดตตาราง users)
+       // 3. จัดการ Database
         await pool.query(`UPDATE user_profile_media SET is_active = false WHERE user_id = $1`, [user_id]);
-        
-        await pool.query(
+
+      await pool.query(
             `INSERT INTO user_profile_media (user_id, media_url, media_type, is_active) VALUES ($1, $2, 'image', true)`,
             [user_id, uploadedUrl]
         );
         
-        await pool.query(`UPDATE users SET avatar = $1 WHERE user_id = $2`, [uploadedUrl, user_id]);
+      await pool.query(`UPDATE users SET avatar = $1 WHERE user_id = $2`, [uploadedUrl, user_id]);
 
         res.json({ success: true, avatar: uploadedUrl, message: 'บันทึกรูปโปรไฟล์สำเร็จ' });
 
