@@ -8269,6 +8269,7 @@ app.post('/api/notifications/delete', async (req, res) => {
     }
 });
 
+
 // ==========================================
 // 🚀 API บันทึกรูป Profile (รับ Base64 -> Cloudflare -> ลง Database)
 // ==========================================
@@ -8299,7 +8300,7 @@ app.post('/api/save-profile-media', async (req, res) => {
         });
         
         const cfData = await cfRes.json();
-       if (!cfData.success) {
+        if (!cfData.success) {
             console.error('Cloudflare Reject Reason:', cfData.errors);
             const cfErrorMsg = cfData.errors && cfData.errors.length > 0 ? cfData.errors[0].message : 'Unknown Error';
             return res.status(400).json({ 
@@ -8310,15 +8311,15 @@ app.post('/api/save-profile-media', async (req, res) => {
 
         const uploadedUrl = cfData.result.variants[0];
 
-       // 3. จัดการ Database
-        await pool.query(`UPDATE user_profile_media SET is_active = false WHERE user_id = $1`, [user_id]);
+        // 🌟 3. จัดการ Database (แก้คำว่า pool เป็น pgPool แล้ว)
+        await pgPool.query(`UPDATE user_profile_media SET is_active = false WHERE user_id = $1`, [user_id]);
 
-      await pool.query(
+        await pgPool.query(
             `INSERT INTO user_profile_media (user_id, media_url, media_type, is_active) VALUES ($1, $2, 'image', true)`,
             [user_id, uploadedUrl]
         );
         
-      await pool.query(`UPDATE users SET avatar = $1 WHERE user_id = $2`, [uploadedUrl, user_id]);
+        await pgPool.query(`UPDATE users SET avatar = $1 WHERE user_id = $2`, [uploadedUrl, user_id]);
 
         res.json({ success: true, avatar: uploadedUrl, message: 'บันทึกรูปโปรไฟล์สำเร็จ' });
 
@@ -8327,6 +8328,7 @@ app.post('/api/save-profile-media', async (req, res) => {
         res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดที่ระบบ Server' });
     }
 });
+
 // ==========================================
 // 🌟 ใช้งานได้เหมือนเดิม 100% ไม่พึ่งพา DB
 // 🎥 API สำหรับขอ URL อัปโหลดจาก Cloudflare Stream
