@@ -8270,46 +8270,57 @@ app.post('/api/notifications/delete', async (req, res) => {
 });
 
 // ==========================================
-// 📸 API สำหรับบันทึกรูป Profile ลง Database และอัปเดตสถานะ
+// 🚀 API บันทึกรูป Profile (รับ Base64 -> Cloudflare -> ลง Database)
 // ==========================================
 app.post('/api/save-profile-media', async (req, res) => {
-    const { user_id, media_url, media_type = 'image' } = req.body;
+    const { media_base64, user_id } = req.body;
 
-    // ตรวจสอบความถูกต้องของข้อมูลที่ส่งมา
-    if (!user_id || !media_url) {
-        return res.status(400).json({ success: false, message: 'กรุณาระบุ user_id และ media_url' });
+    if (!user_id || !media_base64) {
+        return res.status(400).json({ success: false, message: 'ข้อมูลไม่ครบถ้วน' });
     }
 
     try {
-        // 1. เปลี่ยนสถานะรูปโปรไฟล์เดิมทั้งหมดของ User คนนี้ให้เป็น "ไม่ใช้งาน" (is_active = false)
-        await pool.query(
-            `UPDATE user_profile_media SET is_active = false WHERE user_id = $1`,
-            [user_id]
-        );
+        // 1. แปลง Base64 กลับเป็น Blob
+        const base64Data = media_base64.replace(/^data:image\/\w+;base64,/, "");
+        const buffer = Buffer.from(base64Data, 'base64');
+        const blob = new Blob([buffer], { type: 'image/jpeg' });
+        
+        const formData = new FormData();
+        formData.append('file', blob, `profile_${user_id}.jpg`);
 
-        // 2. บันทึกรูป/วิดีโอใหม่ลงในตารางประวัติ และตั้งสถานะเป็น "กำลังใช้งาน" (is_active = true)
-        await pool.query(
-            `INSERT INTO user_profile_media (user_id, media_url, media_type, is_active) 
-             VALUES ($1, $2, $3, true)`,
-            [user_id, media_url, media_type]
-        );
+        const CF_ACCOUNT_ID = process.env.CF_ACCOUNT_ID;
+        const CF_API_TOKEN = process.env.CF_API_TOKEN;
 
-        // 3. อัปเดตคอลัมน์ avatar ในตาราง users หลัก (เพื่อให้ดึงข้อมูลตอนโหลดหน้าเว็บได้ทันที)
-        // หมายเหตุ: หากตาราง users ของคุณวิทยาใช้ชื่อคอลัมน์ avatar_url ให้เปลี่ยนคำว่า avatar เป็น avatar_url ครับ
-        await pool.query(
-            `UPDATE users SET avatar = $1 WHERE user_id = $2`,
-            [media_url, user_id]
-        );
-
-        res.json({ 
-            success: true, 
-            message: 'อัปเดตโปรไฟล์สำเร็จ', 
-            avatar: media_url 
+        // 2. ส่งขึ้น Cloudflare Images
+        const cfRes = await fetch(`https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/images/v1`, {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${CF_API_TOKEN}` },
+            body: formData
         });
+        
+        const cfData = await cfRes.json();
+        
+        if (!cfData.success) {
+            return res.status(400).json({ success: false, message: 'อัปโหลดรูปขึ้น Cloudflare ไม่สำเร็จ' });
+        }
+
+        const uploadedUrl = cfData.result.variants[0];
+
+        // 3. จัดการ Database (เปลี่ยนสถานะรูปเก่า -> เพิ่มรูปใหม่ -> อัปเดตตาราง users)
+        await pool.query(`UPDATE user_profile_media SET is_active = false WHERE user_id = $1`, [user_id]);
+        
+        await pool.query(
+            `INSERT INTO user_profile_media (user_id, media_url, media_type, is_active) VALUES ($1, $2, 'image', true)`,
+            [user_id, uploadedUrl]
+        );
+        
+        await pool.query(`UPDATE users SET avatar = $1 WHERE user_id = $2`, [uploadedUrl, user_id]);
+
+        res.json({ success: true, avatar: uploadedUrl, message: 'บันทึกรูปโปรไฟล์สำเร็จ' });
 
     } catch (error) {
         console.error('Save Profile Media Error:', error);
-        res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดที่ระบบฐานข้อมูล' });
+        res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดที่ระบบ Server' });
     }
 });
 // ==========================================
