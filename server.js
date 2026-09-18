@@ -8519,6 +8519,73 @@ app.post('/api/video/share', async (req, res) => {
     }
 });
 
+
+// ==========================================
+// 🚀 1. API: ข้อมูลผู้ใช้งานและสกุลเงิน over view Dashboard เริ่ม
+// ==========================================
+app.get('/api/admin/dashboard/users-summary', async (req, res) => {
+    try {
+        // ตัวอย่าง SQL: ประยุกต์ใช้กับตาราง users และ wallets ของคุณวิทยา
+        // const result = await pgPool.query(`SELECT currency, COUNT(id) as count FROM users GROUP BY currency`);
+        
+        // ข้อมูลจำลอง (Mock Data) สำหรับให้ UI นำไปแสดงผลก่อนต่อ DB จริง
+        res.json({
+            success: true,
+            data: {
+                totalUsers: 1250,
+                currencies: { THB: 850, LAK: 350, USD: 50 }
+            }
+        });
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+});
+
+// ==========================================
+// 🚀 2. API: ข้อมูลธุรกรรมการเงิน (ฝาก/ถอน/P2P) รายวัน
+// ==========================================
+app.get('/api/admin/dashboard/financial-summary', async (req, res) => {
+    try {
+        // ดึงข้อมูลรายวันจากตาราง transactions / p2p
+        res.json({
+            success: true,
+            data: {
+                dailySales: { THB: 154000, LAK: 45000000, USD: 1200 },
+                p2p: {
+                    deposit: { success: 145, failed: 12, amount_thb: 50000 },
+                    withdraw: { success: 89, failed: 3, amount_thb: 25000 }
+                }
+            }
+        });
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+});
+
+// ==========================================
+// 🚀 3. API: ข้อมูลหวยและกำไร-ขาดทุน
+// ==========================================
+app.get('/api/admin/dashboard/lottery-summary', async (req, res) => {
+    try {
+        // ดึงข้อมูลจากตาราง tickets / results
+        res.json({
+            success: true,
+            data: {
+                thaiLottery: { sales: 85000, winnersCount: 15, profit: 45000 },
+                laosLottery: { sales: 120000, winnersCount: 42, profit: 60000 },
+                yeekiLottery: { sales: 250000, winnersCount: 120, profit: 115000 }
+            }
+        });
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+});
+
+// ==========================================
+// 🚀 1. API: ข้อมูลผู้ใช้งานและสกุลเงิน over view Dashboard สิ้นสุด
+// ==========================================
+
+
 // ==========================================
 // 🚀 Start Server
 // ==========================================
