@@ -8105,11 +8105,12 @@ app.get('/api/admin/p2p-report', async (req, res) => {
             // เช็ค MAX_USER_WALLET_CAPACITY จากค่า Setting หรือคงที่ไว้ก่อน (ตัวอย่างนี้ขอตั้งเป็น 50000 ชั่วคราว)
             const MAX_USER_WALLET_CAPACITY = 50000;
 
-            const requestsQuery = `
+           const requestsQuery = `
                 SELECT 
                     r.request_id AS id, 
                     LOWER(r.request_type) AS type,
                     r.amount, 
+                    r.currency, /* 🌟 เพิ่มบรรทัดนี้ เพื่อดึงสกุลเงิน */
                     r.status, 
                     u_req.username AS requester, 
                     u_prov.username AS receiver, 
