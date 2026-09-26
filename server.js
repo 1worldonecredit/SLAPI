@@ -8090,7 +8090,11 @@ app.get('/api/admin/p2p-report', async (req, res) => {
         let queryParams = [];
 
         if (start_date && end_date) {
-            dateCondition = "AND r.created_at >= $1 AND r.created_at <= $2::timestamp + interval '1 day' - interval '1 second'";
+            // ปรับให้ระบุ Timezone อย่างชัดเจน
+            dateCondition = `
+                AND r.created_at >= ($1 || ' 00:00:00+07')::timestamptz 
+                AND r.created_at <= ($2 || ' 23:59:59+07')::timestamptz
+            `;
             queryParams = [start_date, end_date];
         }
 
