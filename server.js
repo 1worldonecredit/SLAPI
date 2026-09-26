@@ -8076,6 +8076,95 @@ app.post('/api/p2p/provider-upload-slip', async (req, res) => {
         res.status(500).json({ success: false, message: 'Server Error: ' + err.message });
     }
 });
+
+// ==========================================
+// 🌟 [ADMIN] API สรุปรายงาน Dashboard P2P (ฝาก-ถอน)
+// ==========================================
+app.get('/api/admin/p2p-report', async (req, res) => {
+    try {
+        const { start_date, end_date } = req.query;
+
+        // --- ตั้งค่า Default ให้ดึงข้อมูลทั้งหมดถ้าไม่ได้ระบุวันที่ ---
+        // (คุณสามารถปรับ default ให้เป็นเฉพาะเดือนนี้ได้ตามความต้องการ)
+        let dateCondition = "";
+        let queryParams = [];
+
+        if (start_date && end_date) {
+            dateCondition = "AND r.created_at >= $1 AND r.created_at <= $2::timestamp + interval '1 day' - interval '1 second'";
+            queryParams = [start_date, end_date];
+        }
+
+        const client = await pgPool.connect();
+
+        try {
+            // 🌟 1. ดึงข้อมูลคำขอ P2P ทั้งหมด (คำขอระบบ) และ คำขอที่เป็น Alerts (ยอดเกินกระเป๋า)
+            // เช็ค MAX_USER_WALLET_CAPACITY จากค่า Setting หรือคงที่ไว้ก่อน (ตัวอย่างนี้ขอตั้งเป็น 50000 ชั่วคราว)
+            const MAX_USER_WALLET_CAPACITY = 50000;
+
+            const requestsQuery = `
+                SELECT 
+                    r.request_id AS id, 
+                    LOWER(r.request_type) AS type,
+                    r.amount, 
+                    r.status, 
+                    u_req.username AS requester, 
+                    u_prov.username AS receiver, 
+                    r.created_at AS date,
+                    r.expires_at,
+                    r.slip_url,
+                    (CASE WHEN r.request_type = 'DEPOSIT' AND r.amount > ${MAX_USER_WALLET_CAPACITY} AND r.status = 'PENDING' THEN true ELSE false END) as is_alert
+                FROM P2P_Requests r
+                LEFT JOIN users u_req ON r.requester_id = u_req.user_id
+                LEFT JOIN users u_prov ON r.provider_id = u_prov.user_id
+                WHERE 1=1 ${dateCondition}
+                ORDER BY r.created_at DESC
+            `;
+            
+            const requestsResult = await client.query(requestsQuery, queryParams);
+            const allRequests = requestsResult.rows;
+
+            // 🌟 2. คำนวณสรุปยอด (Summary) จากคำขอที่ 'COMPLETED' (สำเร็จ)
+            const summaryData = allRequests.reduce((acc, curr) => {
+                if (curr.status === 'COMPLETED') {
+                    if (curr.type === 'deposit') {
+                        acc.totalDeposit += parseFloat(curr.amount);
+                    } else if (curr.type === 'withdraw') {
+                        acc.totalWithdraw += parseFloat(curr.amount);
+                    }
+                }
+                return acc;
+            }, { totalDeposit: 0, totalWithdraw: 0 });
+
+            // 🌟 3. จัดกลุ่มข้อมูล (Grouping) เพื่อให้หน้าบ้านนำไปใช้งานง่ายขึ้น
+            
+            // 3.1 ข้อมูล Requests (ทั้งหมด)
+            const requests = allRequests;
+            
+            // 3.2 ข้อมูล Alerts (คำขอฝากที่ยอดเกินกระเป๋า และกำลัง PENDING)
+            const adminAlertJobs = allRequests.filter(item => item.is_alert);
+
+            // 3.3 ข้อมูล Jobs (งานที่มีผู้รับงานไปแล้ว)
+            const jobs = allRequests.filter(item => item.receiver !== null);
+
+            res.json({
+                success: true,
+                data: {
+                    requests: requests, // คำขอทั้งหมด
+                    jobs: jobs,         // การรับงาน
+                    adminAlertJobs: adminAlertJobs, // งานที่เกินกำหนด
+                    summary: summaryData // ยอดรวม
+                }
+            });
+
+        } finally {
+            client.release();
+        }
+
+    } catch (err) {
+        console.error("P2P Report API Error:", err);
+        res.status(500).json({ success: false, message: 'Server Error: ' + err.message });
+    }
+});
 // ==========================================
 // 🌟 API P2P ฝั่งถอนเงิน สิ้นสุด
 // ==========================================
