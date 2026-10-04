@@ -8788,6 +8788,85 @@ app.put('/api/chat/clear/:userId', async (req, res) => {
   }
 });
 
+
+
+// ==========================================
+// 🚀 API: ฝั่ง ADMIN จัดการ Chat และดึงข้อมูลอัจฉริยะ
+// ==========================================
+
+// 1. API: ดึงรายชื่อ User ทั้งหมดที่มีการแชท (เรียงตามคนล่าสุด) พร้อมนับข้อความที่ยังไม่อ่าน
+app.get('/api/admin/chats', async (req, res) => {
+  try {
+    const result = await pgPool.query(`
+      SELECT 
+        user_id,
+        MAX(created_at) as last_activity,
+        SUM(CASE WHEN is_read = false AND sender_type = 'user' THEN 1 ELSE 0 END) as unread_count,
+        (SELECT message_text FROM chat_messages cm2 WHERE cm2.user_id = chat_messages.user_id ORDER BY created_at DESC LIMIT 1) as latest_message
+      FROM chat_messages
+      GROUP BY user_id
+      ORDER BY last_activity DESC
+    `);
+    res.json(result.rows);
+  } catch (error) {
+    console.error("Error fetching admin chats:", error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// 2. API: ดึงประวัติแชทของ User ที่เลือก และอัปเดตสถานะว่า "อ่านแล้ว"
+app.get('/api/admin/chats/:userId', async (req, res) => {
+  const { userId } = req.params;
+  try {
+    // อัปเดตข้อความของ user คนนี้ว่า Admin อ่านแล้ว
+    await pgPool.query(`UPDATE chat_messages SET is_read = true WHERE user_id = $1 AND sender_type = 'user'`, [userId]);
+    
+    // ดึงประวัติ
+    const result = await pgPool.query(`SELECT * FROM chat_messages WHERE user_id = $1 ORDER BY created_at ASC`, [userId]);
+    res.json(result.rows);
+  } catch (error) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// 3. API: Admin ส่งข้อความตอบกลับ
+app.post('/api/admin/chats/send', async (req, res) => {
+  const { user_id, message_text } = req.body;
+  try {
+    await pgPool.query(
+      `INSERT INTO chat_messages (user_id, sender_type, message_text, is_read) VALUES ($1, 'admin', $2, true)`,
+      [user_id, message_text]
+    );
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// 🤖 4. API อัจฉริยะ: ดึงข้อมูล P2P ล่าสุดของ User คนนี้ (ฝากเงิน)
+app.get('/api/admin/chats/:userId/smart-p2p', async (req, res) => {
+  const { userId } = req.params;
+  try {
+    // ⚠️ หมายเหตุ: ปรับชื่อตาราง 'p2p_transactions' และชื่อฟิลด์ให้ตรงกับตารางจริงของคุณวิททายะนะครับ
+    // ตัวอย่างนี้สมมติว่าตารางชื่อ p2p_transactions และมีฟิลด์ status, amount, handler_username
+    const result = await pgPool.query(`
+      SELECT id, amount, status, handler_username, created_at 
+      FROM p2p_transactions 
+      WHERE user_id = $1 AND type = 'deposit'
+      ORDER BY created_at DESC 
+      LIMIT 1
+    `, [userId]);
+
+    if (result.rows.length > 0) {
+      res.json({ found: true, data: result.rows[0] });
+    } else {
+      res.json({ found: false });
+    }
+  } catch (error) {
+    console.error("Smart API Error:", error);
+    res.json({ found: false }); // ถ้า Error ให้ถือว่าหาไม่เจอ จะได้ไม่พัง
+  }
+});
 // ==========================================
 // 🚀 Start Server
 // ==========================================
