@@ -8678,7 +8678,102 @@ app.get('/api/admin/dashboard/lottery-summary', async (req, res) => {
 // ==========================================
 // 🚀 1. API: ข้อมูลผู้ใช้งานและสกุลเงิน over view Dashboard สิ้นสุด
 // ==========================================
+// ไฟล์เส้นทาง API (เช่น routes/chat.js หรือ index.js)
 
+app.get('/api/chat/auto-responses', async (req, res) => {
+  try {
+    // โค้ดสำหรับดึงข้อมูล (ตัวอย่างนี้ใช้แบบ SQL Query ทั่วไป)
+    // หากคุณใช้ Prisma, Sequelize หรือไลบรารีอื่น ปรับ query ตามระบบของคุณได้เลยครับ
+    const result = await db.query('SELECT * FROM chat_auto_responses WHERE is_active = true');
+    
+    // แปลง keywords จาก String ('ฝากเงิน,ไม่เข้า') ให้กลายเป็น Array (['ฝากเงิน', 'ไม่เข้า'])
+    const formattedData = result.rows.map(row => ({
+      id: row.id,
+      category: row.category_name,
+      keywords: row.keywords.split(',').map(kw => kw.trim()), // หั่นคำด้วยลูกน้ำ
+      reply: row.reply_text,
+      requires_ticket: row.requires_ticket
+    }));
+
+    res.json(formattedData);
+  } catch (error) {
+    console.error("Error fetching auto responses:", error);
+    res.status(500).json({ error: 'Internal Server Error' });
+  }
+});
+
+// เส้น API สำหรับบันทึกข้อความจาก User และตอบกลับด้วย Auto-Response
+app.post('/api/chat/send', async (req, res) => {
+  const { user_id, message_text } = req.body;
+
+  try {
+    // 1. บันทึกข้อความของ User ลง DB ทันที
+    await db.query(
+      `INSERT INTO chat_messages (user_id, sender_type, message_text) VALUES ($1, 'user', $2)`,
+      [user_id, message_text]
+    );
+
+    // 2. ดึง Auto-Responses ทั้งหมดมาเช็คเงื่อนไข
+    const autoRespResult = await db.query('SELECT * FROM chat_auto_responses WHERE is_active = true');
+    let botReply = 'ระบบได้รับข้อความของคุณแล้ว Admin จะเข้ามาตอบกลับในไม่ช้าครับ';
+    let requiresTicket = false;
+
+    // เช็ค Keyword
+    for (const row of autoRespResult.rows) {
+      const keywords = row.keywords.split(',').map(kw => kw.trim());
+      if (keywords.some(kw => message_text.includes(kw))) {
+        botReply = row.reply_text;
+        requiresTicket = row.requires_ticket;
+        break;
+      }
+    }
+
+    // 3. บันทึกคำตอบของระบบ (Auto-Response) ลง DB ด้วย (ในชื่อ admin/bot)
+    await db.query(
+      `INSERT INTO chat_messages (user_id, sender_type, message_text) VALUES ($1, 'admin', $2)`,
+      [user_id, botReply]
+    );
+
+    // (ถ้า requiresTicket เป็น true สามารถสร้างระบบแจ้งเตือน Admin พิเศษได้ที่นี่)
+
+    // 4. ส่งคำตอบกลับไปให้ Frontend แสดงผลทันที
+    res.json({ reply: botReply });
+
+  } catch (error) {
+    console.error("Chat Send Error:", error);
+    res.status(500).json({ error: 'Error sending message' });
+  }
+});
+
+// 🌟 1. (แก้ไข API เดิม) เส้นดึงประวัติแชท -> ดึงเฉพาะที่ยังไม่โดน User ลบ
+app.get('/api/chat/history/:userId', async (req, res) => {
+  const { userId } = req.params;
+  try {
+    const result = await db.query(
+      // 👇 เพิ่มเงื่อนไข AND is_deleted_by_user = false
+      `SELECT * FROM chat_messages WHERE user_id = $1 AND is_deleted_by_user = false ORDER BY created_at ASC`,
+      [userId]
+    );
+    res.json(result.rows);
+  } catch (error) {
+    res.status(500).json({ error: 'Error fetching history' });
+  }
+});
+
+// 🌟 2. (เพิ่ม API ใหม่) เส้นสำหรับเคลียร์แชท (Soft Delete)
+app.put('/api/chat/clear/:userId', async (req, res) => {
+  const { userId } = req.params;
+  try {
+    // เปลี่ยนสถานะ is_deleted_by_user เป็น true สำหรับทุกข้อความของ User คนนี้
+    await db.query(
+      `UPDATE chat_messages SET is_deleted_by_user = true WHERE user_id = $1`,
+      [userId]
+    );
+    res.json({ success: true, message: 'Chat cleared for user' });
+  } catch (error) {
+    res.status(500).json({ error: 'Error clearing chat' });
+  }
+});
 
 // ==========================================
 // 🚀 Start Server

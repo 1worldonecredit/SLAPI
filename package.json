@@ -1,5 +1,5 @@
 {
-  "name": "slapi",
+  "name": "api_booking",
   "version": "1.0.0",
   "description": "",
   "main": "server.js",
