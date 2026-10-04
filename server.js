@@ -8701,42 +8701,69 @@ app.get('/api/chat/auto-responses', async (req, res) => {
     res.status(500).json({ error: 'Internal Server Error' });
   }
 });
+// ==========================================
+// 🚀 API: ระบบ Chat ร้องเรียน & Auto-Response
+// ==========================================
 
-// เส้น API สำหรับบันทึกข้อความจาก User และตอบกลับด้วย Auto-Response
+// 🌟 1. เส้น API: ดึงประวัติแชทที่ยังไม่ถูกลบโดย User
+app.get('/api/chat/history/:userId', async (req, res) => {
+  const { userId } = req.params;
+  try {
+    // ดึงเฉพาะข้อความของ User นี้ และ is_deleted_by_user ต้องเป็น false
+    const result = await db.query(
+      `SELECT * FROM chat_messages WHERE user_id = $1 AND is_deleted_by_user = false ORDER BY created_at ASC`,
+      [userId]
+    );
+    
+    // (หมายเหตุ: ถ้าคุณใช้ MS SQL อาจต้องใช้ result.recordset แทน result.rows)
+    const messages = result.rows || result.recordset || [];
+    res.json(messages);
+    
+  } catch (error) {
+    console.error("Error fetching chat history:", error);
+    res.status(500).json({ error: 'Error fetching history' });
+  }
+});
+
+
+// 🌟 2. เส้น API: บันทึกข้อความที่ User ส่งมา และประมวลผล Auto-Response
 app.post('/api/chat/send', async (req, res) => {
   const { user_id, message_text } = req.body;
 
   try {
-    // 1. บันทึกข้อความของ User ลง DB ทันที
+    // 2.1 บันทึกข้อความที่ User พิมพ์ส่งมาลง Database ทันที
     await db.query(
       `INSERT INTO chat_messages (user_id, sender_type, message_text) VALUES ($1, 'user', $2)`,
       [user_id, message_text]
     );
 
-    // 2. ดึง Auto-Responses ทั้งหมดมาเช็คเงื่อนไข
+    // 2.2 ดึงข้อมูลกฎ Auto-Response ทั้งหมดที่ Admin ตั้งไว้จาก Database
     const autoRespResult = await db.query('SELECT * FROM chat_auto_responses WHERE is_active = true');
+    const autoResponses = autoRespResult.rows || autoRespResult.recordset || [];
+    
     let botReply = 'ระบบได้รับข้อความของคุณแล้ว Admin จะเข้ามาตอบกลับในไม่ช้าครับ';
     let requiresTicket = false;
 
-    // เช็ค Keyword
-    for (const row of autoRespResult.rows) {
+    // 2.3 วนลูปเช็ค Keyword ทีละรายการ
+    for (const row of autoResponses) {
+      // หั่นคำค้นหาด้วยลูกน้ำ (เช่น 'ฝากเงิน,ไม่เข้า' กลายเป็น ['ฝากเงิน', 'ไม่เข้า'])
       const keywords = row.keywords.split(',').map(kw => kw.trim());
+      
+      // ถ้าคำที่ลูกค้าพิมพ์มา มีคำใดคำหนึ่งตรงกับ Keyword
       if (keywords.some(kw => message_text.includes(kw))) {
-        botReply = row.reply_text;
+        botReply = row.reply_text; // เอาคำตอบที่ตั้งไว้มาใช้
         requiresTicket = row.requires_ticket;
-        break;
+        break; // หยุดค้นหาต่อ
       }
     }
 
-    // 3. บันทึกคำตอบของระบบ (Auto-Response) ลง DB ด้วย (ในชื่อ admin/bot)
+    // 2.4 บันทึกคำตอบของระบบ (Auto-Response) ลง Database ในชื่อ 'admin'
     await db.query(
       `INSERT INTO chat_messages (user_id, sender_type, message_text) VALUES ($1, 'admin', $2)`,
       [user_id, botReply]
     );
 
-    // (ถ้า requiresTicket เป็น true สามารถสร้างระบบแจ้งเตือน Admin พิเศษได้ที่นี่)
-
-    // 4. ส่งคำตอบกลับไปให้ Frontend แสดงผลทันที
+    // 2.5 ส่งคำตอบนั้นกลับไปให้ Frontend (React) แสดงผล
     res.json({ reply: botReply });
 
   } catch (error) {
@@ -8745,22 +8772,8 @@ app.post('/api/chat/send', async (req, res) => {
   }
 });
 
-// 🌟 1. (แก้ไข API เดิม) เส้นดึงประวัติแชท -> ดึงเฉพาะที่ยังไม่โดน User ลบ
-app.get('/api/chat/history/:userId', async (req, res) => {
-  const { userId } = req.params;
-  try {
-    const result = await db.query(
-      // 👇 เพิ่มเงื่อนไข AND is_deleted_by_user = false
-      `SELECT * FROM chat_messages WHERE user_id = $1 AND is_deleted_by_user = false ORDER BY created_at ASC`,
-      [userId]
-    );
-    res.json(result.rows);
-  } catch (error) {
-    res.status(500).json({ error: 'Error fetching history' });
-  }
-});
 
-// 🌟 2. (เพิ่ม API ใหม่) เส้นสำหรับเคลียร์แชท (Soft Delete)
+// 🌟 3. เส้น API: ล้างประวัติแชท (Soft Delete - ซ่อนจากฝั่ง User แต่ Admin ยังเห็น)
 app.put('/api/chat/clear/:userId', async (req, res) => {
   const { userId } = req.params;
   try {
@@ -8770,7 +8783,9 @@ app.put('/api/chat/clear/:userId', async (req, res) => {
       [userId]
     );
     res.json({ success: true, message: 'Chat cleared for user' });
+    
   } catch (error) {
+    console.error("Error clearing chat:", error);
     res.status(500).json({ error: 'Error clearing chat' });
   }
 });
