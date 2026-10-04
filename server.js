@@ -8793,18 +8793,19 @@ app.put('/api/chat/clear/:userId', async (req, res) => {
 // ==========================================
 // 🚀 API: ฝั่ง ADMIN จัดการ Chat และดึงข้อมูลอัจฉริยะ
 // ==========================================
-
-// 1. API: ดึงรายชื่อ User ทั้งหมดที่มีการแชท (เรียงตามคนล่าสุด) พร้อมนับข้อความที่ยังไม่อ่าน
+// 1. API: ดึงรายชื่อ User พร้อมชื่อ Username
 app.get('/api/admin/chats', async (req, res) => {
   try {
     const result = await pgPool.query(`
       SELECT 
-        user_id,
-        MAX(created_at) as last_activity,
-        SUM(CASE WHEN is_read = false AND sender_type = 'user' THEN 1 ELSE 0 END) as unread_count,
-        (SELECT message_text FROM chat_messages cm2 WHERE cm2.user_id = chat_messages.user_id ORDER BY created_at DESC LIMIT 1) as latest_message
-      FROM chat_messages
-      GROUP BY user_id
+        cm.user_id,
+        ci.username, -- ดึง Username จากตาราง core_identities
+        MAX(cm.created_at) as last_activity,
+        SUM(CASE WHEN cm.is_read = false AND cm.sender_type = 'user' THEN 1 ELSE 0 END) as unread_count,
+        (SELECT message_text FROM chat_messages cm2 WHERE cm2.user_id = cm.user_id ORDER BY created_at DESC LIMIT 1) as latest_message
+      FROM chat_messages cm
+      LEFT JOIN core_identities ci ON cm.user_id = ci.id
+      GROUP BY cm.user_id, ci.username
       ORDER BY last_activity DESC
     `);
     res.json(result.rows);
