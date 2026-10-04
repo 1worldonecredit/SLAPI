@@ -8790,28 +8790,25 @@ app.put('/api/chat/clear/:userId', async (req, res) => {
 
 
 
-// ==========================================
-// 🚀 API: ฝั่ง ADMIN จัดการ Chat และดึงข้อมูลอัจฉริยะ
-// ==========================================
 // 1. API: ดึงรายชื่อ User พร้อมชื่อ Username
 app.get('/api/admin/chats', async (req, res) => {
   try {
     const result = await pgPool.query(`
       SELECT 
         cm.user_id,
-        ci.username, -- ดึง Username จากตาราง core_identities
+        u.username, -- ดึง Username จากตาราง users
         MAX(cm.created_at) as last_activity,
         SUM(CASE WHEN cm.is_read = false AND cm.sender_type = 'user' THEN 1 ELSE 0 END) as unread_count,
         (SELECT message_text FROM chat_messages cm2 WHERE cm2.user_id = cm.user_id ORDER BY created_at DESC LIMIT 1) as latest_message
       FROM chat_messages cm
-      LEFT JOIN core_identities ci ON cm.user_id = ci.id
-      GROUP BY cm.user_id, ci.username
+      LEFT JOIN users u ON cm.user_id = u.user_id -- 🌟 แก้ไข JOIN ให้ตรงกับตารางของคุณ
+      GROUP BY cm.user_id, u.username
       ORDER BY last_activity DESC
     `);
-    res.json(result.rows);
+    res.json(result.rows || []);
   } catch (error) {
     console.error("Error fetching admin chats:", error);
-    res.status(500).json({ error: 'Server error' });
+    res.status(500).json([]); // ส่ง Array ว่างกลับไปเพื่อป้องกันหน้าจอ React พัง
   }
 });
 
