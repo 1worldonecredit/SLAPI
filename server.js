@@ -8704,20 +8704,20 @@ app.get('/api/chat/auto-responses', async (req, res) => {
 // ==========================================
 // 🚀 API: ระบบ Chat ร้องเรียน & Auto-Response
 // ==========================================
+// ==========================================
+// 🚀 API: ระบบ Chat ร้องเรียน & Auto-Response
+// ==========================================
 
 // 🌟 1. เส้น API: ดึงประวัติแชทที่ยังไม่ถูกลบโดย User
 app.get('/api/chat/history/:userId', async (req, res) => {
   const { userId } = req.params;
   try {
-    // ดึงเฉพาะข้อความของ User นี้ และ is_deleted_by_user ต้องเป็น false
-    const result = await db.query(
+    const result = await pgPool.query(
       `SELECT * FROM chat_messages WHERE user_id = $1 AND is_deleted_by_user = false ORDER BY created_at ASC`,
       [userId]
     );
     
-    // (หมายเหตุ: ถ้าคุณใช้ MS SQL อาจต้องใช้ result.recordset แทน result.rows)
-    const messages = result.rows || result.recordset || [];
-    res.json(messages);
+    res.json(result.rows || []);
     
   } catch (error) {
     console.error("Error fetching chat history:", error);
@@ -8732,33 +8732,31 @@ app.post('/api/chat/send', async (req, res) => {
 
   try {
     // 2.1 บันทึกข้อความที่ User พิมพ์ส่งมาลง Database ทันที
-    await db.query(
+    await pgPool.query(
       `INSERT INTO chat_messages (user_id, sender_type, message_text) VALUES ($1, 'user', $2)`,
       [user_id, message_text]
     );
 
     // 2.2 ดึงข้อมูลกฎ Auto-Response ทั้งหมดที่ Admin ตั้งไว้จาก Database
-    const autoRespResult = await db.query('SELECT * FROM chat_auto_responses WHERE is_active = true');
-    const autoResponses = autoRespResult.rows || autoRespResult.recordset || [];
+    const autoRespResult = await pgPool.query('SELECT * FROM chat_auto_responses WHERE is_active = true');
+    const autoResponses = autoRespResult.rows || [];
     
     let botReply = 'ระบบได้รับข้อความของคุณแล้ว Admin จะเข้ามาตอบกลับในไม่ช้าครับ';
     let requiresTicket = false;
 
     // 2.3 วนลูปเช็ค Keyword ทีละรายการ
     for (const row of autoResponses) {
-      // หั่นคำค้นหาด้วยลูกน้ำ (เช่น 'ฝากเงิน,ไม่เข้า' กลายเป็น ['ฝากเงิน', 'ไม่เข้า'])
       const keywords = row.keywords.split(',').map(kw => kw.trim());
       
-      // ถ้าคำที่ลูกค้าพิมพ์มา มีคำใดคำหนึ่งตรงกับ Keyword
       if (keywords.some(kw => message_text.includes(kw))) {
-        botReply = row.reply_text; // เอาคำตอบที่ตั้งไว้มาใช้
+        botReply = row.reply_text; 
         requiresTicket = row.requires_ticket;
-        break; // หยุดค้นหาต่อ
+        break; 
       }
     }
 
     // 2.4 บันทึกคำตอบของระบบ (Auto-Response) ลง Database ในชื่อ 'admin'
-    await db.query(
+    await pgPool.query(
       `INSERT INTO chat_messages (user_id, sender_type, message_text) VALUES ($1, 'admin', $2)`,
       [user_id, botReply]
     );
@@ -8773,12 +8771,12 @@ app.post('/api/chat/send', async (req, res) => {
 });
 
 
-// 🌟 3. เส้น API: ล้างประวัติแชท (Soft Delete - ซ่อนจากฝั่ง User แต่ Admin ยังเห็น)
+// 🌟 3. เส้น API: ล้างประวัติแชท (Soft Delete)
 app.put('/api/chat/clear/:userId', async (req, res) => {
   const { userId } = req.params;
   try {
     // เปลี่ยนสถานะ is_deleted_by_user เป็น true สำหรับทุกข้อความของ User คนนี้
-    await db.query(
+    await pgPool.query(
       `UPDATE chat_messages SET is_deleted_by_user = true WHERE user_id = $1`,
       [userId]
     );
