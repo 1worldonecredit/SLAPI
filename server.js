@@ -8868,33 +8868,20 @@ app.get('/api/admin/chats/:userId/smart-p2p', async (req, res) => {
 
 
 // ==========================================
-// 🚀 API: Customer Insight 360 (ดึงข้อมูลเชิงลึกลูกค้าสำหรับ Admin)
+// 🚀 1. API: Customer Insight 360 (อัปเดตเพิ่มดึง is_locked และ provider_id)
 // ==========================================
 app.get('/api/admin/customer-insight/:userId', async (req, res) => {
   const { userId } = req.params;
-  
   try {
-    // 1. ข้อมูลผู้ใช้ & กระเป๋าเงิน (users JOIN wallets)
     const userRes = await pgPool.query(`
-      SELECT 
-        u.user_id, u.username, u.created_at, u.country, u.currency_code,
-        w.balance as wallet_balance
-      FROM users u
-      LEFT JOIN wallets w ON u.user_id = w.user_id
-      WHERE u.user_id = $1
+      SELECT u.user_id, u.username, u.created_at, u.country, u.currency_code, u.is_locked, w.balance as wallet_balance
+      FROM users u LEFT JOIN wallets w ON u.user_id = w.user_id WHERE u.user_id = $1
     `, [userId]);
-    
     if (userRes.rows.length === 0) return res.status(404).json({ error: 'User not found' });
     const user = userRes.rows[0];
 
-    // คำนวณอายุสมาชิก (วัน/เดือน)
-    const createdDate = new Date(user.created_at);
-    const diffDays = Math.ceil(Math.abs(new Date() - createdDate) / (1000 * 60 * 60 * 24));
-
-    // 2. จำนวนทีมงาน (referrals)
+    const diffDays = Math.ceil(Math.abs(new Date() - new Date(user.created_at)) / (1000 * 60 * 60 * 24));
     const teamRes = await pgPool.query(`SELECT COUNT(*) as team_count FROM users WHERE referrer_username = $1`, [user.username]);
-    
-    // 3. สรุป P2P (p2p_requests) - ฝาก/ถอน ที่สำเร็จและไม่สำเร็จ
     const p2pStatsRes = await pgPool.query(`
       SELECT 
         COUNT(CASE WHEN request_type = 'DEPOSIT' AND status = 'COMPLETED' THEN 1 END) as deposit_success,
@@ -8904,47 +8891,71 @@ app.get('/api/admin/customer-insight/:userId', async (req, res) => {
       FROM p2p_requests WHERE requester_id = $1
     `, [userId]);
 
-    // 4. รายการ P2P ล่าสุด 5 รายการ (โชว์ผู้รับงาน provider_id)
+    // 🌟 เปลี่ยน p.id เป็น p.request_id ตามตารางของคุณ และดึง provider_id มาด้วย
     const p2pRecentRes = await pgPool.query(`
-      SELECT p.request_type, p.amount, p.status, p.created_at, u.username as provider_name
-      FROM p2p_requests p
-      LEFT JOIN users u ON p.provider_id = u.user_id
-      WHERE p.requester_id = $1
-      ORDER BY p.created_at DESC LIMIT 5
+      SELECT p.request_id, p.request_type, p.amount, p.status, p.created_at, p.provider_id, u.username as provider_name
+      FROM p2p_requests p LEFT JOIN users u ON p.provider_id = u.user_id
+      WHERE p.requester_id = $1 ORDER BY p.created_at DESC LIMIT 5
     `, [userId]);
 
-    // 5. สรุปยอดซื้อหวย (lottery_orders & yeeki_orders)
-    const lotteryRes = await pgPool.query(`
-      SELECT 
-        COALESCE(SUM(total_amount), 0) as total_purchase,
-        COALESCE(SUM(CASE WHEN date_trunc('month', created_at) = date_trunc('month', CURRENT_DATE) THEN total_amount ELSE 0 END), 0) as month_purchase
-      FROM lottery_orders WHERE user_id = $1
-    `, [userId]);
-    
-    const yeekiRes = await pgPool.query(`
-      SELECT COALESCE(SUM(total_amount), 0) as total_purchase FROM yeeki_orders WHERE user_id = $1
-    `, [userId]);
+    const lotteryRes = await pgPool.query(`SELECT COALESCE(SUM(total_amount), 0) as total_purchase, COALESCE(SUM(CASE WHEN date_trunc('month', created_at) = date_trunc('month', CURRENT_DATE) THEN total_amount ELSE 0 END), 0) as month_purchase FROM lottery_orders WHERE user_id = $1`, [userId]);
+    const yeekiRes = await pgPool.query(`SELECT COALESCE(SUM(total_amount), 0) as total_purchase FROM yeeki_orders WHERE user_id = $1`, [userId]);
 
-    // รวมข้อมูลส่งให้หน้าบ้าน
     res.json({
-      profile: {
-        ...user,
-        membership_days: diffDays,
-        membership_months: Math.floor(diffDays / 30),
-        team_count: teamRes.rows[0].team_count
-      },
+      profile: { ...user, membership_days: diffDays, membership_months: Math.floor(diffDays / 30), team_count: teamRes.rows[0].team_count },
       p2p_stats: p2pStatsRes.rows[0],
       recent_p2p: p2pRecentRes.rows,
-      purchase_stats: {
-        total_all_time: parseFloat(lotteryRes.rows[0].total_purchase) + parseFloat(yeekiRes.rows[0].total_purchase),
-        lottery_this_month: parseFloat(lotteryRes.rows[0].month_purchase)
-      }
+      purchase_stats: { total_all_time: parseFloat(lotteryRes.rows[0].total_purchase) + parseFloat(yeekiRes.rows[0].total_purchase), lottery_this_month: parseFloat(lotteryRes.rows[0].month_purchase) }
     });
+  } catch (error) { res.status(500).json({ error: 'Server error' }); }
+});
 
-  } catch (error) {
-    console.error("Insight Error:", error);
-    res.status(500).json({ error: 'Server error' });
-  }
+
+// ==========================================
+// 🚀 2. API: สำหรับล็อค/ปลดล็อค บัญชีผู้ใช้ พร้อมส่งแชทอัตโนมัติ
+// ==========================================
+app.post('/api/admin/users/:userId/toggle-lock', async (req, res) => {
+  const { userId } = req.params;
+  const { is_locked } = req.body; // true = ต้องการล็อค, false = ปลดล็อค
+  try {
+    // อัปเดตตาราง users (แปลง boolean เป็น bit(1) สำหรับ Postgres)
+    const bitVal = is_locked ? '1' : '0';
+    await pgPool.query(`UPDATE users SET is_locked = $1::bit(1) WHERE user_id = $2`, [bitVal, userId]);
+
+    // สร้างข้อความแชทอัตโนมัติ
+    const messageText = is_locked 
+      ? `⚠️ ระบบได้ทำการระงับการใช้งานบัญชีของคุณชั่วคราว (ห้ามถอนเงิน) เนื่องจากพบปัญหาที่ต้องดำเนินการตรวจสอบเกี่ยวกับการร้องเรียน/การทำรายการ P2P กรุณารอการตรวจสอบจากเจ้าหน้าที่ครับ`
+      : `✅ ระบบได้ทำการปลดล็อคบัญชีของคุณเรียบร้อยแล้ว คุณสามารถใช้งานได้ตามปกติครับ ขออภัยในความไม่สะดวก`;
+
+    await pgPool.query(
+      `INSERT INTO chat_messages (user_id, sender_type, message_text) VALUES ($1, 'admin', $2)`,
+      [userId, messageText]
+    );
+
+    res.json({ success: true, messageText });
+  } catch (error) { res.status(500).json({ error: 'Server error' }); }
+});
+
+
+// ==========================================
+// 🚀 3. API: เจาะดูรายละเอียดคำขอ P2P ที่มีปัญหา (ดูผู้รับงาน)
+// ==========================================
+app.get('/api/admin/p2p-detail/:requestId', async (req, res) => {
+  const { requestId } = req.params;
+  try {
+    const result = await pgPool.query(`
+      SELECT 
+        p.*, 
+        u.username as provider_name, u.is_locked as provider_is_locked, w.balance as provider_balance
+      FROM p2p_requests p
+      LEFT JOIN users u ON p.provider_id = u.user_id
+      LEFT JOIN wallets w ON u.user_id = w.user_id
+      WHERE p.request_id = $1
+    `, [requestId]);
+    
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Not found' });
+    res.json(result.rows[0]);
+  } catch (error) { res.status(500).json({ error: 'Server error' }); }
 });
 // ==========================================
 // 🚀 Start Server
