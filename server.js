@@ -8865,6 +8865,87 @@ app.get('/api/admin/chats/:userId/smart-p2p', async (req, res) => {
     res.json({ found: false }); // ถ้า Error ให้ถือว่าหาไม่เจอ จะได้ไม่พัง
   }
 });
+
+
+// ==========================================
+// 🚀 API: Customer Insight (ดึงข้อมูล 360 องศาของลูกค้า)
+// ==========================================
+app.get('/api/admin/customer-insight/:userId', async (req, res) => {
+  const { userId } = req.params;
+  
+  try {
+    // 1. ดึงข้อมูลพื้นฐานจากตาราง users
+    const userResult = await pgPool.query(`
+      SELECT user_id, username, created_at, wallet_balance, country, currency_code 
+      FROM users 
+      WHERE user_id = $1
+    `, [userId]);
+    const userData = userResult.rows[0];
+
+    if (!userData) {
+      return res.status(404).json({ error: 'ไม่พบผู้ใช้งาน' });
+    }
+
+    // 2. คำนวณอายุสมาชิก (เป็นวัน)
+    const createdDate = new Date(userData.created_at);
+    const currentDate = new Date();
+    const diffTime = Math.abs(currentDate - createdDate);
+    const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+    
+    const membershipDuration = {
+      days: diffDays,
+      months: Math.floor(diffDays / 30)
+    };
+
+    // 3. ดึงจำนวนทีมงาน (คนที่แนะนำมา)
+    const teamResult = await pgPool.query(`
+      SELECT COUNT(*) as team_count 
+      FROM users 
+      WHERE referrer_username = $1
+    `, [userData.username]);
+    const teamCount = teamResult.rows[0].team_count;
+
+    // 4. สรุปยอดซื้อทั้งหมด (รวมหวยทุกประเภท - สมมติใช้ lottery_orders)
+    // 🌟 หมายเหตุ: คุณวิททายะอาจต้องปรับชื่อตาราง 'lottery_orders' และฟิลด์ 'total_price' ตามฐานข้อมูลจริงนะครับ
+    const purchaseResult = await pgPool.query(`
+      SELECT 
+        COALESCE(SUM(total_price), 0) as total_purchase,
+        COALESCE(SUM(CASE WHEN date_trunc('month', created_at) = date_trunc('month', CURRENT_DATE) THEN total_price ELSE 0 END), 0) as month_purchase
+      FROM lottery_orders
+      WHERE user_id = $1
+    `, [userId]);
+    const purchases = purchaseResult.rows[0];
+
+    // 5. ประวัติ ฝาก/ถอน P2P ล่าสุด 5 รายการ
+    // 🌟 หมายเหตุ: กรุณาปรับตาราง 'p2p_requests' และฟิลด์ต่างๆ ให้ตรงกับของคุณนะครับ
+    const p2pResult = await pgPool.query(`
+      SELECT id, type, amount, status, handler_username, created_at
+      FROM p2p_requests
+      WHERE user_id = $1
+      ORDER BY created_at DESC
+      LIMIT 5
+    `, [userId]);
+    
+    // รวมข้อมูลส่งกลับ
+    res.json({
+      success: true,
+      data: {
+        profile: userData,
+        duration: membershipDuration,
+        team_size: teamCount,
+        purchases: {
+          total: purchases.total_purchase,
+          this_month: purchases.month_purchase
+        },
+        recent_p2p: p2pResult.rows
+      }
+    });
+
+  } catch (error) {
+    console.error("Customer Insight Error:", error);
+    res.status(500).json({ error: 'ไม่สามารถดึงข้อมูลเชิงลึกได้' });
+  }
+});
 // ==========================================
 // 🚀 Start Server
 // ==========================================
