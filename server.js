@@ -3553,7 +3553,6 @@ app.get('/api/admin/thai-lottery/winners/:round_id', async (req, res) => {
         res.status(500).json({ success: false, message: err.message });
     }
 });
-
 // ==========================================
 // 🌟 [ใหม่] API: ยืนยันการโอนเงินเข้า Wallet เฉพาะรายการที่ Admin เลือก (Checkbox)
 // ==========================================
@@ -3568,28 +3567,37 @@ app.post('/api/admin/thai-lottery/process-payouts', async (req, res) => {
         await client.query('BEGIN');
 
         for (const itemId of order_item_ids) {
-            // 1. ดึงข้อมูลของบิลนี้ ว่ายอดเงินเท่าไหร่ ใครเป็นเจ้าของ
-           const itemRes = await client.query(`
+            // 1. ดึงข้อมูลของบิลนี้ (แก้ไขตารางจาก Yeeki เป็น Lottery ให้ถูกต้อง)
+            const itemRes = await client.query(`
                 SELECT oi.prize_amount, o.user_id, oi.status
-                FROM Yeeki_Order_Items oi
-                JOIN Yeeki_Orders o ON oi.order_id = o.order_id
+                FROM Lottery_Order_Items oi
+                JOIN Lottery_Orders o ON oi.order_id = o.order_id
                 WHERE oi.item_id = $1 AND (oi.status = 'ชนะ' OR oi.status = 'Win')
             `, [itemId]);
 
             if (itemRes.rows.length > 0) {
                 const { prize_amount, user_id } = itemRes.rows[0];
 
-                // 2. เติมเงินเข้า Wallet
-               await client.query(`UPDATE Yeeki_Order_Items SET status = 'Paid' WHERE item_id = $1`, [itemId]);
+                // 2. เติมเงินเข้า Wallet (อัปเดตยอดเงินจริงๆ เข้าตาราง users)
+                // หมายเหตุ: หากระบบคุณอิงยอดเงินจากตาราง wallets เป็นหลัก ให้เปลี่ยนคำว่า users เป็น wallets และ wallet_balance เป็น balance
+                await client.query(`
+                    UPDATE users 
+                    SET wallet_balance = COALESCE(wallet_balance, 0) + $1 
+                    WHERE user_id = $2
+                `, [prize_amount, user_id]);
                 
-                // 3. บันทึกประวัติ Transaction
+                // 3. บันทึกประวัติ Transaction (เพิ่มการจัดการโซนเวลาให้เป็น Asia/Bangkok โดยเฉพาะ)
                 await client.query(`
                     INSERT INTO Transactions (user_id, transaction_type, title, amount, status, created_at)
-                    VALUES ($1, 'Reward', 'ถูกรางวัลหวยไทย', $2, 'Completed', CURRENT_TIMESTAMP)
+                    VALUES ($1, 'Reward', 'ถูกรางวัลหวยไทย', $2, 'Completed', CURRENT_TIMESTAMP AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Bangkok')
                 `, [user_id, prize_amount]);
 
                 // 4. เปลี่ยนสถานะบิลเป็น Paid (จ่ายแล้ว)
-                await client.query(`UPDATE Lottery_Order_Items SET status = 'Paid' WHERE item_id = $1`, [itemId]);
+                await client.query(`
+                    UPDATE Lottery_Order_Items 
+                    SET status = 'Paid' 
+                    WHERE item_id = $1
+                `, [itemId]);
             }
         }
         
