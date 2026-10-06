@@ -2709,7 +2709,6 @@ app.get('/api/admin/settings', async (req, res) => {
         res.status(500).json({ success: false, message: err.message });
     }
 });
-
 // ==========================================
 // 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🌟 API: บันทึกการตั้งค่าระบบและเวลา (POST)
@@ -2717,8 +2716,14 @@ app.get('/api/admin/settings', async (req, res) => {
 app.post('/api/admin/settings', async (req, res) => {
     const { close_time, open_time, draw_time, is_sales_open, is_auto_draw, auto_draw_percent } = req.body;
     
-    // พิมพ์ค่าที่รับมาออกหน้าจอดำๆ เพื่อเช็คข้อมูล
     console.log("📥 ข้อมูลที่หน้าเว็บส่งมาบันทึก:", req.body); 
+
+    // 🌟 ดักจับค่า 0 ให้ถูกต้อง (ป้องกัน 0 || 50 กลายเป็น 50)
+    let finalPercent = 50;
+    if (auto_draw_percent !== undefined && auto_draw_percent !== null && auto_draw_percent !== '') {
+        finalPercent = parseInt(auto_draw_percent);
+        if (isNaN(finalPercent)) finalPercent = 50;
+    }
 
     try {
         await pgPool.query(`
@@ -2733,12 +2738,12 @@ app.post('/api/admin/settings', async (req, res) => {
                     last_updated = CURRENT_TIMESTAMP
                 WHERE id = 1
             `, [
-                close_time, 
-                open_time, 
-                draw_time, 
+                close_time || '17:00', // 🌟 ป้องกันกรณี Frontend ไม่ได้ส่งเวลามา
+                open_time || '18:00',
+                draw_time || '17:30',
                 is_sales_open ? '1' : '0', 
                 is_auto_draw ? '1' : '0', 
-                parseInt(auto_draw_percent) || 50
+                finalPercent // 🌟 ใช้ค่าที่ตรวจสอบแล้ว (0 ก็คือ 0)
             ]
         );
             
@@ -2749,7 +2754,6 @@ app.post('/api/admin/settings', async (req, res) => {
         res.status(500).json({ success: false, message: 'บันทึกไม่สำเร็จ' }); 
     }
 });
-
 
 // ==========================================
 // 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว  viet
