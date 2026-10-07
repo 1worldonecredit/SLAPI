@@ -3558,7 +3558,7 @@ app.get('/api/admin/thai-lottery/winners/:round_id', async (req, res) => {
     }
 });
 // ==========================================
-// 🌟 [ใหม่] API: ยืนยันการโอนเงินเข้า Wallet เฉพาะรายการที่ Admin เลือก (Checkbox)
+// 🌟 API: ยืนยันการโอนเงินเข้า Wallet เฉพาะรายการที่ Admin เลือก (ปรับปรุงชื่อตารางเป็น yeeki_order_items)
 // ==========================================
 app.post('/api/admin/thai-lottery/process-payouts', async (req, res) => {
     const { order_item_ids, round_id } = req.body;
@@ -3569,44 +3569,54 @@ app.post('/api/admin/thai-lottery/process-payouts', async (req, res) => {
     const client = await pgPool.connect();
     try {
         await client.query('BEGIN');
+        
+        let processedCount = 0; 
 
         for (const itemId of order_item_ids) {
-            // 1. ดึงข้อมูลของบิลนี้ (แก้ไขตารางจาก Yeeki เป็น Lottery ให้ถูกต้อง)
+            // 1. ดึงข้อมูลของบิลนี้ (เปลี่ยนตารางเป็น yeeki_order_items และ yeeki_orders) + ใส่ FOR UPDATE
             const itemRes = await client.query(`
                 SELECT oi.prize_amount, o.user_id, oi.status
-                FROM Lottery_Order_Items oi
-                JOIN Lottery_Orders o ON oi.order_id = o.order_id
+                FROM yeeki_order_items oi
+                JOIN yeeki_orders o ON oi.order_id = o.order_id
                 WHERE oi.item_id = $1 AND (oi.status = 'ชนะ' OR oi.status = 'Win')
+                FOR UPDATE
             `, [itemId]);
 
             if (itemRes.rows.length > 0) {
                 const { prize_amount, user_id } = itemRes.rows[0];
 
-                // 2. เติมเงินเข้า Wallet (อัปเดตยอดเงินจริงๆ เข้าตาราง users)
-                // หมายเหตุ: หากระบบคุณอิงยอดเงินจากตาราง wallets เป็นหลัก ให้เปลี่ยนคำว่า users เป็น wallets และ wallet_balance เป็น balance
+                // 2. เติมเงินเข้า Wallet (อัปเดตยอดเงินในตาราง users)
                 await client.query(`
                     UPDATE users 
                     SET wallet_balance = COALESCE(wallet_balance, 0) + $1 
                     WHERE user_id = $2
                 `, [prize_amount, user_id]);
                 
-                // 3. บันทึกประวัติ Transaction (เพิ่มการจัดการโซนเวลาให้เป็น Asia/Bangkok โดยเฉพาะ)
+                // 3. บันทึกประวัติ Transaction
                 await client.query(`
                     INSERT INTO Transactions (user_id, transaction_type, title, amount, status, created_at)
                     VALUES ($1, 'Reward', 'ถูกรางวัลหวยไทย', $2, 'Completed', CURRENT_TIMESTAMP AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Bangkok')
                 `, [user_id, prize_amount]);
 
-                // 4. เปลี่ยนสถานะบิลเป็น Paid (จ่ายแล้ว)
+                // 4. เปลี่ยนสถานะบิลเป็น Paid (จ่ายแล้ว) ในตาราง yeeki_order_items
                 await client.query(`
-                    UPDATE Lottery_Order_Items 
+                    UPDATE yeeki_order_items 
                     SET status = 'Paid' 
                     WHERE item_id = $1
                 `, [itemId]);
+                
+                processedCount++; 
             }
         }
         
         await client.query('COMMIT');
-        res.json({ success: true, message: 'โอนเงินสำเร็จ' });
+        
+        if (processedCount === 0) {
+            return res.json({ success: false, message: 'ไม่มีรายการที่ถูกโอน (รายการนี้อาจถูกระบบอัตโนมัติโอนไปแล้ว หรือสถานะไม่ใช่ Win)' });
+        }
+
+        res.json({ success: true, message: `โอนเงินสำเร็จจำนวน ${processedCount} รายการ` });
+        
     } catch (err) {
         await client.query('ROLLBACK');
         console.error("Error processing payouts:", err);
