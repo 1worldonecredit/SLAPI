@@ -9005,39 +9005,6 @@ app.get('/api/admin/p2p-detail/:requestId', async (req, res) => {
 
 
 
-// 🌟 ตัวแปรจำลองเก็บรหัส OTP ชั่วคราว (ถ้าใช้จริงอาจจะเก็บลง Database)
-const otpStore = new Map();
-
-// แก้ใน API 1: /api/auth/check-forgot-user
-app.post('/api/auth/check-forgot-user', async (req, res) => {
-    const { username } = req.body; // รับค่า username มา (ซึ่งมันคือเบอร์โทร)
-    try {
-        const userRes = await pgPool.query('SELECT username FROM Users WHERE username = $1', [username]);
-        if (userRes.rows.length === 0) {
-            return res.status(400).json({ success: false, message: 'ไม่พบชื่อผู้ใช้นี้ในระบบ' });
-        }
-        
-        const phone = userRes.rows[0].username; // ใช้ username เป็นเบอร์โทรเลย
-        let maskedPhone = '';
-        
-        if (phone && phone.length >= 8) {
-            maskedPhone = phone.substring(0, 3) + 'XXXX' + phone.substring(phone.length - 3);
-        }
-        
-        res.json({ success: true, maskedPhone });
-    } catch (error) { ... }
-});
-
-// แก้ใน API 2: /api/auth/send-forgot-otp
-app.post('/api/auth/send-forgot-otp', async (req, res) => {
-    const { username, phone } = req.body; 
-    // เช็คว่า phone ที่กรอกยืนยัน ตรงกับ username ไหม
-    if (username !== phone) {
-         return res.status(400).json({ success: false, message: 'เบอร์โทรศัพท์ไม่ถูกต้อง' });
-    }
-    // ... ลอจิกส่ง OTP เหมือนเดิม ...
-});
-
 // ==========================================
 // 🌟 API 3: ยืนยัน OTP และเปลี่ยนรหัสผ่านใหม่
 // ==========================================
