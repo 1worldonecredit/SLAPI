@@ -1330,6 +1330,29 @@ app.put('/api/admin/animal-numbers/:id', async (req, res) => {
 });
 
 // ==========================================
+// 🌟 API: ดึงรายละเอียดบิล (รายการตัวเลขที่ซื้อ)
+// ==========================================
+app.get('/api/lottery/order-details/:order_id', async (req, res) => {
+    try {
+        const { order_id } = req.params;
+        
+        // ดึงรายการตัวเลขจากตาราง yeeki_order_items (หรือเปลี่ยนชื่อตารางให้ตรงกับ DB ของคุณ)
+        const itemsRes = await pgPool.query(
+            `SELECT * FROM yeeki_order_items WHERE order_id = $1`, 
+            [order_id]
+        );
+
+        res.status(200).json({ 
+            success: true, 
+            data: itemsRes.rows 
+        });
+    } catch (error) {
+        console.error("Fetch Order Details Error:", error);
+        res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการดึงข้อมูลบิล' });
+    }
+});
+
+// ==========================================
 // 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
 // 🌟 API: สำหรับการซื้อหวย (ตัดเงิน/คำนวณวัน/จ่ายค่าคอม/แสตมป์ชื่อลูกทีม)
 // ==========================================
