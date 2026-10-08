@@ -5,7 +5,6 @@ const cors = require('cors');
 const { Pool } = require('pg'); // <-- ต้องมีแค่บรรทัดเดียวในไฟล์
 const cron = require('node-cron');
 const bcrypt = require('bcrypt');
-
 const app = express();
 
 // ขยายขีดจำกัดให้รองรับรูปภาพสลิป
@@ -9004,7 +9003,7 @@ app.get('/api/admin/p2p-detail/:requestId', async (req, res) => {
 });
 
 
-const bcrypt = require('bcrypt'); // ต้องมีการ import bcrypt ไว้บนสุดของไฟล์ด้วยนะครับถ้ายังไม่มี
+
 
 // 🌟 ตัวแปรจำลองเก็บรหัส OTP ชั่วคราว (ถ้าใช้จริงอาจจะเก็บลง Database)
 const otpStore = new Map();
