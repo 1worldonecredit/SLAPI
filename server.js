@@ -1328,17 +1328,16 @@ app.put('/api/admin/animal-numbers/:id', async (req, res) => {
         res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการ UPDATE Database', error: error.message });
     }
 });
-
 // ==========================================
-// 🌟 API: ดึงรายละเอียดบิล (รายการตัวเลขที่ซื้อ)
+// 🌟 API: ดึงรายละเอียดบิล (รายการตัวเลขที่ซื้อ) แบบอัปเดตชื่อตารางใหม่
 // ==========================================
 app.get('/api/lottery/order-details/:order_id', async (req, res) => {
     try {
         const { order_id } = req.params;
         
-        // ดึงรายการตัวเลขจากตาราง yeeki_order_items (หรือเปลี่ยนชื่อตารางให้ตรงกับ DB ของคุณ)
+        // 🌟 แก้ไขจุดนี้: เปลี่ยนชื่อตารางเป็น Lottery_Order_Items ตามที่ระบบบันทึกจริง
         const itemsRes = await pgPool.query(
-            `SELECT * FROM yeeki_order_items WHERE order_id = $1`, 
+            `SELECT * FROM Lottery_Order_Items WHERE order_id = $1`, 
             [order_id]
         );
 
