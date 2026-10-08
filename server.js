@@ -8300,11 +8300,11 @@ app.get('/api/lottery-results/viet', async (req, res) => {
         const resultRes = await pgPool.query(`SELECT * FROM draw_results ORDER BY draw_date DESC LIMIT 50`);
         const data = resultRes.rows.map(row => {
             
-            // 🌟 เปลี่ยนชื่อคอลัมน์ให้ตรงกับ Database จริง (prize_8, prize_6, prize_2)
-            const rawMain = row.prize_8 || row.prize_6 || ''; 
-            const r2b = row.prize_2 || '--';
+            // 🌟 แก้ไขตรงนี้: เปลี่ยนจากการดึง prize_8 เป็นดึงจาก prize_1 (รางวัลที่ 1)
+            const rawMain = row.prize_1 || row.prize_6 || ''; 
+            const r2b = row.prize_2 || '--'; // ดึง 2 ตัวล่างจาก prize_2 ถูกต้องแล้ว
 
-            // 🌟 ให้ระบบหั่นเลขจากตัวดิบ (ถ้าเจอ 8 ตัว จะโดนหั่นเหลือ 6, 4, 3, 2 อัตโนมัติ)
+            // 🌟 ให้ระบบหั่นเลขจากตัวดิบ 6 ตัว เป็น 4, 3, 2 บน อัตโนมัติ
             let r6 = '--', r4 = '--', r3 = '--', r2t = '--';
             
             if (rawMain) {
@@ -8326,7 +8326,7 @@ app.get('/api/lottery-results/viet', async (req, res) => {
                 result_6: r6, 
                 result_4: r4,   
                 result_3_top: r3,
-                result_3_tod: r3 !== '--' ? r3.split('').sort().join('') : '--',               
+                result_3_tod: r3 !== '--' ? r3.split('').sort().join('') : '--',              
                 result_2_top: r2t,       
                 result_2_bottom: r2b,            
                 run_top: r3 !== '--' ? Array.from(new Set(r3.split(''))).join(', ') : '--',            
