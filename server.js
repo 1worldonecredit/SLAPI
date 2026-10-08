@@ -4,6 +4,7 @@ const jwt = require('jsonwebtoken');
 const cors = require('cors');
 const { Pool } = require('pg'); // <-- ต้องมีแค่บรรทัดเดียวในไฟล์
 const cron = require('node-cron');
+const bcrypt = require('bcrypt');
 
 const app = express();
 
@@ -9000,6 +9001,102 @@ app.get('/api/admin/p2p-detail/:requestId', async (req, res) => {
     if (result.rows.length === 0) return res.status(404).json({ error: 'Not found' });
     res.json(result.rows[0]);
   } catch (error) { res.status(500).json({ error: 'Server error' }); }
+});
+
+
+const bcrypt = require('bcrypt'); // ต้องมีการ import bcrypt ไว้บนสุดของไฟล์ด้วยนะครับถ้ายังไม่มี
+
+// 🌟 ตัวแปรจำลองเก็บรหัส OTP ชั่วคราว (ถ้าใช้จริงอาจจะเก็บลง Database)
+const otpStore = new Map();
+
+// ==========================================
+// 🌟 API 1: เช็ค Username ว่ามีไหม
+// ==========================================
+app.post('/api/auth/check-forgot-user', async (req, res) => {
+    const { username } = req.body;
+    try {
+        const userRes = await pgPool.query('SELECT phone FROM Users WHERE username = $1', [username]);
+        if (userRes.rows.length === 0) {
+            return res.status(400).json({ success: false, message: 'ไม่พบชื่อผู้ใช้นี้ในระบบ' });
+        }
+        
+        const phone = userRes.rows[0].phone;
+        let maskedPhone = '';
+        
+        if (phone && phone.length >= 8) {
+            // เซ็นเซอร์เบอร์โทร โชว์แค่ 3 ตัวแรก และ 3 ตัวท้าย เช่น 081XXXX999
+            maskedPhone = phone.substring(0, 3) + 'XXXX' + phone.substring(phone.length - 3);
+        } else {
+            maskedPhone = 'ไม่พบเบอร์โทรศัพท์ในระบบ (โปรดติดต่อแอดมิน)';
+        }
+        
+        res.json({ success: true, maskedPhone });
+    } catch (error) {
+        console.error("Check User Error:", error);
+        res.status(500).json({ success: false, message: 'Server error' });
+    }
+});
+
+// ==========================================
+// 🌟 API 2: ตรวจสอบเบอร์เต็มๆ และส่ง SMS OTP
+// ==========================================
+app.post('/api/auth/send-forgot-otp', async (req, res) => {
+    const { username, phone } = req.body;
+    try {
+        const userRes = await pgPool.query('SELECT phone FROM Users WHERE username = $1', [username]);
+        if (userRes.rows.length === 0 || userRes.rows[0].phone !== phone) {
+            return res.status(400).json({ success: false, message: 'เบอร์โทรศัพท์ไม่ถูกต้อง' });
+        }
+        
+        // สร้าง OTP 6 หลัก และ Ref Code
+        const otp = Math.floor(100000 + Math.random() * 900000).toString();
+        const refCode = Math.random().toString(36).substring(2, 6).toUpperCase();
+        
+        // เก็บ OTP ไว้ตรวจสอบ (หมดอายุใน 5 นาที)
+        otpStore.set(username, { otp, expires: Date.now() + 5 * 60000 }); 
+
+        // 🌟 ตรงนี้คือจุดที่คุณต้องเอา API ของ Movider SMS มาต่อเพื่อยิงข้อความจริง
+        // ตัวอย่าง: await sendMoviderSMS(phone, `SALAPI: รหัส OTP ของคุณคือ ${otp} (Ref: ${refCode})`);
+        console.log(`[MOCK SMS] ส่ง OTP: ${otp} (Ref: ${refCode}) ไปที่เบอร์: ${phone}`);
+
+        res.json({ success: true, refCode, message: 'ส่ง OTP สำเร็จ' });
+    } catch (error) {
+        console.error("Send OTP Error:", error);
+        res.status(500).json({ success: false, message: 'Server error' });
+    }
+});
+
+// ==========================================
+// 🌟 API 3: ยืนยัน OTP และเปลี่ยนรหัสผ่านใหม่
+// ==========================================
+app.post('/api/auth/reset-password', async (req, res) => {
+    const { username, otp, newPassword } = req.body;
+    try {
+        // 1. ตรวจสอบว่า OTP ตรงไหม
+        const storedOtpData = otpStore.get(username);
+        
+        if (!storedOtpData) return res.status(400).json({ success: false, message: 'ไม่พบคำขอ OTP โปรดทำรายการใหม่' });
+        if (Date.now() > storedOtpData.expires) {
+            otpStore.delete(username);
+            return res.status(400).json({ success: false, message: 'รหัส OTP หมดอายุแล้ว' });
+        }
+        if (storedOtpData.otp !== otp) return res.status(400).json({ success: false, message: 'รหัส OTP ไม่ถูกต้อง' });
+
+        // 2. ถ้า OTP ถูก ต้อง เข้ารหัส (Hash) รหัสผ่านใหม่
+        const hashedPassword = await bcrypt.hash(newPassword, 10);
+        
+        // 3. บันทึกลง Database
+        // 🌟 แก้ไข: เปลี่ยนชื่อคอลัมน์เป็น password_hash ให้ตรงกับใน Database
+        await pgPool.query('UPDATE Users SET password_hash = $1 WHERE username = $2', [hashedPassword, username]);
+        
+        // 4. เคลียร์ OTP ทิ้ง เพื่อความปลอดภัย
+        otpStore.delete(username); 
+        
+        res.json({ success: true, message: 'เปลี่ยนรหัสผ่านสำเร็จ' });
+    } catch (error) {
+        console.error("Reset Password Error:", error);
+        res.status(500).json({ success: false, message: 'Server error' });
+    }
 });
 // ==========================================
 // 🚀 Start Server
