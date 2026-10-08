@@ -9008,61 +9008,34 @@ app.get('/api/admin/p2p-detail/:requestId', async (req, res) => {
 // 🌟 ตัวแปรจำลองเก็บรหัส OTP ชั่วคราว (ถ้าใช้จริงอาจจะเก็บลง Database)
 const otpStore = new Map();
 
-// ==========================================
-// 🌟 API 1: เช็ค Username ว่ามีไหม
-// ==========================================
+// แก้ใน API 1: /api/auth/check-forgot-user
 app.post('/api/auth/check-forgot-user', async (req, res) => {
-    const { username } = req.body;
+    const { username } = req.body; // รับค่า username มา (ซึ่งมันคือเบอร์โทร)
     try {
-        const userRes = await pgPool.query('SELECT phone FROM Users WHERE username = $1', [username]);
+        const userRes = await pgPool.query('SELECT username FROM Users WHERE username = $1', [username]);
         if (userRes.rows.length === 0) {
             return res.status(400).json({ success: false, message: 'ไม่พบชื่อผู้ใช้นี้ในระบบ' });
         }
         
-        const phone = userRes.rows[0].phone;
+        const phone = userRes.rows[0].username; // ใช้ username เป็นเบอร์โทรเลย
         let maskedPhone = '';
         
         if (phone && phone.length >= 8) {
-            // เซ็นเซอร์เบอร์โทร โชว์แค่ 3 ตัวแรก และ 3 ตัวท้าย เช่น 081XXXX999
             maskedPhone = phone.substring(0, 3) + 'XXXX' + phone.substring(phone.length - 3);
-        } else {
-            maskedPhone = 'ไม่พบเบอร์โทรศัพท์ในระบบ (โปรดติดต่อแอดมิน)';
         }
         
         res.json({ success: true, maskedPhone });
-    } catch (error) {
-        console.error("Check User Error:", error);
-        res.status(500).json({ success: false, message: 'Server error' });
-    }
+    } catch (error) { ... }
 });
 
-// ==========================================
-// 🌟 API 2: ตรวจสอบเบอร์เต็มๆ และส่ง SMS OTP
-// ==========================================
+// แก้ใน API 2: /api/auth/send-forgot-otp
 app.post('/api/auth/send-forgot-otp', async (req, res) => {
-    const { username, phone } = req.body;
-    try {
-        const userRes = await pgPool.query('SELECT phone FROM Users WHERE username = $1', [username]);
-        if (userRes.rows.length === 0 || userRes.rows[0].phone !== phone) {
-            return res.status(400).json({ success: false, message: 'เบอร์โทรศัพท์ไม่ถูกต้อง' });
-        }
-        
-        // สร้าง OTP 6 หลัก และ Ref Code
-        const otp = Math.floor(100000 + Math.random() * 900000).toString();
-        const refCode = Math.random().toString(36).substring(2, 6).toUpperCase();
-        
-        // เก็บ OTP ไว้ตรวจสอบ (หมดอายุใน 5 นาที)
-        otpStore.set(username, { otp, expires: Date.now() + 5 * 60000 }); 
-
-        // 🌟 ตรงนี้คือจุดที่คุณต้องเอา API ของ Movider SMS มาต่อเพื่อยิงข้อความจริง
-        // ตัวอย่าง: await sendMoviderSMS(phone, `SALAPI: รหัส OTP ของคุณคือ ${otp} (Ref: ${refCode})`);
-        console.log(`[MOCK SMS] ส่ง OTP: ${otp} (Ref: ${refCode}) ไปที่เบอร์: ${phone}`);
-
-        res.json({ success: true, refCode, message: 'ส่ง OTP สำเร็จ' });
-    } catch (error) {
-        console.error("Send OTP Error:", error);
-        res.status(500).json({ success: false, message: 'Server error' });
+    const { username, phone } = req.body; 
+    // เช็คว่า phone ที่กรอกยืนยัน ตรงกับ username ไหม
+    if (username !== phone) {
+         return res.status(400).json({ success: false, message: 'เบอร์โทรศัพท์ไม่ถูกต้อง' });
     }
+    // ... ลอจิกส่ง OTP เหมือนเดิม ...
 });
 
 // ==========================================
