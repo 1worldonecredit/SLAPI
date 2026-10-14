@@ -5620,25 +5620,25 @@ app.get('/api/admin/yeeki-draw-history', async (req, res) => {
 });
 
 // ==========================================
-// 🌟 ย้ายไป database ใหม่ และแก้ไขแล้ว
-// 🌟 API ประกาศผลและตรวจรางวัล (Execute Draw) (มีซ้ำกันกับชุดแรก เอาตามโค้ดต้นฉบับล่าสุดนี้)
+// 🌟 API ประกาศผลและตรวจรางวัล (Execute Draw) - อัปเดตแก้บั๊กเลขคนละชุด
 // ==========================================
 app.post('/api/admin/execute-yeeki-draw', async (req, res) => {
-    // 💡 เปลี่ยนมารับค่า top_6
-    const { round_id, super_number, top_6 } = req.body;
-    const client = await pgPool.connect(); // ใช้ Transaction
+    // 💡 1. รับค่าให้ตรงกับที่หน้าเว็บส่งมาเป๊ะๆ (รับ top_6 และ bottom_2)
+    const { round_id, top_6, bottom_2 } = req.body;
+    const client = await pgPool.connect(); 
     
     try {
         await client.query('BEGIN');
 
         try {
-            // 💡 แตกเลข
-            const top_4 = top_6.slice(-4);
-            const top_3 = top_6.slice(-3);
-            const top_2 = top_6.slice(-2);
-            const bottom_2 = top_6.slice(2, 4);
+            // 💡 2. แตกเลข 6 ตัว เป็น 4 ตัว, 3 ตัวบน, 2 ตัวบน ให้ตรงตามหลักการ
+            // สมมติถ้า top_6 คือ "123456"
+            const top_4 = top_6.slice(-4); // จะได้ "3456"
+            const top_3 = top_6.slice(-3); // จะได้ "456"
+            const top_2 = top_6.slice(-2); // จะได้ "56"
+            // ส่วน bottom_2 รับตรงๆ มาจากหน้าเว็บเลย ไม่ต้องไปหั่นจาก top_6 แล้ว
 
-            // 1. อัปเดตผลรางวัลลงตาราง
+            // 💡 3. อัปเดตผลรางวัลลงตาราง (แอบเก็บเลข 6 ตัว ไว้ในช่อง result_8_super)
             await client.query(`
                 UPDATE Yeeki_Rounds 
                 SET result_8_super = $1, 
@@ -5647,7 +5647,7 @@ app.post('/api/admin/execute-yeeki-draw', async (req, res) => {
                     result_2_bottom = $4,
                     status = 'Completed' 
                 WHERE round_id = $5
-            `, [super_number, top_4, top_3, bottom_2, round_id]);
+            `, [top_6, top_4, top_3, bottom_2, round_id]);
 
             const ratesReq = await client.query(`SELECT lottery_type, multiplier FROM Yeeki_Prize_Rates`);
             const prizeRates = {};
@@ -5667,9 +5667,8 @@ app.post('/api/admin/execute-yeeki-draw', async (req, res) => {
                 const type = item.lottery_type;
                 const num = item.selected_number;
 
-                // 💡 เงื่อนไขการตรวจของจริง
-                if (type === '8 ตัว (Super)' && num === super_number) isWin = true;
-                else if (type === '6 ตัว' && num === top_6) isWin = true;
+                // 💡 4. เงื่อนไขการตรวจรางวัลตามเลขที่หั่นมาอย่างถูกต้อง
+                if (type === '6 ตัว' && num === top_6) isWin = true;
                 else if (type === '4 ตัวท้าย' && num === top_4) isWin = true;
                 else if (type === '3 ตัวบน' && num === top_3) isWin = true;
                 else if (type === '3 ตัวโต๊ด') {
