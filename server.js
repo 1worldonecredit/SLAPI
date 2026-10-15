@@ -8673,16 +8673,14 @@ app.get('/api/admin/roles', async (req, res) => {
         res.status(500).json({ success: false, message: 'Server error' });
     }
 });
-
 // 2. ดึงเมนูทั้งหมด และ สิทธิ์ของ Role ที่เลือก
 app.get('/api/admin/permissions/:roleId', async (req, res) => {
     try {
         const { roleId } = req.params;
         
-        // 2.1 ดึงเมนูทั้งหมดจาก system_menus
-        const allMenusRes = await pgPool.query('SELECT id, title, parent_id FROM system_menus ORDER BY sort_order, id');
+        // 🌟 จุดที่แก้ไข: เปลี่ยน id เป็น menu_id ให้ตรงกับ Database ของคุณ
+        const allMenusRes = await pgPool.query('SELECT menu_id as id, title, parent_id FROM system_menus ORDER BY sort_order, menu_id');
         
-        // 2.2 ดึงเมนูที่ role นี้มีสิทธิ์ (จาก role_menus)
         const roleMenusRes = await pgPool.query('SELECT menu_id FROM role_menus WHERE role_id = $1', [roleId]);
         const allowedMenuIds = roleMenusRes.rows.map(row => row.menu_id);
 
