@@ -8656,6 +8656,43 @@ app.post('/api/video/share', async (req, res) => {
     }
 });
 
+// ==========================================
+// 🌟 API ดึงสิทธิ์และเมนูที่อนุญาตตาม Role ของผู้ใช้
+// ==========================================
+app.get('/api/admin/user-permissions', async (req, res) => {
+    try {
+        // 1. รับค่า user_id จาก Header หรือ Token 
+        // (สมมติว่าคุณส่งผ่าน Header ชื่อ 'user-id' มาชั่วคราวก่อน)
+        const userId = req.headers['user-id']; 
+        
+        if (!userId) {
+            return res.status(401).json({ success: false, message: 'Unauthorized: ไม่พบรหัสผู้ใช้งาน' });
+        }
+
+        // 2. ดึง role_id ของผู้ใช้นั้นจากตาราง Users
+        const userRes = await pgPool.query('SELECT role_id FROM Users WHERE user_id = $1', [userId]);
+        
+        if (userRes.rows.length === 0) {
+            return res.status(404).json({ success: false, message: 'ไม่พบข้อมูลผู้ใช้งาน' });
+        }
+        const roleId = userRes.rows[0].role_id;
+
+        // 3. ดึงรายการ Menu ID ที่ Role นี้ได้รับอนุญาตให้เห็น
+        const menusRes = await pgPool.query('SELECT menu_id FROM role_menus WHERE role_id = $1', [roleId]);
+        const allowedMenuIds = menusRes.rows.map(row => row.menu_id);
+
+        // 4. ส่งข้อมูลกลับไปให้หน้าเว็บ
+        res.json({
+            success: true,
+            roleId: roleId,
+            allowedMenus: allowedMenuIds 
+        });
+
+    } catch (error) {
+        console.error("Fetch Permissions Error:", error);
+        res.status(500).json({ success: false, message: 'Server error' });
+    }
+});
 
 // ==========================================
 // 🌟 API สรุปข้อมูลผู้ใช้งาน (ดึงจากฐานข้อมูลจริง)
