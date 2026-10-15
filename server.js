@@ -8656,6 +8656,79 @@ app.post('/api/video/share', async (req, res) => {
     }
 });
 
+
+// ==========================================
+// 🌟 API สำหรับหน้า UserPermissions (กำหนดสิทธิ์การใช้งาน)
+// ==========================================
+
+// 1. ดึงรายการ Role ทั้งหมดไปแสดงใน Dropdown
+app.get('/api/admin/roles', async (req, res) => {
+    try {
+        // ดึง role_id จาก users แล้ว group หรือดึงจากตาราง roles ถ้ามี
+        // สมมติว่ามีตาราง roles (role_id, role_name)
+        const rolesRes = await pgPool.query('SELECT role_id, role_name FROM roles ORDER BY role_id');
+        res.json({ success: true, data: rolesRes.rows });
+    } catch (error) {
+        console.error("Fetch Roles Error:", error);
+        res.status(500).json({ success: false, message: 'Server error' });
+    }
+});
+
+// 2. ดึงเมนูทั้งหมด และ สิทธิ์ของ Role ที่เลือก
+app.get('/api/admin/permissions/:roleId', async (req, res) => {
+    try {
+        const { roleId } = req.params;
+        
+        // 2.1 ดึงเมนูทั้งหมดจาก system_menus
+        const allMenusRes = await pgPool.query('SELECT id, title, parent_id FROM system_menus ORDER BY sort_order, id');
+        
+        // 2.2 ดึงเมนูที่ role นี้มีสิทธิ์ (จาก role_menus)
+        const roleMenusRes = await pgPool.query('SELECT menu_id FROM role_menus WHERE role_id = $1', [roleId]);
+        const allowedMenuIds = roleMenusRes.rows.map(row => row.menu_id);
+
+        res.json({ 
+            success: true, 
+            allMenus: allMenusRes.rows,
+            allowedMenuIds: allowedMenuIds
+        });
+    } catch (error) {
+        console.error("Fetch Role Permissions Error:", error);
+        res.status(500).json({ success: false, message: 'Server error' });
+    }
+});
+
+// 3. บันทึกสิทธิ์ลงฐานข้อมูล
+app.post('/api/admin/permissions', async (req, res) => {
+    const client = await pgPool.connect(); // ใช้ Transaction
+    try {
+        const { roleId, menuIds } = req.body;
+        
+        if (!roleId) return res.status(400).json({ success: false, message: 'Missing roleId' });
+
+        await client.query('BEGIN');
+        
+        // ลบสิทธิ์เก่าของ Role นี้ออกทั้งหมดก่อน
+        await client.query('DELETE FROM role_menus WHERE role_id = $1', [roleId]);
+        
+        // Insert สิทธิ์ใหม่ที่เลือกลงไป
+        if (menuIds && menuIds.length > 0) {
+            for (let menuId of menuIds) {
+                await client.query('INSERT INTO role_menus (role_id, menu_id) VALUES ($1, $2)', [roleId, menuId]);
+            }
+        }
+        
+        await client.query('COMMIT');
+        res.json({ success: true, message: 'บันทึกสิทธิ์เรียบร้อยแล้ว' });
+    } catch (error) {
+        await client.query('ROLLBACK');
+        console.error("Save Permissions Error:", error);
+        res.status(500).json({ success: false, message: 'Server error' });
+    } finally {
+        client.release();
+    }
+});
+
+
 // ==========================================
 // 🌟 API ดึงสิทธิ์และเมนูที่อนุญาตตาม Role ของผู้ใช้
 // ==========================================
