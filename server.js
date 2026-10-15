@@ -8658,23 +8658,43 @@ app.post('/api/video/share', async (req, res) => {
 
 
 // ==========================================
-// 🚀 1. API: ข้อมูลผู้ใช้งานและสกุลเงิน over view Dashboard เริ่ม
+// 🌟 API สรุปข้อมูลผู้ใช้งาน (ดึงจากฐานข้อมูลจริง)
 // ==========================================
 app.get('/api/admin/dashboard/users-summary', async (req, res) => {
     try {
-        // ตัวอย่าง SQL: ประยุกต์ใช้กับตาราง users และ wallets ของคุณวิทยา
-        // const result = await pgPool.query(`SELECT currency, COUNT(id) as count FROM users GROUP BY currency`);
+        // 1. นับจำนวนผู้ใช้ทั้งหมด (รวมแอดมิน)
+        const totalRes = await pgPool.query('SELECT COUNT(*) as total FROM Users');
+        const totalUsers = parseInt(totalRes.rows[0].total) || 0;
+
+        // 2. นับแยกตามสกุลเงิน โดยเชื่อมตาราง Users กับ Wallets 
+        // (สมมติว่าคุณเก็บสกุลเงินไว้ในตาราง Wallets หรือถ้าเก็บใน Users เลยก็เปลี่ยนคำสั่ง SQL ได้ครับ)
+        const currencyRes = await pgPool.query(`
+            SELECT currency, COUNT(*) as count 
+            FROM Wallets 
+            GROUP BY currency
+        `);
         
-        // ข้อมูลจำลอง (Mock Data) สำหรับให้ UI นำไปแสดงผลก่อนต่อ DB จริง
-        res.json({
-            success: true,
-            data: {
-                totalUsers: 1250,
-                currencies: { THB: 850, LAK: 350, USD: 50 }
+        // จัดรูปแบบให้ออกมาเป็น { THB: X, LAK: Y, USD: Z }
+        const currencies = { THB: 0, LAK: 0, USD: 0 };
+        currencyRes.rows.forEach(row => {
+            const curr = row.currency ? row.currency.toUpperCase() : 'THB'; // ถ้าไม่มีให้เป็น THB
+            if (currencies[curr] !== undefined) {
+                currencies[curr] = parseInt(row.count);
+            } else {
+                currencies[curr] = parseInt(row.count);
             }
         });
-    } catch (error) {
-        res.status(500).json({ success: false, message: error.message });
+
+        res.json({ 
+            success: true, 
+            data: {
+                totalUsers: totalUsers,
+                currencies: currencies
+            } 
+        });
+    } catch (err) {
+        console.error("Dashboard Users Error:", err);
+        res.status(500).json({ success: false, message: "Database error" });
     }
 });
 
