@@ -3579,6 +3579,7 @@ app.get('/api/admin/thai-lottery/winners/:round_id', async (req, res) => {
         res.status(500).json({ success: false, message: err.message });
     }
 });
+
 // ==========================================
 // 🌟 API: ยืนยันการโอนเงินเข้า Wallet เฉพาะรายการที่ Admin เลือก (ปรับปรุงชื่อตารางเป็น yeeki_order_items)
 // ==========================================
@@ -3607,11 +3608,11 @@ app.post('/api/admin/thai-lottery/process-payouts', async (req, res) => {
             if (itemRes.rows.length > 0) {
                 const { prize_amount, user_id } = itemRes.rows[0];
 
-                // 2. เติมเงินเข้า Wallet (อัปเดตยอดเงินในตาราง users)
+                // 2. เติมเงินเข้า Wallet (อัปเดตยอดเงินในตาราง Wallets)
                 await client.query(`
-                    UPDATE users 
-                    SET wallet_balance = COALESCE(wallet_balance, 0) + $1 
-                    WHERE user_id = $2
+                 UPDATE Wallets 
+                 SET balance = balance + $1 
+                 WHERE user_id = $2
                 `, [prize_amount, user_id]);
                 
                 // 3. บันทึกประวัติ Transaction
