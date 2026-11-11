@@ -9168,6 +9168,64 @@ app.post('/api/auth/reset-password', async (req, res) => {
 // ==========================================
 // 🚀 Start Server
 // ==========================================
+
+// 🌟 API แต่งตั้งตำแหน่ง พร้อมตรวจสอบรหัสผ่านชุดที่ 2 (E-Signature)
+app.post('/api/assign-role', async (req, res) => {
+    const { 
+        target_account_id, 
+        position_id, 
+        scope_type, 
+        scope_id, 
+        assigner_account_id, 
+        approval_pin // รับรหัสผ่านชุดที่ 2 มาจาก Frontend
+    } = req.body;
+
+    if (!target_account_id || !assigner_account_id || !approval_pin) {
+        return res.status(400).json({ success: false, message: 'ข้อมูลไม่ครบถ้วน' });
+    }
+
+    try {
+        // 1. ตรวจสอบรหัสผ่านชุดที่ 2 ของผู้แต่งตั้ง (นายอำเภอ)
+        const pinQuery = await pgPool.query('SELECT pin_hash FROM user_e_signatures WHERE account_id = $1', [assigner_account_id]);
+        if (pinQuery.rowCount === 0) {
+            return res.status(401).json({ success: false, message: 'คุณยังไม่ได้ตั้งค่ารหัสผ่านสำหรับอนุมัติ (รหัสชุดที่ 2)' });
+        }
+
+        const isPinValid = await bcrypt.compare(approval_pin, pinQuery.rows[0].pin_hash);
+        if (!isPinValid) {
+            return res.status(401).json({ success: false, message: 'รหัสอนุมัติไม่ถูกต้อง' });
+        }
+
+        // 2. รหัสถูกต้อง เริ่มกระบวนการบันทึก (Transaction)
+        await pgPool.query('BEGIN');
+
+        const insertPositionQuery = `
+            INSERT INTO user_positions (account_id, position_id, scope_type, scope_id, start_date)
+            VALUES ($1, $2, $3, $4, CURRENT_DATE) RETURNING id;
+        `;
+        await pgPool.query(insertPositionQuery, [target_account_id, position_id, scope_type, scope_id]);
+
+        if (scope_type === 'VILLAGE') {
+            await pgPool.query('UPDATE villages SET headman_account_id = $1 WHERE village_id = $2', [target_account_id, scope_id]);
+        }
+
+        await pgPool.query('COMMIT');
+        
+        // ส่งข้อมูลกลับไปให้ Frontend ทำ PDF
+        res.json({ 
+            success: true, 
+            message: 'แต่งตั้งตำแหน่งและประทับตราลายเซ็นอิเล็กทรอนิกส์สำเร็จ',
+            assigned_date: new Date().toISOString()
+        });
+
+    } catch (error) {
+        await pgPool.query('ROLLBACK');
+        console.error('Error assigning role:', error);
+        res.status(500).json({ success: false, message: 'ระบบขัดข้อง' });
+    }
+});
+
+
 app.listen(port, () => {
     console.log(`🚀 Server เปิดทำงานแล้วที่พอร์ต ${port} (Powered by PostgreSQL)`);
 });
